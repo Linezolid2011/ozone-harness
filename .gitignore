@@ -1,0 +1,37 @@
+# --- secrets: never commit ---
+.env
+*.key
+secrets.*
+
+# --- local runtime state: conversation history + memory live here ---
+data/
+# 演示/测试用的独立数据目录（例如 data-m2），同样不入库
+data-*/
+# reset.py 的暂存目录：它先把 data 改名成 data.deleting-<时间戳> 再删。
+# 删不干净时那个目录会留在明处 —— 里面装的正是会话历史和接口 key，绝不能入库。
+data.deleting-*/
+# 手工跑脚本时用临时目录当 HARNESS_DATA_DIR 留下的残留（例如 tmpxxxx）
+tmp*/
+# scripts/ui_check/ 的自检数据目录（它以点开头，上面的 tmp*/ 匹配不到）
+.tmp-ui-check/
+# shot.mjs 的落点（提示词那几张、以及 SHOT_VARIANTS 的对照图）—— 同样以点开头
+.tmp-shots/
+# 测试的临时根（tests/__init__.py 在系统临时目录不可写时会退到这里）
+.tmp-tests/
+# 注意：如果你改了 HARNESS_DATA_DIR 指向别处，记得把它也加到这里 ——
+# 那些目录里同样有会话历史和明文 key。
+runs/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# --- editors / os ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

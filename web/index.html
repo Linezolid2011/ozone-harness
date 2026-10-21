@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 静态字一律走 data-i18n：i18n.js 的 applyStaticTexts() 按当前语言填。
+     标记里的中文同时留着当"JS 还没跑"时的兜底（也是 index.html 自检盯着的那份原文）。 -->
+<title data-i18n="app.title">O₃ᶻᵒⁿᵉ</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><span>O<sub>3</sub></span></div>
+      <div class="brand-text">
+        <!-- 品牌是**静态标记**、不走 data-i18n：它是产品名，两门语言都一样，
+             而且上下角标需要真节点（applyStaticTexts 只会写 textContent，会把它们抹平）。
+             纯文本形态（标签页标题、控制台）用 Unicode 的 O₃ᶻᵒⁿᵉ。 -->
+        <div class="brand-title"><span class="bn-o">O</span><span class="bn-idx">3</span><span class="bn-zone">zone</span></div>
+        <!-- 这行的字由 app.js 的 renderBrandAndHint() 按 /api/config 写，
+             所以不带 data-i18n（带了会被一个与状态无关的常量盖掉）。 -->
+        <div class="brand-sub" id="brand-sub">连接中…</div>
+      </div>
+    </div>
+
+    <button class="new-chat" id="new-chat">
+      <span class="plus">＋</span> <span data-i18n="nav.new_chat">新对话</span>
+    </button>
+
+    <!-- 同上：showChat / showSettings 各自往里写「最近会话 / 会话」 -->
+    <div class="sidebar-label" id="sessions-label">最近会话</div>
+    <div class="session-list" id="session-list"></div>
+
+    <button class="settings-entry" id="settings-entry">
+      <span class="gear">⚙</span> <span data-i18n="nav.settings">设置</span>
+    </button>
+  </aside>
+
+  <main class="main">
+
+    <!-- ── 对话 ─────────────────────────────────────────────── -->
+    <section class="view" id="view-chat">
+      <header class="topbar">
+        <div class="topbar-title" id="chat-title">新对话</div>
+        <div class="topbar-right">
+          <select class="picker" id="pick-model"
+                  data-i18n-title="picker.model_title" title="选择接口与模型"></select>
+          <select class="picker" id="pick-effort"
+                  data-i18n-title="picker.effort_title" title="思考档位"></select>
+          <!-- 两个开关的 label 由 app.js 按状态渲染（「联网搜索：开 / 关」这种），
+               所以标签上不带 data-i18n：带了会被一个与开关状态无关的常量盖掉。
+               title 也一样由 renderWebToggle / renderMultimodalToggle 每次重写。 -->
+          <button class="web-toggle off" id="toggle-web-search"
+                  data-i18n-title="toggle.web.title"
+                  title="这个会话是否允许模型自己联网搜索">
+            <span class="dot"></span><span class="label">联网搜索</span>
+          </button>
+          <!-- 会话级「多模态」开关（契约 §13）：默认开。它决定图片**怎么进请求** ——
+               开 = 图片本身发给模型；关 = 本机 OCR，只把识别出的文字发出去。 -->
+          <button class="web-toggle on" id="toggle-multimodal"
+                  data-i18n-title="toggle.multimodal.title"
+                  title="图片是直接发给模型，还是只发本地识别出的文字">
+            <span class="dot"></span><span class="label">多模态</span>
+          </button>
+          <div class="topbar-meta" id="chat-meta"></div>
+        </div>
+      </header>
+
+      <div class="messages" id="messages">
+        <div class="empty" id="chat-empty">
+          <div class="empty-title" data-i18n="chat.empty_title">开始一段对话</div>
+          <div class="empty-sub" data-i18n="chat.empty_sub">模型会自己决定记住什么。记忆跨会话保留，可以随时整理。</div>
+        </div>
+      </div>
+
+      <!-- 整个 .composer 是拖放区（#composer-drop）：拖到窗口别处不会加附件 -->
+      <div class="composer" id="composer-drop">
+        <div class="composer-attachments hidden" id="composer-attachments"></div>
+        <div class="composer-box">
+          <!-- 隐藏的文件选择器：📎 按钮点它。accept 只是给系统对话框的提示，
+               真正的格式判断在服务端（按文件内容嗅探） -->
+          <input type="file" class="attach-input" id="attach-file" multiple
+                 accept="image/png,image/jpeg,image/webp,image/gif">
+          <button class="btn-attach" id="attach" type="button"
+                  data-i18n-title="attachment.attach_title"
+                  title="添加图片（也可以拖进来，或直接粘贴截图）">📎</button>
+          <textarea id="input" rows="1"
+                    data-i18n-placeholder="chat.input_placeholder"
+                    placeholder="说点什么…（Enter 发送，Shift+Enter 换行，可直接粘贴截图）"></textarea>
+          <div class="composer-actions">
+            <button class="btn-send" id="send" data-i18n="chat.send">发送</button>
+            <button class="btn-stop hidden" id="stop" data-i18n="chat.stop">停止</button>
+          </div>
+        </div>
+        <!-- 契约 §13.7 第 1 句：开关关着**且有待发图片**时才显示。
+             文案由 app.js 填进来（一个常量，只写一处），这里只负责占位。 -->
+        <div class="composer-hint multimodal-hint hidden" id="multimodal-hint"></div>
+        <div class="composer-hint" id="composer-hint"></div>
+        <!-- 这句是**独立**元素：上面那句 composer-hint 被"没有可用接口"用着，
+             两者谁都不该把对方冲掉。字由 app.js 的 syncAttachEntry() 填
+             （同一个 key，busy 时换成另一句），这里留着当兜底。 -->
+        <div class="composer-hint attach-hint" id="attach-hint" data-i18n="static.attach_hint">图片会随请求一并发给模型接口（不是只留在本地）。</div>
+      </div>
+    </section>
+
+    <!-- ── 设置（覆盖整个主区，左下角入口进入）─────────────────── -->
+    <section class="view hidden" id="view-settings">
+      <header class="topbar">
+        <div class="topbar-title" data-i18n="settings.title">设置</div>
+        <div class="topbar-right">
+          <div class="topbar-meta" id="settings-meta"></div>
+          <button class="btn-ghost" id="settings-close" data-i18n="settings.back">返回对话</button>
+        </div>
+      </header>
+
+      <div class="settings-layout">
+        <nav class="settings-nav" id="settings-nav">
+          <button class="settings-nav-item active" data-pane="memory" data-i18n="settings.nav.memory">记忆</button>
+          <button class="settings-nav-item" data-pane="dream" data-i18n="settings.nav.dream">Dream</button>
+          <button class="settings-nav-item" data-pane="usage" data-i18n="settings.nav.usage">用量</button>
+          <button class="settings-nav-item" data-pane="api" data-i18n="settings.nav.api">接口</button>
+          <button class="settings-nav-item" data-pane="tools" data-i18n="settings.nav.tools">工具</button>
+          <!-- 提示词（契约 docs/13-prompts-page.md）：放在「工具」之后、「主题」之前 -->
+          <button class="settings-nav-item" data-pane="prompts" data-i18n="settings.nav.prompts">提示词</button>
+          <!-- 常规：主题 / 语言 / 时区归在一起。放在危险区**前面**：重置是最后一项。 -->
+          <button class="settings-nav-item" data-pane="general" data-i18n="settings.nav.general">常规</button>
+          <button class="settings-nav-item danger" data-pane="reset" data-i18n="settings.nav.reset">重置</button>
+        </nav>
+
+        <div class="settings-body">
+
+          <!-- 记忆 -->
+          <div class="settings-pane" id="pane-memory">
+            <div class="toolbar">
+              <label class="check"><span data-i18n="memory.limit_label">上限</span>
+                <input type="number" id="memory-limit" min="0" max="100" class="num">
+              </label>
+              <button class="btn-ghost" id="memory-limit-save" data-i18n="memory.limit_save">保存上限</button>
+              <span class="pane-meta" id="memory-limit-hint"></span>
+            </div>
+            <div class="pane-note" id="memory-injection-note"></div>
+            <div class="toolbar">
+              <input type="search" id="memory-search"
+                     data-i18n-placeholder="memory.search_placeholder" placeholder="搜索内容 / 分类">
+              <label class="check"><input type="checkbox" id="memory-show-deleted"> <span data-i18n="memory.show_deleted">显示已删除</span></label>
+              <button class="btn-ghost" id="memory-reload" data-i18n="action.refresh">刷新</button>
+              <span class="pane-meta" id="memory-stats"></span>
+            </div>
+            <div class="scroll-area" id="memory-list"></div>
+          </div>
+
+          <!-- Dream：背景档案（vault）+ 整理运行 -->
+          <div class="settings-pane hidden" id="pane-dream">
+            <div class="toolbar">
+              <button class="btn-primary" id="dream-run" data-i18n="dream.run_once">整理一次</button>
+              <label class="check"><span data-i18n="dream.session_limit">会话上限</span>
+                <input type="number" id="dream-limit" value="3" min="1" max="200" class="num">
+              </label>
+              <button class="btn-ghost" id="dream-reload" data-i18n="action.refresh">刷新</button>
+              <span class="pane-meta" id="dream-meta"></span>
+            </div>
+            <div class="dream-note" data-i18n-html="dream.note_1">
+              dream 把会话记录整理成<strong>背景档案</strong>：<code>data/vault/README.md</code>
+              ＋ <code>sections/</code> 段落 ＋ <code>entities/</code> 实体。
+              它<strong>不改写记忆条目</strong>（那是你明确要求记住的那一套）。
+              「整理一次」会真正写档案并推进游标，而且<strong>不可撤销</strong>：
+              整理是单向门，不留快照、没有回滚。
+              <strong>预演已经取消了</strong>（它要真跑一遍模型、照样花钱，给出的却只是"会改什么"的估计）。
+              如果某一轮改坏了，补救的办法是下面「危险区」里的
+              <strong>格式化并初始化 dream</strong>：清空之后重新整理一遍就能再做出来，
+              代价是再花一次整理的钱 —— 但手写的内容不会回来。
+            </div>
+            <div class="dream-progress hidden" id="dream-progress"></div>
+            <div class="dream-note" data-i18n-html="dream.note_2">
+              档案可以直接在这里<strong>新建 / 编辑 / 删除</strong>：
+              左树顶上有「新建档案」，右边每一份的右上角有「编辑 / 删除」。
+              保存时界面会带上"你看着的那一版"的指纹；如果模型在你编辑期间改过它，
+              后端会拒一次并把最新内容摆出来，由你决定放弃还是覆盖。
+              删除 README 会被后端拒绝（它是索引），所以 README 上没有删除按钮。
+            </div>
+            <div class="dream-note" data-i18n-html="dream.note_3">
+              手改<strong>不会自动更新 README 索引与别处的双链</strong> ——
+              结构校验会提示"没有被 README 提到"之类的问题。
+              另外，整理正在运行时不能改档案（后端会直接拒绝），等它跑完再试。
+            </div>
+            <!-- 左边的目录树 + 右边的正文查看器、待整理状态、结构校验、
+                 运行历史，全部由 app.js（renderVaultPane）渲染 -->
+            <div class="scroll-area" id="dream-list"></div>
+          </div>
+
+          <!-- 用量 -->
+          <div class="settings-pane hidden" id="pane-usage">
+            <div class="toolbar">
+              <button class="btn-ghost" id="usage-reload" data-i18n="action.refresh">刷新</button>
+              <span class="pane-meta" id="usage-meta"></span>
+            </div>
+            <div class="scroll-area" id="usage-body"></div>
+          </div>
+
+          <!-- 接口 -->
+          <div class="settings-pane hidden" id="pane-api">
+            <div class="scroll-area" id="api-body"></div>
+          </div>
+
+          <!-- 工具（联网） -->
+          <div class="settings-pane hidden" id="pane-tools">
+            <div class="scroll-area" id="tools-body"></div>
+          </div>
+
+          <!-- 提示词（契约 docs/13-prompts-page.md）：全部提示词 + 全部工具定义。
+               两个子分组（提示词 / 工具）都由 app.js 的 renderPrompts() 画进 #prompts-body。 -->
+          <div class="settings-pane hidden" id="pane-prompts">
+            <div class="scroll-area" id="prompts-body"></div>
+          </div>
+
+          <!-- 常规：主题 / 语言 / 时区，三段由 app.js 的 renderGeneralPane() 依次渲染 -->
+          <div class="settings-pane hidden" id="pane-general">
+            <div class="scroll-area" id="general-body">
+              <div id="theme-body"></div>
+              <div id="language-body"></div>
+              <div id="timezone-body"></div>
+            </div>
+          </div>
+
+          <!-- 重置（危险区） -->
+          <div class="settings-pane hidden" id="pane-reset">
+            <div class="scroll-area" id="reset-body"></div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div class="modal hidden" id="dialog">
+  <div class="modal-card">
+    <div class="modal-title" id="dialog-title"></div>
+    <div class="modal-body" id="dialog-body"></div>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="dialog-cancel" data-i18n="dialog.cancel">取消</button>
+      <button class="btn-danger" id="dialog-confirm" data-i18n="dialog.confirm">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 大图预览（灯箱）：点背景或按 ESC 关闭。刻意不用 window.open ——
+     那会开一个新窗口、丢焦点，而且在无头/受限环境里根本开不出来。 -->
+<div class="lightbox hidden" id="lightbox">
+  <img id="lightbox-img" alt="">
+  <div class="lightbox-caption" id="lightbox-caption"></div>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+<!-- i18n.js 必须在 app.js **之前**：app.js 一开始就要用 t() -->
+<script src="i18n.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,1308 @@
+/* 本地 Harness · Web 界面样式
+   设计取向：干净、低饱和、信息密度适中；跟随系统的深浅色。 */
+
+:root {
+  --bg: #ffffff;
+  --bg-soft: #f6f6f8;
+  --sidebar: #fafafb;
+  --border: #e7e7ec;
+  --border-strong: #d8d8e0;
+  --text: #17171c;
+  --text-soft: #4a4a55;
+  --muted: #8b8b96;
+  --accent: #2f6bff;
+  --accent-soft: #eef3ff;
+  --ok: #159a55;
+  --warn: #b7791f;
+  --err: #d64545;
+  --danger: #d05050;
+  --code: #f3f3f6;
+  --shadow: 0 1px 2px rgba(18, 18, 30, .06), 0 8px 24px rgba(18, 18, 30, .05);
+  --radius: 14px;
+}
+
+/* 深色变量出现两次是没办法的事：一次给"手动选深色"，
+   一次给"跟随系统且没手动选过"。CSS 没法把声明块复用给两个选择器。
+   ⚠ **两个块必须定义同一组变量** —— 它们只能靠人眼对齐，所以就很容易漏。
+   漏掉的后果不是"报错"，而是某一类提示在深色下沿用浅色的值、对比度骤降
+   （`--ok`/`--warn`/`--err` 就这样漏过一轮：深色底下那三个仍是浅色那一套，
+   `--err` 的对比度只有约 3.9:1）。
+   `scripts/ui_check/dom-stub.test.mjs` 里有两条静态断言盯着这件事：
+   除了 `--radius` 这种与配色无关的，`:root` 里定义的颜色变量在两个深色块里都得有；
+   而且**token 块之外不许出现十六进制颜色**（写死的颜色同样不会跟着主题走，
+   这一条连注释里的字面量都算 —— 它拦过我一次）。 */
+:root[data-theme="dark"] {
+  --bg: #17171a;
+  --bg-soft: #1e1e22;
+  --sidebar: #141417;
+  --border: #2b2b31;
+  --border-strong: #3a3a42;
+  --text: #ececf1;
+  --text-soft: #b9b9c4;
+  --muted: #8a8a95;
+  --accent: #6f96ff;
+  --accent-soft: #1d2740;
+  /* 三个状态色：与浅色块同一套语义，但按深底调亮（同一处理方式见 --danger）。
+     用它们做正文/提示文字，对比度分别约 7.6:1 / 8.0:1 / 6.6:1。 */
+  --ok: #3fbf7f;
+  --warn: #d9a441;
+  --err: #f07a7a;
+  --danger: #e06a6a;
+  --code: #232329;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17171a;
+    --bg-soft: #1e1e22;
+    --sidebar: #141417;
+    --border: #2b2b31;
+    --border-strong: #3a3a42;
+    --text: #ececf1;
+    --text-soft: #b9b9c4;
+    --muted: #8a8a95;
+    --accent: #6f96ff;
+    --accent-soft: #1d2740;
+    --ok: #3fbf7f;
+    --warn: #d9a441;
+    --err: #f07a7a;
+    --danger: #e06a6a;
+    --code: #232329;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei",
+        "PingFang SC", "Hiragino Sans GB", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app { display: flex; height: 100%; }
+.hidden { display: none !important; }
+
+/* ── 侧栏 ─────────────────────────────────────────────── */
+
+.sidebar {
+  width: 286px;
+  flex: 0 0 286px;
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 12px 10px;
+  gap: 10px;
+}
+
+.brand { display: flex; align-items: center; gap: 10px; padding: 2px 4px 6px; }
+/* 产品名 O₃ᶻᵒⁿᵉ：用**真节点**画上下角标，而不是 Unicode 上标字（U+1DBB 那种）。
+   原因很实在：上标字母要靠字体回退，不同机器上会变成"三种字体拼起来的怪东西"，
+   而这里只需要三个内联元素 + 两个 `position: relative` —— 只挪视觉位置、不参与排版，
+   行高不会被撑开。纯文本场合（标签页标题、控制台）才用 Unicode 的 O₃ᶻᵒⁿᵉ。 */
+.brand-mark {
+  width: 30px; height: 30px; border-radius: 9px;
+  background: linear-gradient(140deg, var(--accent), #7aa2ff);
+  color: #fff; font-weight: 700; font-size: 15px;
+  display: grid; place-items: center;
+  line-height: 1;
+}
+/* 徽标里是 **O₃** 两个字符（不带 zone）。外面那层 span 是必须的：
+   网格容器的每个直接子节点都会变成独立的网格项，`O<sub>3</sub>` 会被拆成两行
+   （第一版就那样：O 在上、3 掉到下面一行）。 */
+.brand-mark span { white-space: nowrap; }
+.brand-mark sub {
+  font-size: .58em; font-weight: 700; line-height: 1;
+  vertical-align: -.18em; margin-left: .03em;
+}
+.brand-title { font-weight: 680; font-size: 16px; letter-spacing: .005em; line-height: 1; }
+.brand-title .bn-idx,
+.brand-title .bn-zone {
+  font-size: .62em; font-weight: 660; letter-spacing: .02em;
+  position: relative; line-height: 1;
+}
+.brand-title .bn-idx { bottom: -.36em; margin-left: .04em; }
+.brand-title .bn-zone { top: -.56em; margin-left: .08em; }
+.brand-sub { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+
+.new-chat {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; padding: 10px 12px;
+  border: 1px solid var(--border-strong); border-radius: 11px;
+  background: var(--bg); color: var(--text);
+  font-size: 14px; font-weight: 550; cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.new-chat:hover { background: var(--accent-soft); border-color: var(--accent); }
+.new-chat .plus { font-size: 15px; color: var(--accent); }
+
+/* 设置入口固定在左下角 */
+.settings-entry {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid transparent; border-radius: 10px;
+  background: transparent; color: var(--text-soft);
+  font: inherit; font-size: 13.5px; padding: 9px 12px;
+  cursor: pointer; margin-top: 6px; border-top: 1px solid var(--border);
+}
+.settings-entry:hover { background: var(--bg-soft); color: var(--text); }
+.settings-entry.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.settings-entry .gear { font-size: 14px; }
+
+.sidebar-label {
+  font-size: 11px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .06em; padding: 6px 6px 0;
+}
+
+.session-list { flex: 1; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
+
+.theme-option {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--border); border-radius: 11px;
+  padding: 12px 14px; margin-bottom: 9px; cursor: pointer; background: var(--bg);
+}
+.theme-option:hover { border-color: var(--border-strong); }
+.theme-option.active { border-color: var(--accent); background: var(--accent-soft); }
+.theme-option .t-name { font-size: 13.5px; font-weight: 550; }
+.theme-option .t-desc { font-size: 11.5px; color: var(--muted); }
+
+/* ── 语言子页（设置 → 语言，docs/12-i18n.md §5）─────────────
+   两个选项是真 <button>：正在生成回答时要能**真的 disabled** —— 语言是进程级的，
+   中途切会让模型在同一次回答里换一套系统提示（那一句说明挂在 .lang-busy 上）。 */
+.lang-options { display: flex; flex-direction: column; }
+.lang-option { width: 100%; font: inherit; color: var(--text); text-align: left; }
+.lang-option:disabled { cursor: not-allowed; opacity: 0.55; }
+.lang-option:disabled:hover { border-color: var(--border); }
+.lang-busy {
+  margin-top: 2px; padding: 8px 10px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--bg-soft);
+  color: var(--muted); font-size: 11.5px;
+}
+.session {
+  position: relative;
+  padding: 8px 10px; border-radius: 10px; cursor: pointer;
+  border: 1px solid transparent; margin-bottom: 2px;
+}
+.session:hover { background: var(--bg-soft); }
+.session.active { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+.session-title {
+  font-size: 13.5px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; color: var(--text);
+}
+.session-sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+/* 重命名 / 删除：只在悬停或选中时出现，平时不干扰阅读 */
+.session-actions {
+  position: absolute; top: 5px; right: 6px; display: none; gap: 2px;
+}
+.session:hover .session-actions, .session.active .session-actions { display: flex; }
+.session-act {
+  width: 22px; height: 22px; padding: 0; line-height: 1;
+  border-radius: 6px; cursor: pointer; font-size: 12px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+}
+.session-act:hover { border-color: var(--accent); color: var(--accent); }
+.session-act[data-act="delete"]:hover { border-color: var(--danger); color: var(--danger); }
+
+/* ── 主区 ─────────────────────────────────────────────── */
+
+.main { flex: 1; min-width: 0; display: flex; }
+.view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 22px; border-bottom: 1px solid var(--border);
+}
+.topbar-title { font-size: 15px; font-weight: 620; }
+.topbar-meta { font-size: 12px; color: var(--muted); }
+.topbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* 会话内直接切换接口 / 模型 / 思考档位 */
+.picker {
+  border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
+  font: inherit; font-size: 12.5px; border-radius: 8px; padding: 5px 8px;
+  max-width: 280px; cursor: pointer;
+}
+.picker:hover { border-color: var(--accent); }
+.picker:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* 设置面板 */
+.settings-layout { flex: 1; display: flex; min-height: 0; }
+.settings-nav {
+  width: 172px; flex: 0 0 172px; border-right: 1px solid var(--border);
+  padding: 14px 10px; display: flex; flex-direction: column; gap: 3px;
+}
+.settings-nav-item {
+  text-align: left; border: 0; background: transparent; color: var(--text-soft);
+  font: inherit; font-size: 13.5px; padding: 8px 12px; border-radius: 9px; cursor: pointer;
+}
+.settings-nav-item:hover { background: var(--bg-soft); color: var(--text); }
+.settings-nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.settings-body { flex: 1; min-width: 0; display: flex; }
+.settings-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.pane-meta { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+
+/* 设置页里的一句说明（例如"有 N 条记忆因为太长没进上下文"）。
+   空着时不占地方：只在真有话要说的时候由 JS 填内容。 */
+.pane-note { font-size: 12px; color: var(--muted); padding: 4px 2px; }
+.pane-note:empty { display: none; }
+.pane-note.warn { color: var(--warn); }
+
+/* 接口档案卡片 */
+.provider-card {
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 13px 15px; margin-bottom: 11px; background: var(--bg);
+}
+.provider-card.default { border-color: var(--accent); }
+.provider-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 9px; }
+.provider-head .p-label { font-size: 14px; font-weight: 600; }
+.provider-head .p-actions { margin-left: auto; display: flex; gap: 6px; }
+.provider-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 9px; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label { font-size: 11.5px; color: var(--muted); }
+.field input, .field select, .field textarea {
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: 13px;
+  padding: 6px 9px; width: 100%;
+}
+.field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+.field .hint { font-size: 11px; color: var(--muted); }
+.field.wide { grid-column: 1 / -1; }
+
+/* 接口卡片里的模型表格（ADR-092）：一行一个模型 = id + 上下文 + 显示名 + 删除。
+   列宽用比例 + minmax(0,…)：中英文的「上下文上限 / Context」宽度不同，
+   但两者都不该把这一页撑出横向滚动条。输入框的边框与字号沿用上面 `.field input`。 */
+.model-table { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.model-head, .model-row {
+  display: grid; gap: 6px; align-items: center;
+  grid-template-columns: minmax(0, 1.4fr) minmax(96px, 0.6fr) minmax(0, 1.1fr) 28px;
+}
+.model-head { font-size: 11px; color: var(--muted); padding: 0 1px; }
+.model-row .mini { width: 28px; padding: 5px 0; justify-content: center; }
+.model-add { margin-top: 6px; align-self: flex-start; }
+.provider-note { font-size: 11.5px; color: var(--muted); margin-top: 9px; line-height: 1.5; }
+.add-provider {
+  border: 1px dashed var(--border-strong); border-radius: 12px;
+  padding: 13px 15px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 14px; background: var(--bg-soft);
+}
+.add-provider select {
+  border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 9px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: 13px;
+}
+/* 设置 → 常规：主题 / 语言 / 时区三个子区之间的间距 */
+#general-body > div { margin-bottom: 20px; }
+#general-body > div:last-child { margin-bottom: 0; }
+.timezone-select {
+  display: block; width: 100%; max-width: 260px; margin: 4px 0 10px;
+  border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: 13.5px;
+}
+.section-title { font-size: 12px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .06em; margin: 4px 0 9px; }
+
+/* ── 消息 ─────────────────────────────────────────────── */
+
+.messages { flex: 1; overflow-y: auto; padding: 24px 0 8px; }
+.messages-inner, .msg, .empty { max-width: 820px; margin: 0 auto; padding: 0 22px; }
+
+.empty { text-align: center; padding-top: 16vh; }
+.empty-title { font-size: 19px; font-weight: 620; }
+.empty-sub { font-size: 13.5px; color: var(--muted); margin-top: 6px; }
+
+.msg { margin-bottom: 18px; }
+.msg.user { display: flex; justify-content: flex-end; }
+.msg.user .bubble {
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: var(--radius) var(--radius) 4px var(--radius);
+  padding: 10px 14px; max-width: 76%;
+  white-space: pre-wrap; word-break: break-word;
+}
+/* 分叉按钮：挂在用户气泡左侧，hover 才露出来，别抢正文的注意力 */
+.fork-btn {
+  order: -1;
+  align-self: center;
+  margin-right: 8px;
+  padding: 2px 8px;
+  font-size: 11.5px;
+  font-family: inherit;
+  line-height: 1.4;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s;
+}
+.msg.user:hover .fork-btn { opacity: 1; }
+.fork-btn:hover { color: var(--accent); border-color: var(--accent); }
+.msg.assistant .bubble {
+  border-radius: 4px var(--radius) var(--radius) var(--radius);
+  white-space: pre-wrap; word-break: break-word;
+}
+.msg.assistant .bubble p { margin: 0 0 8px; }
+.msg.assistant .bubble p:last-child { margin-bottom: 0; }
+
+/* 行内代码与代码块（前端只做极简富文本） */
+.ic {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: .92em; background: var(--code); padding: 1px 5px; border-radius: 5px;
+}
+.codeblock {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px; background: var(--code); border: 1px solid var(--border);
+  padding: 10px 12px; border-radius: 9px; margin: 8px 0;
+  overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+}
+
+.msg .cursor::after {
+  content: "▍"; color: var(--accent);
+  animation: blink 1s steps(2, start) infinite; margin-left: 1px;
+}
+@keyframes blink { to { visibility: hidden; } }
+
+/* 思考块 */
+.think {
+  border-left: 2px solid var(--border-strong);
+  margin: 0 0 10px; padding: 2px 0 2px 12px;
+  color: var(--muted); font-size: 13px;
+}
+.think-head {
+  cursor: pointer; user-select: none; font-size: 12px;
+  color: var(--muted); display: flex; align-items: center; gap: 6px;
+}
+.think-head:hover { color: var(--text-soft); }
+.think-head .chev { display: inline-block; transition: transform .15s; font-size: 10px; }
+.think:not(.collapsed) .think-head .chev { transform: rotate(90deg); }
+.think-body { white-space: pre-wrap; word-break: break-word; margin-top: 6px; }
+.think.collapsed .think-body { display: none; }
+
+/* 工具调用 */
+.tools { display: flex; flex-direction: column; gap: 5px; margin: 0 0 10px; }
+.tool {
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--bg-soft); font-size: 12.5px; overflow: hidden;
+}
+.tool-head {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 10px; cursor: pointer;
+}
+.tool-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+.tool.ok .tool-dot { background: var(--ok); }
+.tool.fail .tool-dot { background: var(--err); }
+.tool-name { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; color: var(--text-soft); }
+.tool-text { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-detail {
+  border-top: 1px solid var(--border); padding: 7px 10px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11.5px; color: var(--text-soft);
+  white-space: pre-wrap; word-break: break-all; background: var(--code);
+}
+.tool.collapsed .tool-detail { display: none; }
+
+.notice {
+  max-width: 820px; margin: 0 auto 14px; padding: 8px 14px;
+  font-size: 12.5px; color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border-radius: 9px;
+}
+.notice.error { color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); }
+
+.recall {
+  max-width: 820px; margin: 0 auto 12px; padding: 6px 14px;
+  font-size: 12px; color: var(--muted);
+}
+
+.meta {
+  max-width: 820px; margin: 0 auto 18px; padding: 0 22px;
+  font-size: 11.5px; color: var(--muted);
+}
+
+/* 会话级「联网搜索」开关：默认关，状态要一眼看得出来 */.web-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 999px; cursor: pointer;
+  font-size: 12px; font-family: inherit;
+  border: 1px solid var(--border-strong); background: var(--bg); color: var(--muted);
+}
+.web-toggle .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--border-strong); flex: none;
+}
+.web-toggle.on {
+  border-color: var(--accent); color: var(--accent);
+  background: var(--accent-soft);
+}
+.web-toggle.on .dot { background: var(--accent); }
+.web-toggle:disabled { opacity: .45; cursor: not-allowed; }
+/* 契约 §13.5/§13.8：模型没声明支持图片时后端 400 带 need:"vision"，
+   这时把「多模态」按钮闪一下 —— 指给用户"该动的是这一个"。
+   只加一个 class（去掉由 app.js 定时做），所以主题变量照样管用。 */
+.web-toggle.attention {
+  border-color: var(--warn); color: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 28%, transparent);
+}
+.web-toggle.attention .dot { background: var(--warn); }
+
+/* 上下文压缩块 */
+.summary { max-width: 820px; margin: 0 auto 16px; padding: 0 22px; }
+.summary > .summary-head, .summary > .summary-body {
+  border: 1px dashed var(--border-strong); border-radius: 10px;
+  background: var(--bg-soft); padding: 9px 13px;
+}
+.summary-head {
+  display: flex; align-items: center; gap: 7px; cursor: pointer;
+  font-size: 12.5px; color: var(--text-soft);
+}
+.summary-head .chev { display: inline-block; transition: transform .15s; font-size: 10px; }
+.summary:not(.collapsed) .summary-head .chev { transform: rotate(90deg); }
+.summary-note { color: var(--muted); font-size: 11.5px; }
+.summary-body {
+  margin-top: 6px; white-space: pre-wrap; word-break: break-word;
+  font-size: 13px; color: var(--text-soft);
+}
+.summary.collapsed .summary-body { display: none; }
+
+/* ── 重置（危险区）─────────────────────────────────────── */
+
+.settings-nav-item.danger { color: var(--danger, #d05050); }
+.settings-nav-item.danger.active {
+  background: rgba(208, 80, 80, .12); color: var(--danger, #d05050);
+}
+
+.reset-card {
+  border: 1px solid var(--border-strong); border-radius: 12px;
+  padding: 16px 18px; background: var(--bg-soft);
+}
+.reset-lead { margin: 6px 0 14px; font-size: 13.5px; color: var(--text-soft); line-height: 1.65; }
+.reset-table { width: 100%; border-collapse: collapse; margin-bottom: 14px; font-size: 13px; }
+.reset-table td { padding: 7px 0; border-bottom: 1px solid var(--border); }
+.reset-table td:first-child { color: var(--muted); width: 120px; }
+.reset-table td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.reset-note { margin: 0 0 16px; line-height: 1.7; }
+.reset-note code {
+  font-size: 11.5px; background: var(--bg); padding: 1px 5px;
+  border-radius: 4px; border: 1px solid var(--border);
+}
+
+.btn-danger {
+  background: var(--danger, #d05050); color: #fff; border: none;
+  padding: 9px 18px; border-radius: 8px; font-size: 13.5px; cursor: pointer;
+  font-family: inherit;
+}
+.btn-danger:hover:not(:disabled) { filter: brightness(1.08); }
+.btn-danger:disabled { opacity: .5; cursor: default; }
+
+/* ── 模态对话框 ───────────────────────────────────────── */
+
+.modal {
+  position: fixed; inset: 0; z-index: 50; display: flex;
+  align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .38); padding: 24px;
+}
+.modal-card {
+  background: var(--bg); border: 1px solid var(--border-strong);
+  border-radius: 14px; padding: 20px 22px; max-width: 460px; width: 100%;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .28);
+}
+.modal-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+.modal-body { font-size: 13.5px; color: var(--text-soft); line-height: 1.7; }
+.modal-body ul { margin: 8px 0; padding-left: 20px; }
+.modal-body li { margin: 3px 0; }
+.modal-body .danger-text { color: var(--danger, #d05050); font-weight: 500; margin-bottom: 0; }
+.modal-actions {
+  display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px;
+}
+
+/* ── 大图预览（灯箱）─────────────────────────────────────
+   点背景或按 ESC 关闭；不开新窗口（window.open 会丢焦点，受限环境里也开不出来）。 */
+
+.lightbox {
+  position: fixed; inset: 0; z-index: 60; cursor: zoom-out;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 30px; background: rgba(8, 8, 12, .78);
+}
+.lightbox img {
+  max-width: 92vw; max-height: 80vh; border-radius: 10px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .45);
+}
+.lightbox-caption { color: #e9e9f0; font-size: 12.5px; word-break: break-all; }
+
+/* ── 输入区 ───────────────────────────────────────────── */
+
+.composer { padding: 10px 22px 16px; border-top: 1px solid var(--border); }
+.composer-box {
+  max-width: 820px; margin: 0 auto;
+  display: flex; align-items: flex-end; gap: 8px;
+  border: 1px solid var(--border-strong); border-radius: 16px;
+  background: var(--bg); padding: 8px 8px 8px 14px;
+  box-shadow: var(--shadow);
+}
+.composer-box:focus-within { border-color: var(--accent); }
+#input {
+  flex: 1; border: 0; outline: 0; resize: none; background: transparent;
+  color: var(--text); font: inherit; max-height: 190px; padding: 6px 0;
+}
+.composer-actions { display: flex; gap: 6px; }
+.btn-send, .btn-stop {
+  border: 0; border-radius: 11px; padding: 8px 16px;
+  font: inherit; font-size: 13.5px; font-weight: 560; cursor: pointer;
+}
+.btn-send { background: var(--accent); color: #fff; }
+.btn-send:disabled { opacity: .45; cursor: not-allowed; }
+.btn-stop { background: var(--bg-soft); color: var(--text); border: 1px solid var(--border-strong); }
+.composer-hint {
+  max-width: 820px; margin: 7px auto 0; font-size: 11.5px;
+  color: var(--muted); min-height: 15px;
+}
+
+/* 图片附件：待发缩略图条 / 📎 / 拖放高亮 / 灯箱 */
+
+.attach-input { display: none; }
+.btn-attach {
+  flex: 0 0 auto; border: 0; background: transparent; cursor: pointer;
+  font-size: 17px; line-height: 1; padding: 5px 4px; border-radius: 9px;
+  color: var(--text-soft);
+}
+.btn-attach:hover { background: var(--bg-soft); }
+.btn-attach:disabled { opacity: .4; cursor: not-allowed; }
+
+/* 拖放落点只有输入区这一块：高亮也只在它上面亮 */
+.composer.dragover .composer-box {
+  border-color: var(--accent); border-style: dashed;
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.composer-attachments {
+  max-width: 820px; margin: 0 auto 8px;
+  display: flex; flex-wrap: wrap; gap: 9px;
+}
+.attach-item { position: relative; }
+.attach-thumb {
+  display: block; width: 62px; height: 62px; object-fit: cover;
+  border-radius: 10px; border: 1px solid var(--border-strong);
+  background: var(--bg-soft); cursor: zoom-in;
+}
+.attach-thumb:hover { border-color: var(--accent); }
+.attach-remove {
+  position: absolute; top: -6px; right: -6px; padding: 0;
+  width: 18px; height: 18px; border-radius: 50%; line-height: 1; font-size: 11px;
+  border: 1px solid var(--border-strong); background: var(--bg); color: var(--text-soft);
+  cursor: pointer;
+}
+.attach-remove:hover { color: var(--err); border-color: var(--err); }
+
+/* 消息气泡里的缩略图（当轮发的与历史里的用的是同一套节点） */
+.attach-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+.attach-strip .attach-thumb { width: 96px; height: 96px; }
+.attach-strip + .bubble-text { margin-top: 7px; }
+
+.attach-hint { margin-top: 3px; }
+.attach-hint.busy { color: var(--warn); }
+
+/* ── 「多模态」关着时的两句提示（契约 §13.7）──────────────
+   都用现有的 CSS 变量，所以深浅两套主题自动跟上（浅色那套的琥珀在深色块里
+   被调亮过一次；**别在这里写颜色字面量** —— 写死的不会跟着主题走，
+   `scripts/ui_check/dom-stub.test.mjs` 有一条静态断言专门扫这个）。 */
+
+/* 第 1 句：输入框附近常驻，只说给"真的有待发图片"的人听 */
+.multimodal-hint {
+  color: var(--warn); font-weight: 500;
+  border-left: 3px solid var(--warn);
+  padding-left: 9px; margin-top: 7px;
+}
+.multimodal-hint strong { font-weight: 700; }
+
+/* 第 2 句：每张待发缩略图上那一行 —— 窄，所以换行、不撑破条子 */
+.attach-badge {
+  margin-top: 3px; width: 62px; font-size: 10.5px; line-height: 1.25;
+  color: var(--warn); word-break: break-word;
+}
+
+/* 第 3 句：气泡里把模型实际收到的 OCR 文字原样摆出来。
+   默认**折起来**（几张图的识别结果连起来能占满整屏）：折叠的视觉语言照抄
+   上面的压缩摘要块（`.summary.collapsed` + 点标题切换 + `.chev`），不另发明一种。 */
+.ocr-block {
+  margin-top: 7px; padding: 7px 10px;
+  border: 1px dashed var(--border-strong); border-radius: 9px;
+  background: var(--bg-soft);
+}
+.ocr-head {
+  display: flex; align-items: center; gap: 7px; cursor: pointer;
+  font-size: 12.5px; color: var(--text-soft);
+}
+/* 箭头直接换字（▸ / ▾），不像摘要块那样靠旋转 —— 这一处由 app.js 写在 `.chev` 里 */
+.ocr-head .chev { display: inline-block; font-size: 10px; }
+.ocr-label { font-size: 11.5px; color: var(--warn); font-weight: 500; }
+
+/* 折叠时那一行预览：**一行以内，不换行**，超出用省略号（截断也已经在 JS 里做过） */
+.ocr-preview {
+  margin-top: 3px; padding-left: 17px;
+  font-size: 12px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ocr-block.collapsed .ocr-body { display: none; }
+.ocr-block:not(.collapsed) .ocr-preview { display: none; }
+
+.ocr-item { margin-top: 6px; }
+.ocr-item-name { font-size: 11.5px; color: var(--muted); }
+/* OCR 文字是图片里的内容：原样换行显示，不做任何解析 */
+.ocr-text {
+  margin-top: 2px; font-size: 13px; color: var(--text);
+  white-space: pre-wrap; word-break: break-word;
+}
+.ocr-text.empty { color: var(--muted); font-style: italic; }
+.ocr-text.ocr-error { color: var(--err); }
+
+/* ── 工具栏与列表 ─────────────────────────────────────── */
+
+.toolbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 22px; border-bottom: 1px solid var(--border);
+}
+.toolbar input[type="search"] {
+  flex: 1; min-width: 180px; padding: 7px 12px;
+  border: 1px solid var(--border-strong); border-radius: 9px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: 13.5px; outline: 0;
+}
+.toolbar input[type="search"]:focus { border-color: var(--accent); }
+.check { font-size: 12.5px; color: var(--text-soft); display: flex; align-items: center; gap: 5px; }
+.num { width: 62px; padding: 5px 8px; border: 1px solid var(--border-strong);
+       border-radius: 7px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
+.btn-ghost, .btn-primary {
+  border-radius: 9px; padding: 7px 14px; font: inherit; font-size: 13px; cursor: pointer;
+}
+.btn-ghost { background: var(--bg); color: var(--text); border: 1px solid var(--border-strong); }
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+.btn-primary { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+.btn-primary:disabled, .btn-ghost:disabled { opacity: .5; cursor: not-allowed; }
+
+.scroll-area { flex: 1; overflow-y: auto; padding: 18px 22px 28px; }
+
+/* 记忆卡片 */
+.mem-card {
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 11px 13px; margin-bottom: 9px; background: var(--bg);
+}
+.mem-card.deleted { opacity: .5; }
+.mem-head { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; flex-wrap: wrap; }
+.chip {
+  font-size: 11px; padding: 1px 8px; border-radius: 999px;
+  background: var(--bg-soft); color: var(--text-soft); border: 1px solid var(--border);
+}
+.chip.id { font-family: ui-monospace, Consolas, monospace; color: var(--muted); }
+.chip.insight { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); border-color: transparent; }
+.mem-content { font-size: 14px; word-break: break-word; }
+.mem-content:focus { outline: 2px solid var(--accent); border-radius: 6px; }
+.mem-foot { display: flex; align-items: center; gap: 10px; margin-top: 7px; flex-wrap: wrap; }
+.mem-alias { font-size: 11.5px; color: var(--muted); }
+.mem-actions { margin-left: auto; display: flex; gap: 6px; }
+.mini {
+  border: 1px solid var(--border-strong); background: var(--bg); color: var(--text-soft);
+  border-radius: 7px; padding: 3px 9px; font-size: 11.5px; cursor: pointer;
+}
+.mini:hover { color: var(--accent); border-color: var(--accent); }
+.mini.danger:hover { color: var(--err); border-color: var(--err); }
+
+/* Dream */
+.dream-note {
+  margin: 14px 22px 0; padding: 10px 13px; font-size: 12.5px; color: var(--text-soft);
+  background: var(--bg-soft); border-radius: 10px; border: 1px solid var(--border);
+}
+.dream-progress {
+  margin: 12px 22px 0; padding: 10px 13px; font-size: 12.5px;
+  background: var(--code); border-radius: 10px; border: 1px solid var(--border);
+  font-family: ui-monospace, Consolas, monospace; color: var(--text-soft);
+  max-height: 190px; overflow-y: auto; white-space: pre-wrap;
+}
+.run {
+  border: 1px solid var(--border); border-radius: 12px;
+  margin-bottom: 10px; overflow: hidden; background: var(--bg);
+}
+.run-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 11px 13px; cursor: pointer;
+}
+.run-head:hover { background: var(--bg-soft); }
+.run-id { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--text-soft); }
+.run-summary {
+  font-size: 12.5px; color: var(--muted); flex: 1; min-width: 140px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.run-body { border-top: 1px solid var(--border); padding: 12px 13px; background: var(--bg-soft); }
+.diff { font-size: 13px; }
+.diff-line { padding: 3px 0; word-break: break-word; }
+.diff-add { color: var(--ok); }
+.diff-del { color: var(--err); }
+.diff-chg { color: var(--warn); }
+.diff-field { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; color: var(--muted); padding-left: 18px; }
+
+/* Dream：背景档案（vault）面板。
+   颜色一律复用已有变量，这样深色主题不用再写一遍。 */
+.vault-card {
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 13px 15px; margin-bottom: 12px; background: var(--bg);
+}
+.vault-summary {
+  display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
+  font-size: 14px; margin-bottom: 4px;
+}
+.vault-summary .v-big { font-size: 18px; font-weight: 640; font-variant-numeric: tabular-nums; }
+.vault-summary.warn .v-big { color: var(--warn); }
+.vault-meta { font-size: 11.5px; color: var(--muted); }
+.vault-meta.warn { color: var(--warn); }
+.vault-meta.err { color: var(--err); }
+.vault-meta code { font-size: 11.5px; }
+.vault-sub { font-size: 12px; color: var(--text-soft); margin-top: 8px; }
+
+/* 结构校验：有问题才上警告色 —— 没问题时这一块不该抢注意力 */
+.vault-problems { margin: 9px 0 0; line-height: 1.7; }
+.vault-problems.ok { font-size: 12px; color: var(--muted); }
+.vault-problems.warn {
+  font-size: 12.5px; color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border-radius: 9px; padding: 8px 11px;
+}
+.vault-problems ul { margin: 4px 0 0; padding-left: 18px; }
+
+/* 这里原来有 `.vault-readme`（README 的可折叠 <pre>）与 `.vault-file`（平铺清单）两组规则。
+   README 现在点开就是正文、清单换成了目录树，所以两组都随渲染一起删掉了 ——
+   留着它们只会让下一个人以为界面上还有那两个东西。 */
+
+/* ── 档案浏览器：左边一棵目录树，右边正文 ──────────────────
+   现在不再只读：右上角有「编辑 / 删除」，树栏顶部有「新建档案」。
+   但**没有任何地方用 innerHTML 塞档案内容**（含标题、路径、正文），
+   全部由 DOM + textContent 建出来（见 app.js 的 el() 与 renderVaultEditor）。 */
+.vault-browser {
+  display: grid; grid-template-columns: minmax(190px, 258px) minmax(0, 1fr);
+  gap: 12px; align-items: start; margin-bottom: 14px;
+}
+@media (max-width: 900px) {
+  /* 窄屏放不下两栏：树在上面、正文在下面，谁也不挤谁 */
+  .vault-browser { grid-template-columns: minmax(0, 1fr); }
+}
+.vault-tree-pane, .vault-viewer {
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg); min-width: 0;
+}
+/* 目录很多很长时在自己的框里滚，别把整页撑破 */
+.vault-tree-pane { max-height: 58vh; display: flex; flex-direction: column; overflow: hidden; }
+.vault-tree-title {
+  font-size: 11.5px; color: var(--muted); letter-spacing: .03em;
+  padding: 9px 12px 7px; border-bottom: 1px solid var(--border); flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.vault-tree { padding: 6px 8px 10px; overflow: auto; flex: 1 1 auto; }
+.vault-node {
+  font-size: 12.5px; line-height: 1.5; border-radius: 7px;
+  cursor: pointer; user-select: none;
+}
+.vault-node:hover { background: var(--bg-soft); }
+.vault-node-dirhead { display: flex; align-items: center; gap: 6px; padding: 3px 6px; }
+.vault-node-dirhead .vn-title { font-weight: 600; }
+.vn-caret { color: var(--muted); font-size: 10px; width: 9px; flex: 0 0 9px; }
+.vault-kids { margin-left: 11px; border-left: 1px dashed var(--border-strong); padding-left: 6px; }
+.vault-node-file {
+  display: flex; align-items: baseline; gap: 6px; padding: 3px 6px;
+  flex-wrap: nowrap; overflow: hidden;
+}
+.vault-node-file.active { background: var(--accent-soft); color: var(--accent); }
+.vault-node-file.active .vn-title { color: var(--accent); font-weight: 620; }
+.vn-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.vn-sum {
+  font-size: 11px; color: var(--muted); flex: 1 1 40px; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.vault-tree .chip { flex: 0 0 auto; font-size: 10px; padding: 0 6px; }
+
+/* 正文查看器 */
+.vault-viewer { padding: 12px 15px 14px; max-height: 58vh; overflow: auto; }
+.vault-empty { font-size: 12.5px; color: var(--muted); }
+.vault-error {
+  font-size: 12.5px; color: var(--err); line-height: 1.7;
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+  border-radius: 9px; padding: 9px 11px;
+}
+.vault-view-head { margin-bottom: 9px; }
+.vault-view-path {
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--muted);
+  margin-bottom: 2px;
+}
+.vault-view-title { font-size: 15.5px; font-weight: 640; }
+.vault-view-note { font-size: 12px; color: var(--text-soft); margin-top: 4px; }
+.vault-attrs { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.vault-attr { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.vault-attr .va-k { font-size: 11px; color: var(--muted); min-width: 52px; }
+.vault-attr .va-v { font-size: 12px; color: var(--text-soft); word-break: break-word; }
+.vault-trunc {
+  font-size: 12px; color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border-radius: 9px; padding: 7px 10px; margin-bottom: 9px;
+}
+.vault-warn {
+  font-size: 12px; color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border-radius: 9px; padding: 8px 11px; margin-bottom: 9px;
+}
+.vault-warn .vw-title { font-weight: 600; }
+.vault-warn ul { margin: 4px 0 0; padding-left: 18px; }
+
+/* 正文：markdown 渲染出来的有限标签（全部由 DOM 构造，见 renderVaultBody） */
+.vault-body {
+  font-size: 13.5px; line-height: 1.8; color: var(--text);
+  border-top: 1px solid var(--border); padding-top: 10px; margin-bottom: 10px;
+  word-break: break-word;
+}
+.vault-body .vault-h { font-weight: 640; line-height: 1.45; margin: 13px 0 5px; }
+.vault-body .vault-h:first-child { margin-top: 0; }
+h1.vault-h { font-size: 16.5px; }
+h2.vault-h { font-size: 15px; }
+h3.vault-h { font-size: 14px; color: var(--text-soft); }
+.vault-body .vault-p { margin: 0 0 8px; white-space: pre-wrap; }
+.vault-body .vault-list, .vault-body ul, .vault-body ol { margin: 0 0 9px; padding-left: 20px; }
+.vault-body li { margin-bottom: 2px; }
+.vault-body .vault-quote {
+  margin: 0 0 9px; padding: 2px 0 2px 10px; color: var(--text-soft);
+  border-left: 3px solid var(--border-strong);
+}
+.vault-body .vault-hr { border: 0; border-top: 1px solid var(--border); margin: 11px 0; }
+.vault-body .codeblock { margin: 0 0 9px; }
+
+/* `[[双链]]` 点开就是"用这个名字去读一份档案"；没读到就是"还没写" */
+.vault-link {
+  font: inherit; font-size: 12.5px; padding: 0 3px; cursor: pointer;
+  background: transparent; border: 0; border-radius: 5px;
+  color: var(--accent); text-decoration: underline dotted;
+}
+.vault-link:hover { background: var(--accent-soft); }
+.vault-link.missing {
+  color: var(--muted); text-decoration: underline dotted; cursor: pointer;
+  border: 1px dashed var(--border-strong); border-radius: 5px; padding: 0 4px;
+}
+/* 「还没写」→ 点一下就能建它。那个按钮是**透明**的：虚线那段文字看着没变，
+   摸上去才是"可以点"（悬停时虚线框亮成主色）。按钮自己不画边框，
+   免得正文里凭空冒出一个按钮框。 */
+.vault-link-create {
+  font: inherit; margin: 0; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; color: inherit; cursor: pointer; text-align: inherit;
+}
+.vault-link-create:hover .vault-link.missing { border-color: var(--accent); color: var(--accent); }
+.vault-link-create:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* 邻域：它指向谁 / 谁指向它 / 共同指向别处 */
+.vault-nb { margin-bottom: 9px; }
+.vnb-title { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.vnb-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.vault-chip {
+  font: inherit; font-size: 11.5px; cursor: pointer; border-radius: 999px;
+  padding: 1px 9px; border: 1px solid var(--border-strong);
+  background: var(--bg-soft); color: var(--text-soft);
+}
+.vault-chip:hover { border-color: var(--accent); color: var(--accent); }
+.vault-chip.missing {
+  cursor: help; border-style: dashed; color: var(--muted);
+  background: transparent;
+}
+.vault-view-foot { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+/* ── 档案的动作条（编辑 / 删除）与"刚刚发生了什么" ──────────── */
+.vault-actions {
+  display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap;
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  padding: 7px 0; margin-bottom: 10px;
+}
+.vault-actions-info { flex: 1 1 200px; font-size: 11.5px; color: var(--muted); line-height: 1.6; }
+.vault-view-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+
+.vault-note {
+  border-radius: 9px; padding: 8px 11px; margin-bottom: 10px; font-size: 12px;
+  background: color-mix(in srgb, var(--ok) 10%, transparent); color: var(--text);
+}
+.vault-note.warn { background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.vault-note.err { background: color-mix(in srgb, var(--err) 12%, transparent); }
+.vault-note .vn-text { line-height: 1.7; }
+.vault-note .vn-sub { margin-top: 5px; color: var(--text-soft); }
+.vault-note .vn-list { margin: 3px 0 0; padding-left: 18px; color: var(--text-soft); }
+
+/* ── 编辑器 ──────────────────────────────────────────────
+   textarea 一律等宽：档案正文是 markdown，表格/缩进列表对齐了才读得下去。 */
+.vault-editor { padding: 2px 2px 6px; }
+.vault-editor-head { margin-bottom: 9px; }
+.vault-form {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 7px 10px; margin-bottom: 10px;
+}
+.vault-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.vault-field label { font-size: 11px; color: var(--muted); }
+.vault-field input, .vault-field select, .vault-field textarea {
+  width: 100%; font-family: inherit; font-size: 12.5px;
+  padding: 6px 8px; border-radius: 8px;
+  border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
+}
+.vault-field input:disabled, .vault-field textarea:disabled { color: var(--muted); }
+.vault-field-hint { font-size: 10.5px; color: var(--muted); line-height: 1.5; }
+.vault-field-body { margin-bottom: 10px; }
+/* 正文框上面那条工具行：「插入链接」 + 点开后的选择面板 */
+.vault-body-tools {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-bottom: 6px;
+}
+.vault-link-insert {
+  flex: 1 1 100%; border: 1px solid var(--border-strong); border-radius: 9px;
+  padding: 8px 10px; background: var(--bg-soft);
+}
+.vli-title { font-size: 11px; color: var(--muted); line-height: 1.6; margin-bottom: 6px; }
+.vli-manual { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.vli-manual .vli-input {
+  flex: 0 1 200px; min-width: 0; font-family: inherit; font-size: 12px;
+  padding: 5px 8px; border-radius: 8px;
+  border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
+}
+/* 档案可能很多：列表自己滚，别把正文框挤到屏幕外面去 */
+.vli-list {
+  display: flex; flex-wrap: wrap; gap: 5px;
+  max-height: 132px; overflow: auto;
+}
+.vli-item { display: inline-flex; flex-direction: column; align-items: flex-start; text-align: left; }
+.vli-path { font-size: 10px; color: var(--muted); font-weight: 400; }
+/* 正文输入框：等宽、可拉高（resize: vertical），最少给 14 行的高度 */
+.vault-textarea {
+  font-family: ui-monospace, Consolas, "Courier New", monospace !important;
+  font-size: 12.5px; line-height: 1.7;
+  resize: vertical; min-height: 210px;
+}
+
+.vault-notice {
+  border-radius: 9px; padding: 8px 11px; margin-bottom: 10px; font-size: 12px;
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+.vault-notice.warn { background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.vault-notice .vn-text { line-height: 1.7; }
+.vault-notice-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+
+.vault-hints {
+  border-left: 3px solid var(--border-strong); padding: 2px 0 2px 10px;
+  margin-bottom: 10px;
+}
+.vault-hint { font-size: 11.5px; color: var(--text-soft); line-height: 1.7; }
+.vault-edit-actions { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+
+.vault-del-confirm p { margin: 0 0 8px; font-size: 12.5px; line-height: 1.7; }
+.vault-del-confirm details { margin-top: 4px; }
+.vault-del-confirm summary { font-size: 12px; cursor: pointer; color: var(--muted); }
+.vault-del-body {
+  max-height: 190px; overflow: auto; margin: 6px 0 0; padding: 8px 10px;
+  font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  background: var(--bg-soft); border-radius: 8px; color: var(--text-soft);
+}
+
+/* 运行记录：现在只剩真整理一种；`dry` 那个色只给**历史里的旧预演记录**用
+   （预演已随 ADR-072 取消，页面上没有发起入口），为的是让老记录一眼能和真跑分开 */
+.chip.dry { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); border-color: transparent; }
+.chip.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); border-color: transparent; }
+.chip.err { background: color-mix(in srgb, var(--err) 12%, transparent); color: var(--err); border-color: transparent; }
+.chip.warn { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); border-color: transparent; }
+.run-when { font-size: 12px; color: var(--text-soft); font-variant-numeric: tabular-nums; }
+
+.diff-group { margin-bottom: 9px; }
+.diff-group-title { font-size: 11.5px; color: var(--muted); margin-bottom: 3px; }
+.run-skip { font-size: 12.5px; color: var(--text-soft); }
+
+/* 详情末尾那句"不可撤销"。这个位置以前放的是回滚按钮，
+   现在只剩一句话：讲的是事实而不是警告，所以用中性色，
+   但也不能弱到看不见 —— 它是这一页最需要被读到的一句。 */
+.run-final {
+  margin-top: 12px; padding-top: 11px; border-top: 1px dashed var(--border-strong);
+  font-size: 12px; color: var(--text-soft); line-height: 1.75;
+}
+.run-final strong { color: var(--text); }
+
+/* 日志比进度还短的会话（文件被改过 / 换过）：这是异常，不是普通提示 */
+.vault-stale {
+  margin-top: 8px; font-size: 12.5px; color: var(--warn); line-height: 1.7;
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border-radius: 9px; padding: 8px 11px;
+}
+
+/* ── Dream 的危险区：格式化并初始化（不可逆）───────────────
+   刻意放在这一页最下面、用危险色，不跟「整理一次」挤在同一排里。 */
+.dream-danger {
+  margin-top: 16px; padding: 13px 15px; border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--danger, #d05050) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger, #d05050) 6%, transparent);
+}
+.dream-danger .danger-title {
+  font-size: 12.5px; font-weight: 620; color: var(--danger, #d05050); margin-bottom: 7px;
+}
+.dream-danger .danger-sub, .dream-danger .danger-note {
+  font-size: 12px; color: var(--text-soft); line-height: 1.75; margin-bottom: 7px;
+}
+.dream-danger .danger-note { color: var(--muted); }
+.dream-danger .btn-danger { margin-top: 6px; padding: 7px 14px; font-size: 12.5px; }
+
+/* 执行结果条：before → after 是"到底清掉了什么"的唯一凭据，留在页面上别处去 */
+.dream-format-result {
+  margin: 10px 0 12px; padding: 10px 12px; border-radius: 10px;
+  background: var(--bg); border: 1px solid var(--border);
+}
+.dfr-title { font-size: 12.5px; font-weight: 600; margin-bottom: 6px; }
+.dfr-row { font-size: 12px; color: var(--text-soft); line-height: 1.85; font-variant-numeric: tabular-nums; }
+.dfr-note { margin-top: 6px; font-size: 11.5px; color: var(--muted); line-height: 1.7; }
+.dfr-leftovers {
+  margin-top: 8px; padding: 8px 10px; border-radius: 8px;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  font-size: 12px; line-height: 1.75;
+}
+.dfr-leftovers-title { color: var(--warn); font-weight: 600; }
+.dfr-leftover-path {
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 11.5px; color: var(--text-soft); word-break: break-all;
+}
+
+/* 格式化对话框：清单一律左对齐、确认词那一步要显眼 */
+.dream-format-body .dft-lead { margin: 0 0 4px; font-size: 12.5px; font-weight: 600; color: var(--text); }
+.dream-format-body .dft-list { margin: 0 0 10px; padding-left: 20px; }
+.dream-format-body .dft-list li { font-size: 12.5px; line-height: 1.8; }
+.dream-format-body .dft-keep li { color: var(--muted); }
+.dream-format-body .dft-k { color: var(--muted); }
+.dream-format-body .dft-ask { margin: 12px 0 6px; font-size: 12.5px; }
+.dream-format-body .dft-word {
+  font-size: 12.5px; font-weight: 700; padding: 1px 6px; border-radius: 5px;
+  background: var(--bg-soft); border: 1px solid var(--border-strong); color: var(--text);
+}
+.dream-format-input {
+  width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13px;
+  padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
+}
+.dream-format-error {
+  margin-top: 8px; font-size: 12.5px; color: var(--danger, #d05050); line-height: 1.7;
+}
+.dream-format-error:empty { display: none; }
+
+/* 用量 */
+.usage-card { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+.usage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+.usage-cell .k { font-size: 11.5px; color: var(--muted); }
+.usage-cell .v { font-size: 17px; font-weight: 620; font-variant-numeric: tabular-nums; }
+table.usage-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.usage-table th, table.usage-table td {
+  text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border);
+}
+table.usage-table th { color: var(--muted); font-weight: 500; font-size: 11.5px; white-space: nowrap; }
+table.usage-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* 提示条 */
+.toast {
+  position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+  background: var(--text); color: var(--bg);
+  padding: 9px 16px; border-radius: 10px; font-size: 13px;
+  box-shadow: var(--shadow); z-index: 50; max-width: 70vw;
+}
+
+/* ── 设置 → 提示词（契约 docs/13-prompts-page.md）─────────────
+   这一页是**长清单**：22 条提示词 + 15 个工具。视觉取向与别的子页一致
+   （卡片 + 分组标题 + chip 徽标），但三处刻意的差别：
+     * **分组默认折叠**（原生 `<details>`，见下面 `.prompts-group`）—— 七组标题
+       加说明本身就能把页面拉到八千多像素，所以这一层也要能收起来；
+     * 提示词原文可能几千字 —— 默认折叠，展开后 `white-space: pre-wrap`
+       原样换行（**不**折行成一段糊在一起的文字）；
+     * 一切颜色都走既有变量，深色主题自动跟着变（这一页一个新颜色都不引入）。 */
+
+.prompts-intro {
+  margin: 0 0 14px; font-size: 12.5px; line-height: 1.75; color: var(--text-soft);
+}
+.prompts-intro strong { color: var(--text); }
+.prompts-intro code {
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: .92em; background: var(--code); padding: 1px 5px; border-radius: 5px;
+}
+/* 工具那一段离提示词远一点：它们是两类东西，不该看起来像同一串 */
+.prompts-tools-title { margin-top: 26px; }
+
+/* 分组是一个**原生 `<details>`，默认折叠**（不带 `open`，契约 §5 第 2 条）。
+   折起来时 summary 就是一张横条：分组标题 + 条目数 + 本组状态统计 ——
+   整页八千多像素的长度问题正是靠这一层收掉的。开合由浏览器自己管
+   （零 JS 状态），所以分组之间天然互不影响、也没有"全部展开"。 */
+.prompts-group {
+  border: 1px solid var(--border); border-radius: 12px;
+  margin-bottom: 14px; background: var(--bg);
+}
+.prompts-group > summary.pg-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 11px 15px; cursor: pointer; list-style: none; border-radius: 12px;
+}
+/* 各家浏览器给 summary 的小三角形状不一，`display: flex` 之后有的仍会留一个
+   —— 显式收掉，改用自己的 ▸ / ▾（**纯 CSS 看 `[open]`**，不看 JS 状态）。 */
+.prompts-group > summary.pg-head::-webkit-details-marker { display: none; }
+.prompts-group > summary.pg-head::before {
+  /* 比每条自己的 `.pd-head .chev` 稍微大一点、亮一点：折起来时这个小三角
+     是"这一行可以点开"的**唯一**视觉线索（截图里 10px + muted 太小，像个小点） */
+  content: '▸'; font-size: 11px; color: var(--text-soft); flex: 0 0 auto;
+}
+.prompts-group[open] > summary.pg-head::before { content: '▾'; }
+.prompts-group > summary.pg-head:hover .pg-title { color: var(--accent); }
+.prompts-group[open] > summary.pg-head {
+  border-bottom: 1px solid var(--border); border-radius: 12px 12px 0 0;
+}
+/* summary 之后的一切都是折叠体（原生行为），这里只负责内边距 */
+.pg-body { padding: 9px 15px 13px; }
+.pg-title { font-size: 13.5px; font-weight: 620; }
+.pg-note-count {
+  font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border); border-radius: 99px; padding: 0 7px;
+}
+/* 本组的状态统计（生效 x · 未注册 y · 会话级 z，为 0 的不显示）：折起来时
+   它是判断"这一组值不值得点开"的唯一线索，所以留在 summary 里 */
+.pg-tally {
+  font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
+  margin-left: auto; white-space: nowrap;
+}
+.pg-note { margin-top: 2px; font-size: 12px; line-height: 1.7; color: var(--muted); }
+
+.prompt-card {
+  border-top: 1px solid var(--border); margin-top: 12px; padding-top: 11px;
+}
+.pc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pc-title {
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 12.5px; font-weight: 620; color: var(--text); word-break: break-all;
+}
+.pc-chars {
+  font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
+  margin-left: auto; white-space: nowrap;
+}
+.prompts-state { flex: 0 0 auto; }
+.pc-when { margin-top: 5px; font-size: 12px; line-height: 1.7; color: var(--text-soft); }
+/* `condition` 是"为什么没生效" —— 红/琥珀由徽标承担，正文只要区分开就够 */
+.pc-cond { margin-top: 4px; font-size: 12px; line-height: 1.7; color: var(--muted); }
+.pc-ph {
+  margin-top: 4px; font-size: 11.5px; color: var(--muted);
+  font-family: ui-monospace, Consolas, "Courier New", monospace; word-break: break-all;
+}
+.pc-sub { margin-top: 9px; font-size: 11px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .05em; }
+.tool-desc { margin: 6px 0 0; font-size: 12.5px; line-height: 1.75; color: var(--text-soft);
+  white-space: pre-wrap; word-break: break-word; }
+
+.prompts-copy { flex: 0 0 auto; padding: 3px 10px; font-size: 11.5px; }
+
+/* ── 可编辑（契约 docs/14-editable-prompts.md §8）─────────────────────────
+   这一页从"只读地看一眼"变成"能改"，所以多了四种东西：动作按钮（编辑 /
+   复原 / 全部复原）、「已修改」徽标、warn 色的后果提示、以及编辑器本身。 */
+
+/* 页首那行"两门语言各改了几条"：它是"改中文没把英文带坏"的唯一证据，
+   所以比旁边那两行灰字重一点，而不是混在里面 */
+.prompts-overrides { color: var(--text); }
+/* 覆盖文件坏了：页首最该被看见的一条（红框，与危险区同一档）。
+   这一页上每一段正文这时候都不是用户以为的那一份 */
+.prompts-store-error {
+  margin: 0 0 10px; padding: 9px 12px; border-radius: 9px;
+  font-size: 12.5px; line-height: 1.7; color: var(--err);
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
+}
+/* 上一次保存 / 复原的**结论**（不用 toast：一闪而过的字撑不住"到底成没成"，
+   而且"与内置相同、没存成自定义"这件事必须留得住） */
+.prompt-note {
+  margin: 8px 0 0; padding: 7px 11px; border-radius: 9px;
+  font-size: 12.5px; line-height: 1.7;
+  background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok);
+}
+.prompt-note.warn { background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn); }
+.prompt-note.err { background: color-mix(in srgb, var(--err) 12%, transparent); color: var(--err); }
+
+/* 页首那一块：左边三行统计（可伸缩），右边「把这门语言的提示词全部复原」（红色）。
+   按钮与第一行统计**顶对齐**——用户要的就是它出现在页首右上角，而不是夹在
+   分节标题与分组之间（那里不显眼）。窄屏时按钮整块换到下一行，不挤文字。 */
+.prompts-head {
+  display: flex; align-items: flex-start; gap: 12px;
+  justify-content: space-between; flex-wrap: wrap;
+}
+.prompts-head-text { flex: 1 1 auto; min-width: 0; }
+
+/* 「全部复原」：一次动一整门，所以是危险动作（红色）。 */
+.prompts-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.prompts-revert-all {
+  padding: 5px 12px; font-size: 12px; border-radius: 8px;
+  white-space: nowrap;
+}
+
+/* 一条自己的三个按钮与徽标 */
+.pc-edited { flex: 0 0 auto; }
+.pc-edit, .pc-revert { flex: 0 0 auto; padding: 3px 10px; font-size: 11.5px; }
+
+/* 保存成功了**但有后果**（warnings / 少了占位符）：warn 色，不是错误色 */
+.pc-warning {
+  margin-top: 6px; padding: 6px 10px; border-radius: 8px;
+  font-size: 12px; line-height: 1.7; color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+/* 编辑器：textarea 装当前生效的那一份正文 + 三句提示 + 保存 / 取消 */
+.pc-editor { margin-top: 8px; }
+.pc-editor-area {
+  width: 100%; box-sizing: border-box; min-height: 220px; resize: vertical;
+  padding: 10px 12px; border-radius: 9px; border: 1px solid var(--border-strong);
+  background: var(--code); color: var(--text);
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 12px; line-height: 1.6;
+}
+.pc-editor-area:focus { outline: none; border-color: var(--accent); }
+.pc-hints { margin-top: 7px; display: flex; flex-direction: column; gap: 3px; }
+.pc-hint { font-size: 11.5px; line-height: 1.65; color: var(--muted); }
+/* 后端 400 的**原话**就地显示，编辑器不关 */
+.pc-editor-error {
+  margin-top: 7px; padding: 6px 10px; border-radius: 8px;
+  font-size: 12px; line-height: 1.7; color: var(--err);
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+.pc-actions { margin-top: 9px; display: flex; gap: 8px; }
+.pc-save, .pc-cancel { padding: 4px 14px; font-size: 12px; }
+/* 「内置原文」与「当前生效」并排时，把内置那一份压暗一点，好一眼分清谁是谁 */
+.prompt-builtin { opacity: .85; }
+
+/* 折叠块：与 OCR 文字块同一个形状（标题整行可点，箭头 ▸ / ▾ 直接换字） */
+.prompt-details { margin-top: 8px; }
+.pd-head {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--bg-soft); color: var(--text-soft);
+  font: inherit; font-size: 11.5px; padding: 5px 10px; cursor: pointer; text-align: left;
+}
+.pd-head:hover { border-color: var(--border-strong); color: var(--text); }
+.pd-head .chev { font-size: 10px; }
+.pd-body { margin-top: 6px; }
+.prompt-details.collapsed .pd-body { display: none; }
+
+/* 原文 / 原始 JSON：**原样**换行，长行折回来但保留缩进与空行 */
+.prompt-text {
+  margin: 0; padding: 10px 12px; border-radius: 9px;
+  background: var(--code); border: 1px solid var(--border);
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 12px; line-height: 1.6; color: var(--text);
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 420px; overflow: auto;
+}
+
+table.prompt-params { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+table.prompt-params th, table.prompt-params td {
+  text-align: left; vertical-align: top; padding: 5px 9px;
+  border-bottom: 1px solid var(--border); line-height: 1.65;
+}
+table.prompt-params th {
+  color: var(--muted); font-weight: 500; font-size: 11px; white-space: nowrap;
+}
+table.prompt-params td:first-child {
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  color: var(--text); white-space: nowrap;
+}
+table.prompt-params td:nth-child(2),
+table.prompt-params td:nth-child(3) { white-space: nowrap; color: var(--text-soft); }
+table.prompt-params td:last-child { color: var(--muted); }

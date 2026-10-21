@@ -1,0 +1,30 @@
+# 运行时依赖（2026-10-06 起不再要求零依赖）
+#
+# 安装：run.cmd --setup   或   pip install -r requirements.txt
+#
+# 为什么是这五个：
+#   httpx        —— 抓网页。要重定向、超时、流式截断、连接池，自己写不值当。
+#   trafilatura  —— 从 HTML 里抽正文。这是**唯一真正难手写**的一步：
+#                   去掉导航/广告/页脚、保留文章主体，还带编码检测。
+#   lxml         —— trafilatura 的解析后端；我们也直接用它解析搜索结果页。
+#   Pillow       —— 图片附件：判断"这是不是一张真图片"、读尺寸、按官方对模型的
+#                   有效像素上限等比缩放。**只做这三件事**：
+#                   格式白名单仍以魔数嗅探为准（与 DeepSeek 的判定口径一致），
+#                   界面渲染仍交给浏览器。缺了它上传接口会明确报错，不静默降级。
+#   rapidocr-onnxruntime —— 「多模态」关掉时把图片 OCR 成文字（见 ADR-081）。
+#                   选它的理由：**模型文件全在 wheel 里**，装完就能离线跑，
+#                   不需要再装一个 Tesseract 之类的系统二进制；纯 CPU、onnxruntime 后端；
+#                   中文+英文开箱可用。代价是它拖来 onnxruntime / opencv / numpy（约 150 MB），
+#                   所以它只在"真的要用 OCR"时才被 import（`harness/ocr.py` 里延迟导入）。
+#                   缺了它：开关关着发图片会被**明确拒绝**并告诉你去装，不静默降级。
+#
+# 刻意**没有**装的东西：
+#   ddgs / duckduckgo-search —— 试过，它只打 DuckDuckGo 与 Google，
+#   而这两个域名在这台机器上完全不可达（见 docs/09-web-tools.md 的实测表）。
+#   装了却用不了的依赖比不装更糟。
+#   pytesseract / easyocr —— 前者要额外装系统二进制，后者要拖整个 torch。
+httpx>=0.28
+trafilatura>=2.0
+lxml>=5.0
+Pillow>=11
+rapidocr-onnxruntime>=1.2
