@@ -27,7 +27,11 @@ from harness.providers.store import (
     presets,
     resolve_settings,
 )
-from harness.runtime import GenerationChoice, resolve_provider
+from harness.runtime import (
+    GenerationChoice,
+    resolve_dream_provider,
+    resolve_provider,
+)
 
 from .helpers import test_settings
 
@@ -111,6 +115,51 @@ class StoreTests(unittest.TestCase):
         """只是读一眼，不该顺手在磁盘上造出 providers.json。"""
         self.store()
         self.assertFalse(self.path.exists())
+
+    # -- 整理（dream）专用的模型选择（ADR-103）-------------------------
+
+    def test_dream_choice_starts_empty_and_follows_the_default(self) -> None:
+        """默认「没设过」= 跟随全局默认，行为与加这个设置之前完全一致。"""
+        store = self.store()
+        self.assertEqual(
+            store.dream_defaults(), {"provider": "", "model": "", "effort": ""}
+        )
+
+    def test_dream_choice_round_trips_and_clears(self) -> None:
+        store = self.seeded()
+        store.set_dream_defaults(
+            provider="deepseek", model="deepseek-v4-pro", effort="high"
+        )
+        self.assertEqual(
+            self.store().dream_defaults(),
+            {"provider": "deepseek", "model": "deepseek-v4-pro", "effort": "high"},
+        )
+        # 空串 = 清掉 = 跟随默认（界面上那一项叫「跟随默认」）
+        self.store().set_dream_defaults(provider="", model="", effort="")
+        self.assertEqual(
+            self.store().dream_defaults(), {"provider": "", "model": "", "effort": ""}
+        )
+
+    def test_removing_the_dream_provider_clears_the_choice(self) -> None:
+        """删掉被选中的接口之后，整理不能继续指着一个不存在的 id。"""
+        store = self.seeded()
+        store.set_dream_defaults(provider="deepseek", model="deepseek-flash")
+        store.remove("deepseek")
+        self.assertEqual(
+            self.store().dream_defaults(), {"provider": "", "model": "", "effort": ""}
+        )
+
+    def test_public_state_exposes_the_dream_choice(self) -> None:
+        """前端靠 /api/providers 的 `dream` 画那个选择器（ADR-103）。"""
+        store = self.seeded()
+        store.set_dream_defaults(provider="deepseek", model="deepseek-v4-pro")
+        state = self.store().public_state()
+        self.assertEqual(
+            state["dream"],
+            {"provider": "deepseek", "model": "deepseek-v4-pro", "effort": ""},
+        )
+        # 与聊天默认是两个独立的键：改一个不该动另一个
+        self.assertEqual(state["default"]["model"], "deepseek-flash")
 
     def test_round_trips_through_disk(self) -> None:
         store = self.seeded()
@@ -360,6 +409,104 @@ class ResolveProviderTests(unittest.TestCase):
     def test_generation_choice_round_trips(self) -> None:
         choice = GenerationChoice(provider_id="p", model="m", effort="low", label="P")
         self.assertEqual(GenerationChoice.from_record(choice.to_dict()), choice)
+
+
+class ResolveDreamProviderTests(unittest.TestCase):
+    """整理用哪个模型（ADR-103）：默认跟随全局默认，设了就用设的那一份。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.settings = test_settings(Path(self._tmp.name))
+
+    def seed_two(self) -> ProviderStore:
+        """两家接口：deepseek（默认）+ 一家人造的小接口（有明确模型列表）。"""
+        store = ProviderStore(self.settings.data_dir / "providers.json")
+        preset = get_preset("deepseek")
+        assert preset is not None
+        store.upsert(ProviderProfile.from_preset(preset, api_key="dk"))
+        store.upsert(
+            ProviderProfile(
+                id="x",
+                label="X",
+                base_url="https://x.example.com/v1",
+                api_key="xk",
+                models=["x-1", "x-2"],
+            )
+        )
+        store.set_defaults(provider="deepseek", model="deepseek-flash")
+        return store
+
+    def test_unset_follows_the_global_default(self) -> None:
+        store = self.seed_two()
+        resolved = resolve_dream_provider(self.settings, store=store)
+        self.assertEqual(resolved.choice.provider_id, "deepseek")
+        self.assertEqual(resolved.choice.model, "deepseek-flash")
+
+    def test_pinned_choice_wins(self) -> None:
+        store = self.seed_two()
+        store.set_dream_defaults(provider="x", model="x-2")
+        resolved = resolve_dream_provider(self.settings, store=store)
+        self.assertEqual(resolved.choice.provider_id, "x")
+        self.assertEqual(resolved.choice.model, "x-2")
+        self.assertEqual(resolved.settings.api_key, "xk")
+
+    def test_pinned_choice_does_not_change_the_chat_default(self) -> None:
+        """两个选择是独立的：改整理模型不该顺手把聊天模型也改了。"""
+        store = self.seed_two()
+        store.set_dream_defaults(provider="x", model="x-2")
+        chat = resolve_provider(self.settings, store=store)
+        self.assertEqual(chat.choice.provider_id, "deepseek")
+        self.assertEqual(chat.choice.model, "deepseek-flash")
+
+    def test_missing_provider_falls_back_to_the_global_default(self) -> None:
+        """选过的那家被删了：退回全局默认，而不是悄悄用 profiles[0]。"""
+        store = self.seed_two()
+        store.set_dream_defaults(provider="x", model="x-2")
+        store.remove("x")
+        resolved = resolve_dream_provider(self.settings, store=store)
+        self.assertEqual(resolved.choice.provider_id, "deepseek")
+        self.assertEqual(resolved.choice.model, "deepseek-flash")
+
+    def test_only_a_provider_uses_its_first_model(self) -> None:
+        store = self.seed_two()
+        store.set_dream_defaults(provider="x", model="")
+        resolved = resolve_dream_provider(self.settings, store=store)
+        self.assertEqual(resolved.choice.provider_id, "x")
+        self.assertEqual(resolved.choice.model, "x-1")
+
+    def test_removed_model_falls_back_to_the_global_default(self) -> None:
+        """选的模型被从这家接口的列表里删掉：与界面一样退回「跟随默认」。"""
+        store = self.seed_two()
+        store.set_dream_defaults(provider="x", model="x-2")
+        store.update_models("x", ["x-1"])  # x-2 被删了
+        resolved = resolve_dream_provider(self.settings, store=store)
+        self.assertEqual(resolved.choice.provider_id, "deepseek")
+        self.assertEqual(resolved.choice.model, "deepseek-flash")
+
+    def test_effort_is_passed_through(self) -> None:
+        store = self.seed_two()
+        store.set_dream_defaults(
+            provider="deepseek", model="deepseek-v4-pro", effort="high"
+        )
+        resolved = resolve_dream_provider(self.settings, store=store)
+        self.assertEqual(resolved.choice.effort, "high")
+        self.assertEqual(resolved.settings.reasoning_effort, "high")
+
+    def test_cli_only_effort_overrides_the_stored_one(self) -> None:
+        """`--dream --effort high` 只改这一轮的档位，不动存着的模型 / 档位。"""
+        store = self.seed_two()
+        store.set_dream_defaults(
+            provider="deepseek", model="deepseek-v4-pro", effort="low"
+        )
+        resolved = resolve_dream_provider(self.settings, store=store, effort="high")
+        self.assertEqual(resolved.choice.provider_id, "deepseek")
+        self.assertEqual(resolved.choice.model, "deepseek-v4-pro")
+        self.assertEqual(resolved.choice.effort, "high")
+        # 存储里的那份没被改写（重新从磁盘读一份来证明）
+        self.assertEqual(
+            ProviderStore(store.path).dream_defaults()["effort"], "low"
+        )
 
 
 class ReasoningContentFlagTests(unittest.TestCase):

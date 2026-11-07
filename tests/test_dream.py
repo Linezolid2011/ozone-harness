@@ -129,28 +129,39 @@ class DreamPipelineTests(unittest.TestCase):
                 [
                     (
                         "c4",
-                        "readme_write",
-                        json.dumps(
-                            {"markdown": "# README\n\n- 小林（entities/小林.md）\n"},
-                            ensure_ascii=False,
+                        "vault_write",
+                        self._write_archive(
+                            "sections/personal_context.md",
+                            "同事：[[小林]]。",
+                            title="Personal Context",
                         ),
                     )
                 ]
             ),
-            text_reply("新建了 1 份实体档案并重写了 README。"),
+            text_reply("新建了 1 份实体档案，并更新了个人背景。"),
         ]
         outcome = self._runner(script).run()
 
         paths = {row["path"] for row in outcome.diff["added"]}
-        self.assertEqual(paths, {"entities/小林.md", README_NAME})
-        self.assertEqual(outcome.changed, 2)
+        self.assertEqual(
+            paths,
+            {
+                "entities/小林.md",
+                "sections/personal_context.md",
+                README_NAME,
+                "index.md",
+                "sections/earlier_months.md",
+            },
+        )
+        # 原生模式：README/index/earlier_months 是 harness 生成的，所以也算改动
+        self.assertEqual(outcome.changed, 5)
 
         written = self.vault.read("entities/小林.md")
         self.assertEqual(written.frontmatter.kind, "person")
         self.assertEqual(written.frontmatter.relation, "同事")
         self.assertEqual(written.frontmatter.title, "小林")
-        # `updated` 由 harness 盖章（模型不知道今天几号，不该由它写）
-        self.assertTrue(written.frontmatter.updated)
+        # `last_updated` 由 harness 盖章（模型不知道今天几号，不该由它写）
+        self.assertTrue(written.frontmatter.last_updated)
         self.assertIn("后端同事", written.body)
         self.assertIn("小林", self.vault.readme_text()[0])
 
@@ -282,6 +293,10 @@ class DreamPipelineTests(unittest.TestCase):
         self.assertEqual(self.vault.readme_text(), ("", False))
 
     def test_structure_check_reports_an_over_budget_readme(self) -> None:
+        # 旧 vault（无 sections.yaml）走 token 预算；原生模式走 sections.yaml 的字符 cap。
+        # 这条用例测的是**旧模式**的 readme_write（模型直接写 README），所以先放一份
+        # section，确保 `ensure_manifest()` 不会把它迁成原生模式。
+        self.vault.write_file("sections/seed.md", "seed")
         long_readme = "\n\n".join(f"## 第{i}节\n" + "字" * 200 for i in range(10))
         script = [
             tool_reply(

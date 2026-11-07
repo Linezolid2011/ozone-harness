@@ -26,6 +26,10 @@ MESSAGES: dict[str, str] = {
     "ui.language.need_value": "A language is required.",
     "ui.language.unknown": "Unknown language: {value} (available: {choices})",
     "ui.timezone.bad_value": "Unknown timezone: {value} (must be an integer number of hours from -12 to +14, e.g. 8 = UTC+8)",
+    "ui.output.bad_value": (
+        "Unrecognised per-turn max output: {value} (use -1 for unlimited, or an "
+        "integer >= 1; 5k / 1M shorthand is accepted, k = 1000, M = 1000000)"
+    ),
     "ui.language.saved": "Switched to {name}.",
     "ui.language.note_content": (
         "Memories and background archives you wrote are **not translated**; the prompts tell the model "
@@ -185,6 +189,15 @@ MESSAGES: dict[str, str] = {
     "ui.vault.path_bad_top": (
         "The first level can only be sections or entities, and it must be lowercase (got {dir})"
     ),
+    "ui.vault.path_bad_archive": (
+        "Under sections/ only sections/<name>.md or "
+        "sections/archived_month/<YYYY-MM>/this_month.md is allowed (got {raw})"
+    ),
+    "ui.vault.raw_bad_path": (
+        "A raw asset path must be raw/source_<number>/<image name> "
+        "(optionally with a same-named .meta.json; got {raw})"
+    ),
+    "ui.vault.manifest_bad": "This line of sections.yaml cannot be parsed: {line}",
     "ui.vault.name_dot": "A file name cannot be {name}",
     "ui.vault.name_whitespace": "A file name cannot start or end with whitespace (got {name})",
     "ui.vault.name_illegal_chars": (
@@ -236,6 +249,18 @@ MESSAGES: dict[str, str] = {
         "injected into the conversation model"
     ),
     "ui.vault.readme_no_delete": "README is the index and cannot be deleted — to empty it, rewrite its content",
+    "ui.vault.generated_readonly": (
+        "{path} is generated/maintained by the harness and cannot be edited directly. "
+        "Edit sections / entities instead; README, index and earlier_months rebuild automatically."
+    ),
+    "ui.vault.section_no_delete": (
+        "{path} is a fixed section from sections.yaml and cannot be deleted; "
+        "to empty it, set its body to an empty string"
+    ),
+    "ui.vault.manifest_read_failed": "sections.yaml could not be read: {error}",
+    "ui.vault.manifest_not_a_note": "sections.yaml is a manifest, not a readable note",
+    "ui.vault.raw_read_failed": "Reading raw asset {path} failed: {error}",
+    "ui.vault.raw_too_large": "Raw asset {path} is too large ({size} bytes, limit {limit})",
     "ui.vault.no_vault_dir": "The vault directory does not exist yet (dream has not organised any conversation)",
     "ui.vault.read_failed": "{path} could not be read (not UTF-8 text?)",
     "ui.vault.over_display_limit": (
@@ -254,6 +279,43 @@ MESSAGES: dict[str, str] = {
         "genuinely normal content, remove that status line from its frontmatter"
     ),
     "ui.vault.readme_missing": "There are archive files but no README: the model will see no index at all",
+    "ui.vault.section_missing": "{path} is listed in sections.yaml but the file does not exist",
+    "ui.vault.readme_stale": (
+        "README no longer matches the sections (or its metadata is stale) — "
+        "run a tidy-up or rebuild the generated files"
+    ),
+    "ui.vault.readme_over_char_budget": (
+        "README exceeds the injection cap ({budget} characters); it will be truncated"
+    ),
+    "ui.vault.index_missing": "There are archives but no index.md (the native vault index)",
+    "ui.vault.index_stale": "index.md no longer matches sections/entities — rebuild it",
+    "ui.vault.earlier_months_stale": (
+        "sections/earlier_months.md no longer matches the archived months — rebuild it"
+    ),
+    "ui.vault.raw_missing": "{path} references raw asset {raw}, which is not available ({error})",
+    "ui.vault.import_bad_path": "This path in the import archive is not allowed: {path}",
+    "ui.vault.import_missing_zip": "Import archive not found: {path}",
+    "ui.vault.import_bad_zip": "This file is not a valid zip: {path} ({error})",
+    "ui.vault.import_not_empty": (
+        "The target vault is not empty ({path}). Import only writes into an empty vault; "
+        "pass --yes to overwrite"
+    ),
+    "ui.vault.import_too_many": "The import archive has too many entries ({count} > {limit})",
+    "ui.vault.import_too_large": "The import archive exceeds the total size limit ({limit} bytes)",
+    "ui.vault.import_file_too_large": (
+        "Entry {path} in the import archive is too large ({size} bytes, limit {limit})"
+    ),
+    "ui.vault.import_skipped": "Skipped a system file: {path}",
+    "ui.vault.import_case_clash": (
+        "The import archive contains two paths that differ only by case: {a} / {b}"
+    ),
+    "ui.vault.import_empty": "The import archive contains no recognisable archives: {path}",
+    "ui.vault.import_bad_image": "A raw asset is not a recognisable image: {path}",
+    "ui.vault.import_image_mismatch": (
+        "Raw asset {path} has an extension that does not match its content "
+        "(the content looks like {sniffed})"
+    ),
+    "ui.vault.import_done": "Imported {files} files (notes {notes} / raw {raw}): {path}",
     "ui.vault.read_truncated": "\n… (this file is longer; truncated at the per-read limit)",
     "ui.vault.readme_truncated": (
         "\n\n… (README is over the injection budget and was truncated. For details, use "
@@ -292,6 +354,7 @@ MESSAGES: dict[str, str] = {
     "ui.dream.diff_chars": "  ~ {path}  {before} → {after} characters",
     "ui.dream.check_no_vault": "(the vault does not exist yet)",
     "ui.dream.check_files": "{files} archives · README {tokens} tokens",
+    "ui.dream.check_files_chars": "{files} archives · README {used}/{cap} characters",
     "ui.dream.check_ok": " · structure check passed",
     "ui.dream.check_problems": "\nProblems found by the structure check:\n",
     "ui.dream.format_not_in_data_dir": "{path} is not inside the data directory {data_dir}; refusing to format",
@@ -419,6 +482,22 @@ MESSAGES: dict[str, str] = {
         "Compression failed (the model returned no summary); this turn falls back to "
         "dropping the oldest conversation."
     ),
+    "ui.loop.summary_too_long": (
+        "The summarization request itself exceeds the model's context window; compaction "
+        "was skipped this turn (falling back to dropping whole groups)."
+    ),
+    "ui.loop.context_limit": (
+        "This turn does not fit in the model's context window ({window} tokens): the tool "
+        "definitions, memory, history and this message need about {needed} tokens "
+        "(including the output reservation). To avoid an API error, the turn was NOT sent. "
+        "You can: (1) set this model's \"context limit\" in Settings -> API to its real value; "
+        "(2) switch to a model with a larger window; (3) shorten this message, or fork/delete "
+        "older chats."
+    ),
+    "ui.loop.output_capped": (
+        "To stay inside the model's context window, the output limit for this request was "
+        "lowered to {max_tokens} tokens."
+    ),
     "ui.loop.summarize_failed": "Compression failed: {error}",
     "ui.loop.wall_clock": "This turn has run for {seconds:.0f} seconds, over the limit; aborted.",
     "ui.loop.token_budget": (
@@ -426,6 +505,10 @@ MESSAGES: dict[str, str] = {
     ),
     "ui.loop.output_truncated": (
         "The model's output was cut off by max_tokens ({max_tokens}); the result may be incomplete."
+    ),
+    "ui.loop.output_truncated_unlimited": (
+        "No per-turn output limit was set (-1); the output was cut off by the server's "
+        "(or the protocol-required) limit, so the result may be incomplete."
     ),
     "ui.loop.repeated_calls": (
         "Detected {limit} identical tool calls in a row; aborted to avoid an infinite loop."
@@ -555,6 +638,20 @@ MESSAGES: dict[str, str] = {
     "web.error.client_gone_turn": "The client disconnected; this turn was aborted.",
     "web.error.client_gone_dream": "The client disconnected.",
     "web.error.no_provider_profile": "No such provider: {profile_id}",
+    "web.error.dream_provider_required": (
+        "To pin a tidy-up model, send both the provider and the model "
+        "(one without the other cannot be saved)"
+    ),
+    "web.error.provider_not_configured": (
+        "Provider “{label}” has no API key yet, so it cannot be used for tidy-up"
+    ),
+    "web.error.dream_model_required": (
+        "Pick a model; choose “follow the default” to clear this setting"
+    ),
+    "web.error.dream_model_unknown": (
+        "Provider “{label}” has no model “{model}” — "
+        "add it to that provider’s model list under Settings → Providers first"
+    ),
     "web.error.dream_dry_run": (
         "Dry run has been removed (ADR-072). Nothing was changed this time — "
         "refresh the page (the “dry run” button on the old page no longer exists). "

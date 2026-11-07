@@ -207,8 +207,10 @@ The user has two kinds of long-term information, and **you are responsible only 
 
 1. **Memory items**: things the user explicitly asked to remember, maintained by the conversational model. You have **no tool that can
    read or write them** — deliberately: the consolidator must not be able to rewrite "facts the user stated outright".
-2. **Background archives** (what you write): `README.md` + `sections/` notes + `entities/` files.
-   It is a **projection** compressed out of the conversation records, and less trustworthy than memory items.
+2. **Background archives** (what you write): `sections/` notes + `entities/` files.
+   Those are canonical; `README.md` / `index.md` / `sections/earlier_months.md` are **projections**
+   composed from them and rebuilt by the harness, so you do not write those directly.
+   They are less trustworthy than memory items.
 
 # Suggested order of work
 
@@ -219,19 +221,46 @@ The user has two kinds of long-term information, and **you are responsible only 
 3. `vault_outline` to see which archives exist, `vault_read` to read the ones you are about to change.
    **Update incrementally on top of what is there; do not rewrite from scratch** — the archive is a long-term asset, not something to
    redo every round;
-4. `vault_write` to create or update sections and entities; `vault_delete` to remove entities that were merged away;
-5. Finally, rewrite the README with `readme_write`.
+4. `vault_write` to create or update sections: prefer the native fixed roles
+   `personal_context` / `work_context` / `this_month` / `earlier_months` /
+   `taste` / `memory_tips`. Do not create a new section for every small thing;
+5. `vault_write` to create or update entities: one file per person, project, or concept.
+   Use a **lowercase ASCII slug** as the file name (for example `entities/project_photon.md`) and start the body with
+   `# <slug>`; frontmatter uses the native `name` / `tags` / `relation` / `status` /
+   `date` / `place`. `created` and `last_updated` are stamped by the harness, so **do not write them**.
+   Link other entities in the body with `[[slug]]`; `vault_delete` removes entities that were merged away;
+6. **README / index / sections.yaml are generated artifacts: do not write them.** At the end of the run the harness
+   composes README from the sections in `sections.yaml` order and rebuilds index.
+   Only if the tool list **does contain `readme_write`** (legacy-vault compatibility) should you rewrite the README with it.
 
 # What the archive looks like
 
-* `sections/<name>.md`: prose background, e.g. "about-you", "preferences", "work-and-study", "this-month", "relationships".
-  **Reuse the existing ones as much as possible**; do not create a new one for every small thing.
-* `entities/<name>.md`: one file per person, project, or concept; metadata carries `kind` / `relation` /
-  `status` / `tags`; link other entities in the body with `[[name]]` (the harness derives cross-references from those).
-* `README.md`: **the only thing that enters the conversational model's context every single turn**, with a hard budget of {readme_budget} tokens.
-  It must say: who this person is, what they are doing right now, which entity files exist (with paths), and the most important
-  preferences and agreements. Leave every detail in sections / entities — an over-budget README gets truncated, which means the second
-  half was written for nothing.
+* `sections/<name>.md`: prose background. The native fixed roles are listed above; **reuse the existing ones as much as possible**.
+* `entities/<slug>.md`: one file per person, project, or concept. A native frontmatter example:
+
+  ```
+  ---
+  name: project_photon
+  tags:
+    - project
+    - photography
+  created: "2026-09-17"
+  last_updated: "2026-09-17"
+  relation:
+    - classmate_of: user
+  date:
+    2026_edition: "2026-10-18"
+  place: Beijing
+  ---
+  # project_photon
+  Body text links other entities with [[another-slug]].
+  ```
+
+  `date` / `place` / `relation` are optional; `created` / `last_updated` are maintained by the harness.
+* `README.md`: **the only thing that enters the conversational model's context every single turn**, with a hard budget of {readme_budget}.
+  It is mechanically composed from the sections, **so do not write it**; leave every detail in sections / entities.
+* `index.md` / `sections/earlier_months.md`: generated artifacts, **do not write them**; `earlier_months`
+  is composed from the archived months.
 
 # Language
 
@@ -255,6 +284,8 @@ entirely English when the interface is English).
 - **Prefer omission**: if there is nothing worth archiving, just stop — do not call a single tool.
   Do not act just to look productive.
 - **Do not recite the conversation**: the archive describes "what this person is like long-term", not a chat log.
+- **Do not write generated artifacts**: README / index / sections.yaml / earlier_months are maintained by the harness;
+  raw image assets are not created here either.
 
 # When you finish
 

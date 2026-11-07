@@ -1,6 +1,6 @@
 # O₃ᶻᵒⁿᵉ
 
-> 版本 **1.0.0-dev1**（`run.cmd --version` 或界面侧栏第二行；版本号的唯一来源是
+> 版本 **1.0.1-rc1**（`run.cmd --version` 或界面侧栏第二行；版本号的唯一来源是
 > [`docs/version.txt`](docs/version.txt)）· 变更记录见 [`docs/changelog.md`](docs/changelog.md)
 
 > 读作「O3 zone」。产品名只在 `harness/__init__.py` 里定义一处（`PRODUCT_NAME`）；
@@ -16,7 +16,8 @@
 > **不可回滚、也没有预演** —— 改坏了就「格式化并初始化 dream」清空重来）、
 > **对标 Kimi 网页端的 Web 界面**、
 > **多供应商可插拔**（11 个预设，含 Kimi Code 的 Anthropic 端点，会话内可换模型）、
-> **接近上下文上限自动压缩**（按本轮选中的模型决定触发点）、
+> **整条请求（输入 + 输出）不会超过模型窗口**（按本轮选中的模型算预算；
+> 接近上限就自动压缩，装不下就在本地拒绝而不是交给 API 报 `context window exceed`）、
 > 会话历史可重放、四道熔断全部生效。
 
 > **准备开始真实使用？先看 [上手与观察清单](docs/06-getting-started.md)** ——
@@ -44,7 +45,9 @@ run.cmd --dream-format                   :: 格式化并初始化 dream 层（�
 run.cmd --dreams                         :: 看历史整理运行
 run.cmd --dream-review <run-id>          :: 改动清单 + 结构校验 + 轨迹路径
 run.cmd --vault                          :: 看背景档案：文件清单 + README 预算 + 结构校验 + 还有多少待整理
-run.cmd --vault-init                     :: 建一个空的背景档案骨架（不写任何内容）
+run.cmd --vault-init                     :: 建一个空的背景档案骨架（含 sections.yaml）
+run.cmd --vault-import <vault.zip>       :: 导入 Kimi 原生 Dream vault（目标须为空；--yes 覆盖）
+run.cmd --vault-rebuild                  :: 按 sections.yaml 重建 README / index / earlier_months
 run.cmd --vault-show entities/小林.md     :: 打印一份档案（离线，不花钱）
 run.cmd --sessions                       :: 看会话列表
 run.cmd --usage                          :: 看 token 用量（按接口分家）
@@ -189,8 +192,10 @@ run.cmd --memory-limit 80           :: 改上限（0-100；不能低于已有条
 
 注入顺序按"变得有多快"排：`身份与规则 → README → 记忆条目 → 摘要 → 历史 → 时间`
 （README 一天最多变一次，记忆条目每写一次就变，所以慢的放前面，缓存前缀才长）。
-README **由模型写**，但长度上限由 harness 强制（默认 1200 token，超出按段落截断）——
-它每轮都进上下文，靠提示词求模型写短是不可靠的。
+**原生 vault（有 `sections.yaml`，ADR-104）**的 README 由 harness 从 sections 机械生成，
+模型只写 `sections/` 与 `entities/`；旧 vault 仍由模型写 README。两种模式的长度上限
+都由 harness 强制（原生按 `inject_char_cap` 字符，旧模式默认 1200 token，超出按段落截断）——
+README 每轮都进上下文，靠提示词求模型写短是不可靠的。
 
 ```bat
 run.cmd --dream                      :: 整理（**单向门：改完不可逆**，没有回滚、也没有预演）
@@ -199,11 +204,20 @@ run.cmd --dreams                     :: 看历史整理运行
 run.cmd --dream-review <run-id>      :: 改动清单 + 结构校验 + 轨迹路径
 run.cmd --vault                      :: 有哪些档案、README 占多少预算、还有多少待整理
 run.cmd --vault-show sections/口味.md :: 看一份档案的原文（含 frontmatter）
-run.cmd --vault-init                 :: 建空骨架（只有目录与占位 README，不编内容、也不注入）
+run.cmd --vault-init                 :: 建空骨架（含 sections.yaml；不编内容、也不注入）
+run.cmd --vault-import <vault.zip>   :: 导入 Kimi 原生 Dream vault（目标须为空；--yes 覆盖）
+run.cmd --vault-rebuild              :: 按 sections.yaml 重建 README / index / earlier_months
 ```
 
 **整理一次大概花多少**：一轮处理 3 个会话左右，实测 27k token 量级
 （其中缓存命中 21k），和平时聊几十轮的开销差不多。**没有待整理的记录时它根本不调模型。**
+
+**整理用哪个模型**（ADR-103）：Dream 页工具栏右侧的「整理模型」选择器，默认
+**跟随默认**（= 全局默认接口 / 模型，与加这个设置之前的行为完全一样），也可以
+显式指定。它存在 `data/providers.json` 的 `dream` 里，**CLI 与 Web 共用**同一份；
+命令行的 `--provider` / `--model` 是**这一次**的覆盖，不改设置。
+运行记录里会记下这次用的是哪个模型。它与聊天页顶栏那个模型选择器**互相独立** ——
+换整理模型不会顺手改掉聊天模型。
 
 **整理是单向门，而且没有预演**（ADR-065 + ADR-072，你定的）：跑完就**不可逆** ——
 没有回滚、不留快照、也**没有"先看一眼"**：预演要在一份一次性副本里**真跑一遍模型**
@@ -243,15 +257,22 @@ Dream 页的目录树里点开一份档案之后，可以直接**新建 / 编辑
 * **保存时会检查"你看着的版本还是不是最新的"**：如果模型在你编辑期间刚整理过，
   保存会被拒一次并把最新内容给你看 —— 免得你把它的结果无声覆盖掉
   （这条是防手滑，不是安全机制）。**整理正在运行时也不能改档案**，等它跑完；
-* **README 索引与别处的双链不会自动更新**：你加了一份档案，得自己把它写进
-  README，否则结构校验会一直提示"没有被 README 提到（孤儿档案）"。
-  这正是那个校验面板存在的意义 —— 它不会假装没这回事。
+* **原生 vault 的 README/index/earlier_months 会自动重建**（ADR-104）：你改
+  `sections/` 或 `entities/` 后 harness 立即重算，所以不用手工维护索引；
+  它们和 `sections.yaml` 在界面上是只读的。旧 vault（没有 `sections.yaml`）仍由
+  模型写 README，需要你自己把新档案写进去，结构校验会提示"孤儿档案"；
+* **原生孤儿按链接图算**：一份实体没被任何 section/entity 用 `[[…]]` 链到才会报，
+  不是"README 里没出现"就算孤儿。
 
 **双链要写对**（ADR-071）：`[[AI4Science]]` 指的是 `entities/AI4Science.md` ——
 按**标题**或**别名**匹配，**精确匹配**，不折大小写、不带 `.md`。
+原生写法 `[[sections/taste|Taste & Preferences]]` 也认（`|` 前是路径、后是显示名）。
 写错了（`[[ai4science]]`、`[[AI4Science.md]]`）会显示成虚线的"还没写"，
 **这不是 bug 而是刻意的**：它告诉你名字写错了，而不是悄悄指向一个"差不多"的档案。
 （编辑器里的「插入链接」会按标题插，所以从那里插的链接一定是对的。）
+
+**原生 raw 图片**：正文里的 `![[raw/source_<n>/x.jpg]]` 会渲染成图片（点开可放大），
+走 `/api/vault/raw`；路径由后端 `read_raw()` 再校验一次，不接受 `..` / 非图片扩展名。
 
 **加粗也能包双链**：`**[[AI4Science]]**` 现在是"加粗的可点链接"。
 （以前这一种渲染不出来、方括号原样显示，而同一段里不加粗的 `[[X]]` 又是好的 ——
@@ -270,7 +291,7 @@ Dream 页的目录树里点开一份档案之后，可以直接**新建 / 编辑
   右上角可直接切**模型**、**thinking 档位**与**联网搜索开关**（都跟着会话存）
 - **会话管理**：侧栏每条对话悬停可**重命名**（✎）与**删除**（✕）。
   **删除只删这一条对话** —— 记忆、接口配置和其他对话一个字节都不动
-- **设置**（左下角）：记忆 / Dream / 用量 / 接口 / 工具 / **提示词** / **常规**（主题、语言、时区）/ 重置
+- **设置**（左下角）：记忆 / Dream / 用量 / 接口 / 工具 / **提示词** / **常规**（主题、语言、时区、单轮最大输出）/ 重置
 - **接口**：11 个供应商预设，填 key 即可；模型列表用「获取模型列表」自动发现
 - **记忆**：搜索 / 分类 / 上限设置 / 内联编辑 / 删除
 - **提示词**（**可编辑**，ADR-086 / ADR-088）：把"我们到底跟模型说了什么"摊开 ——
@@ -507,13 +528,30 @@ OpenAI / OpenRouter / 本地 Ollama，差异只有三处且都已参数化。
 
 ![自动压缩](docs/screenshots/auto-compact.png)
 
-触发点 = `min(自己的成本上限, 本轮选中模型的上下文窗口 - 余量)`。
+```
+history_budget = min(
+    自己的成本上限,                                  # 省钱闸（默认 24000）
+    本轮选中模型的窗口 - 输出上限 - 安全余量 - 固定开销
+)
+固定开销 = 工具定义 + system + 记忆 + README + 摘要 + 时间块
+```
+
 之所以要取较小值：**模型的上下文窗口讲的是能力，不是花钱许可** ——
 1M 窗口的模型如果把历史塞满，每轮输入就要几毛钱。
 换个 32K 窗口的模型，compact 会明显更早触发。
 
+**窗口是硬保证**（ADR-100）：发请求前还会再核一遍"输入 + 输出"，
+装不下就先压低本次输出上限；连最小输出都留不出时**本地中止**
+（`stop_reason=context_limit`，不花钱、也不会有 API 报错），
+并给出三条出路：调大「设置 → 接口」里该模型的上下文上限 / 换模型 / 缩短或分叉对话。
+摘要调用本身也按同一公式检查。详见 [`docs/08-auto-compact.md`](docs/08-auto-compact.md)。
+
+**单轮最大输出**在「设置 → 常规」里改（ADR-101）：默认 **5000**；接受 `5k` / `1M` 写法；
+**`-1` = 不限**（OpenAI 兼容请求会**不发送** `max_tokens`）。它同时是窗口预算里的
+"输出预留"：`-1` 时仍然留一块（窗口的 1/4，夹在 1k~8k），否则输入会把窗口占满、
+模型没有生成空间。改完**下一轮对话**生效。
+
 摘要是一条 append-only 事件（不改写历史），`--replay` 依然能看到当时真正发生过什么。
-详见 [`docs/08-auto-compact.md`](docs/08-auto-compact.md)。
 
 ## 联网（M10）
 
@@ -589,7 +627,7 @@ harness/
   tools/registry.py      工具注册表
   tools/memory_tools.py  对话侧记忆三件套
   tools/vault_tools.py   对话侧档案三件套（只读：list/read/search）
-  tools/dream_tools.py   整理侧工具（记录 list/read + vault read/write/delete + readme_write）
+  tools/dream_tools.py   整理侧工具（记录 list/read + vault read/write/delete；旧模式另有 readme_write）
   context.py             system 提示 + 记忆/README 注入 + 历史裁剪
   events.py              事件溯源日志
   loop.py                Agent 循环（对话与 dream 共用）
@@ -620,7 +658,7 @@ run.cmd --test
 .venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -t .
 ```
 
-- **当前基线 964 条**（2026-10-17，venv，`OK (skipped=2)`）。**这个数字只在这里记一处** ——
+- **当前基线 1058 条**（2026-11-07，venv，`OK (skipped=2)`）。**这个数字只在这里记一处** ——
   它会跟着代码变；`docs/00-scope.md` 的验收标准只写结论、不抄条数。
   （那 2 条跳过是**本机环境**：建符号链接要特权、以及"大小写敏感才能构造撞名"。）
 - 全部离线（模型后端被 `FakeProvider` 替换），可以放心反复运行。

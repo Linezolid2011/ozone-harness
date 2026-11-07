@@ -159,6 +159,15 @@
                 <input type="number" id="dream-limit" value="3" min="1" max="200" class="num">
               </label>
               <button class="btn-ghost" id="dream-reload" data-i18n="action.refresh">刷新</button>
+              <!-- 整理用哪个模型（ADR-103）：与聊天页顶栏那个选择器**互相独立**。
+                   选项由 app.js 的 renderDreamPicker() 按 /api/providers 填；
+                   空的那一项 = 「跟随默认」。 -->
+              <label class="check dream-model">
+                <span data-i18n="dream.model_label">整理模型</span>
+                <select class="picker" id="dream-model"
+                        data-i18n-title="dream.model_title"
+                        title="用哪个模型整理背景档案（只影响整理，不影响对话）"></select>
+              </label>
               <span class="pane-meta" id="dream-meta"></span>
             </div>
             <div class="dream-note" data-i18n-html="dream.note_1">
@@ -215,12 +224,13 @@
             <div class="scroll-area" id="prompts-body"></div>
           </div>
 
-          <!-- 常规：主题 / 语言 / 时区，三段由 app.js 的 renderGeneralPane() 依次渲染 -->
+          <!-- 常规：主题 / 语言 / 时区 / 单轮最大输出，四段由 app.js 的 renderGeneralPane() 依次渲染 -->
           <div class="settings-pane hidden" id="pane-general">
             <div class="scroll-area" id="general-body">
               <div id="theme-body"></div>
               <div id="language-body"></div>
               <div id="timezone-body"></div>
+              <div id="output-body"></div>
             </div>
           </div>
 

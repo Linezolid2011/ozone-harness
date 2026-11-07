@@ -238,20 +238,30 @@ MESSAGES: dict[str, str] = {
     "tool.vault_read.truncated": "正文共 {total} 字符，本次只返回了前 {returned} 个",
     "tool.vault_read.display": "读 {path}",
     "tool.vault_write.desc": (
-        "写一份档案（新建或更新）。路径只能是 sections/<名字>.md 或 entities/<名字>.md；"
-        "README 要用 readme_write 写，不在这里。"
-        "sections 放段落式的背景（关于你 / 偏好 / 工作学习 / 本月 / 关系…）；"
-        "entities 放「一个人、一个项目、一个概念」各一份，正文里用 [[名字]] 链接到别的实体。"
-        "**更新已有的档案时只写你确实知道的**：没给的 frontmatter 字段会保留原值，"
-        "`updated` 日期由 harness 自动盖，你不要写。"
+        "写一份档案（新建或更新）。路径只能是 sections/<名字>.md 或 entities/<名字>.md"
+        "（原生归档月份是例外，由 harness 维护）；README / index / sections.yaml 是生成物，不要写。"
+        "sections 放段落式的背景（personal_context / work_context / this_month / taste / memory_tips…）；"
+        "entities 放「一个人、一个项目、一个概念」各一份，文件名用**小写 ASCII slug**"
+        "（例如 entities/project_photon.md），正文里用 [[slug]] 链接别的实体。"
+        "frontmatter 用原生的 name / tags / relation / status / date / place；"
+        "`created` 与 `last_updated` 由 harness 自动盖，你不要写。"
+        "**更新已有的档案时只写你确实知道的**：没给的 frontmatter 字段会保留原值。"
     ),
     "tool.vault_write.param.body": "正文（markdown）。",
-    "tool.vault_write.param.title": "标题，通常就是文件名。",
-    "tool.vault_write.param.kind": "类型：person / project / concept / section 等。",
-    "tool.vault_write.param.relation": "与用户的关系（实体常用，如「同事」）。",
+    "tool.vault_write.param.name": (
+        "实体名（小写 ASCII slug，通常与文件名一致；不填就用文件名）。"
+    ),
+    "tool.vault_write.param.title": "显示名（可选；不填就用 name/文件名）。",
+    "tool.vault_write.param.kind": "类型（旧字段；新档案优先用 tags，如 person / project / concept）。",
+    "tool.vault_write.param.relation": "与用户的关系（字符串，如「同事」）；结构化关系走 metadata。",
     "tool.vault_write.param.status": "状态（项目常用，如「进行中」「已结束」）。",
-    "tool.vault_write.param.tags": "标签，用于归类与检索。",
+    "tool.vault_write.param.place": "地点（事件/地点类实体常用）。",
+    "tool.vault_write.param.tags": "标签（类型也放这里：person / place / project / concept / event…）。",
     "tool.vault_write.param.aliases": "这个实体**别的叫法**（用于把 [[别的叫法]] 也指到这份档案）。",
+    "tool.vault_write.param.metadata": (
+        "原生的其它 frontmatter 键（对象），例如 "
+        "{\"relation\": [{\"classmate_of\": \"user\"}], \"date\": {\"2026_edition\": \"2026-10-18\"}}。"
+    ),
     "tool.vault_write.bad_path": "{path} 不能这样写",
     "tool.vault_write.bad_path.hint": (
         "README 用 readme_write；其它档案写 sections/<名字>.md 或 entities/<名字>.md"
@@ -283,6 +293,11 @@ MESSAGES: dict[str, str] = {
     "tool.readme_write.param.markdown": "README 的完整 markdown 正文。",
     "tool.readme_write.empty": "markdown 不能为空",
     "tool.readme_write.empty.display": "缺 markdown",
+    "tool.readme_write.generated": (
+        "README 是 sections 的投影，由 harness 自动重建，不能直接写。"
+        "改 sections/ 里的正文即可。"
+    ),
+    "tool.readme_write.generated.display": "README 是生成物",
     "tool.readme_write.placeholder": (
         "README 不能标成 placeholder（那是 harness 给空骨架用的标记，"
         "带上它 README 会被永久判为占位、不再注入给对话模型）"
@@ -304,6 +319,7 @@ MESSAGES: dict[str, str] = {
     "tool.common.path_missing.display": "缺 path",
     "tool.common.vault_path_hint": (
         "路径只能是 vault 里的相对路径：sections/<名字>.md、entities/<名字>.md 或 {readme}。"
+        "原生模式还允许 sections/archived_month/<YYYY-MM>/this_month.md（归档由 harness 维护）。"
     ),
     "tool.common.archive_missing": "没有这份档案：{raw}",
     "tool.common.write_failed": "写入失败：{error}",

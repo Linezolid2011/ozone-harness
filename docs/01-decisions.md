@@ -569,7 +569,7 @@ OpenAI 兼容端点认前者、Anthropic 兼容端点认后者，多发一个无
 
 ---
 
-## ADR-033 用压缩替代丢弃，且触发点是两层约束的较小值
+## ADR-033 用压缩替代丢弃，且触发点是两层约束的较小值〔窗口那一半已被 ADR-100 取代〕
 
 **决定**：历史接近预算时，把较早的部分**交给模型压成摘要**（追加一条
 `session_summary` 事件），而不是像以前那样静默丢弃最旧的几组。
@@ -3538,6 +3538,378 @@ ADR-097 的 `TimeTool(offset_hours=…)` 那个构造参数就是缝，这次只
 如果当初连缝都没留，这次就得动 `TimeTool` 的内部实现而不只是调用点。以及：把两个设置并进
 一个「常规」栏，真正的成本不在 UI，而在**同屏的两个设置生命周期其实不一样** ——
 "语言"是进程级、要原地重渲染，"时区"是下一轮生效、不用重渲染。
+
+---
+
+## ADR-100 上下文预算按"整条请求"算：输入 + 输出不得超过模型窗口
+
+**背景**：ADR-033 定的触发点是
+`history_budget = min(成本上限, context_window - 余量)`，而那个"余量"只是
+`max(2048, max_output_tokens + 4096)` 的一个常数。**它只数历史**：工具定义、
+主 system、记忆块、背景档案 README、摘要、思维链（`reasoning_content`）与
+输出预留全在窗外。本机实测（zh，默认配置）：
+
+| 请求成分 | 估算 token | 旧预算算不算 |
+|---|---:|---|
+| 工具定义（6 / 9 个） | 1 315 / 1 967 | ❌ |
+| 主 system（空记忆） | 1 188 | ❌ |
+| 记忆块（上限 6000） | 最多 6 000 | ❌ |
+| README（硬上限 1200） | 最多 1 200 | ❌ |
+| 摘要 + 时间块 | 几十 | ❌ |
+| 历史 | 24 000 | ✅ |
+
+最坏情况下一条请求约 **34 800 token**。用户把一个 32k 窗口的模型填进「接口」时，
+旧算法给出的历史预算仍是 24 000 —— "看起来没超"，但真正的请求已经比窗口大，
+API 回一句 `context length exceeded`，整轮对话直接失败。这正是用户要求的
+"任何情况下不允许 context window exceed 报错"。
+
+**决定**（三层，全部围绕同一条硬约束 `estimate(输入) + max_tokens <= context_window`）：
+
+1. **预算口径改成整条请求**。`Settings.input_room(overhead_tokens=…)` =
+   `context_window - max_output_tokens - 安全余量 - 固定开销`；
+   `history_budget()` 取它与 `context_token_budget`（省钱闸）的较小值。
+   固定开销由 `context.request_overhead_tokens()` 统一算：工具定义 + 主 system
+   （含记忆与 README）+ 摘要块 + 末尾时间块。摘要变了要重算一次。
+2. **估算把漏掉的东西补上**：`estimate_message_tokens()` 计入
+   `reasoning`（它会作为 `reasoning_content` 真的发出去）、`tool_call_id` / `name`；
+   新增 `estimate_tools_tokens()` 按真正发出去的 JSON 形状估工具定义。
+3. **发请求前再复核一次**（`AgentLoop._fit_request`）：历史已按预算裁过，
+   所以这里通常只做检查；若"输入 + 原输出上限"装不下，就**压低本次 `max_tokens`**
+   （并说一句"输出上限临时降到 N"）；如果压到 64 token 也装不下 ——
+   也就是本轮最新的工具结果/一条超大提问自己就占满窗口 —— 就**本地中止**：
+   `stop_reason="context_limit"` + 一条写清"没发送、怎么改"的 notice，
+   **绝不把一条注定 400 的请求交给 API**。这条路径也顺带覆盖了 dream。
+4. **摘要调用也是 API 请求**：`_maybe_compact` 按同一公式检查摘要 prompt，
+   放不下就从最新的待折叠组往回丢（水位线因此更保守、仍然连续），
+   而不是硬发。
+5. 安全余量 `HARNESS_CONTEXT_SAFETY_TOKENS`（默认 1024；窗口很小时按窗口 5% 收紧；
+   0 = 关闭）。估算器按字符保守估，但各家分词器不完全一样，不留余量就是"把窗口正好用满"。
+6. `prompt_built.estimated_tokens` 也改成"消息 + 工具"，与真正发出去的请求同口径。
+
+**理由**：
+
+* **窗口是用户填的事实**（「设置 → 接口」里按模型填），它管的是"模型一次能处理多少"，
+  不是"历史能占多少"。把两者混为一谈，等于在边界上骗自己。
+* **宁可少给输出，也不要整轮失败**：压低 `max_tokens` 最多少写几个字，而且
+  `finish_reason=length` 早就有显式提示；发一条超窗请求则是一个字都没有。
+* **本地中止好过 API 报错**：API 的 400 文案各家不一样、也不告诉用户"该调哪个旋钮"；
+  本地这条 notice 直接说清三种出路（调大窗口 / 换模型 / 缩短或分叉对话）。
+* **不能只靠"把窗口填对"**：用户可能填大了（不知道真实窗口），也可能换了模型但
+  忘了改那一行。程序不能假设配置是对的 —— 它必须在发出请求之前自己算一遍。
+* **成本上限仍然独立**：ADR-033 那条"窗口讲能力、不讲花钱许可"的理由不变；
+  只是窗口那一半现在按真实请求算，不再是常数余量。
+
+**验证**：
+
+* `tests/test_context_window.py`（新增）：窄窗口下压缩调用与对话调用**每一条**都满足
+  `estimate(消息 + 工具) + max_tokens <= window`；多步工具循环的每一步都满足；
+  窗口小于固定开销时 `provider.calls == []` 且 `stop_reason="context_limit"`；
+  输出上限被压低时会说；`reasoning` 与工具定义确实计入估算。
+* `tests/test_compact.py`：预算测试改成"窗口 - 输出 - 余量 - 固定开销"，
+  新增"固定开销必须先扣掉""预算不会为负""余量可关/小窗口按 5% 收紧"。
+* 全部离线（`FakeProvider`），不花钱。
+
+**教训**：**预算的口径必须与账单的口径一致。** 只数一部分，就会在最要命的地方
+（窗口边界）得出一个"看起来没超"的数字；而错的那个数字比没有数字更糟 ——
+它会让你以为已经防住了。另一个具体教训是：**先算"整条"，再切"历史"**；
+反过来（先给历史一个数，再指望常数余量兜住其余部分）在固定开销随记忆/档案增长时
+必然失守。
+
+---
+
+## ADR-101 单轮最大输出改成「设置 → 常规」里的运行期设置（-1 = 不限，默认 5k）
+
+**背景**：`max_output_tokens` 一直是 `.env` 里的 `HARNESS_MAX_OUTPUT_TOKENS`
+（默认 2048），只能改文件、改完还要重启/重读；而它直接影响每一轮的花费与
+"写长文会不会被砍断"。用户要求把它搬到「设置 → 常规」：
+
+* 接受 int 范围内的数，并接受 `5k` / `1M` 这类写法；
+* 默认 **5000**；
+* **`-1` = 彻底不限**（模型能输出多少由服务端/窗口决定）。
+
+**决定**：
+
+1. **运行期设置**：值存 `data/settings.json`（与语言/时区同一个 `SettingsStore`，
+   ADR-099）；`.env` 的 `HARNESS_MAX_OUTPUT_TOKENS` 只是**种子**（默认改成 5000）。
+   `Runtime` 装配时用 `max_output_tokens_for(data_dir, seed)` 折算一次，循环、
+   窗口预算与 provider 都从 `self.settings` 读 —— 改完**下一轮对话**生效
+   （与 `time` 工具的时区同一种生命周期，不是进程级）。
+2. **解析器统一**：把 `parse_token_limit` 从 `providers/store.py` 搬到
+   `harness/token_limit.py`（原位置 re-export，旧 import 不动），新增
+   `allow_unlimited=True`：只有它接受 `-1`；上下文上限那条路径不传，`-1` 仍然
+   看不懂（窗口没有"不限"这回事）。`0` 与 `<-1` 一律拒绝并说明为什么。
+3. **界面**：「设置 → 常规」新增「单轮最大输出」：文本框（`type=text`，因为
+   `5k` / `-1` 不是 `type=number` 的合法输入）+ 保存；`GET /api/config` 带
+   `max_output_tokens`，`POST /api/settings/output-limit` 落盘并回显。
+   前端先按同一套规则解析一次（别发一个后端会拒绝的请求），权威仍在后端。
+4. **`-1` 的协议差异**：
+   * OpenAI 兼容（DeepSeek / Kimi 开放平台 / OpenAI / Ollama…）：**不发送**
+     `max_tokens`，让服务端用自己的默认/模型上限；
+   * Anthropic 兼容（Kimi Code / Claude）：`max_tokens` 是**必填**，不能省略，
+     `-1` 时退到 `Settings.output_reserve()`（见下）；服务端自己的输出上限仍会先生效。
+5. **窗口保证不破**（ADR-100）：`-1` 只是"没有**用户**上限"，不是"无视窗口"。
+   预算里仍然留一块输出预留：`max(1024, min(8192, context_window // 4))`。
+   否则输入会把窗口占满，模型连一个字都写不出来。`_fit_request` 对
+   `-1` 只检查"输入之后还剩不剩这块预留"，剩不下仍然本地中止。
+6. 默认 5000 同时写进 `config.load()`、`i18n.DEFAULT_MAX_OUTPUT_TOKENS`、
+   `.env.example` 与 `.env`（后者是这台机器上的种子）。
+
+**理由**：
+
+* **输出上限是"花多少钱/写多长"的旋钮**，每换一个模型都可能想调；让它只能改
+  `.env` + 重启，等于把最常用的一个设置藏起来了。
+* **`-1` 比"填一个很大的数"诚实**：一个很大的数仍然会在某个点上截断，而且
+  换模型后可能超过服务端上限；`-1` 表达的是"我们不加限制"。
+* **`0` 不是"不限"**：最多输出 0 个 token 没有意义；把 `0` 当"不限"会让一次手滑
+  变成"模型突然能无限输出"。所以只认 `-1`，别的一律报错。
+* **Anthropic 不能省略**：这是协议差异，不是我们偷懒。用窗口感知的预留兜底，
+  比硬塞一个可能被 400 的大数字安全。
+* **"不限"仍要留生成空间**：窗口是"输入 + 输出"的总和（ADR-100）。把输入塞满
+  窗口之后，`-1` 只会让模型在 0 token 处停下 —— 那不是"不限"，那是"写不出来"。
+
+**验证**：
+
+* `tests/test_output_limit.py`（新增）：`-1` 只在 `allow_unlimited` 下成立；
+  `5k` / `1M` 解析；`0` / `-2` / `1.5M` 拒绝；store 读写/默认/坏值回退；
+  Runtime 真的采用 `settings.json` 里的值；OpenAI payload 在 `-1` 时**没有**
+  `max_tokens`、正常值时有；Anthropic `-1` 时用输出预留；`-1` 的一轮仍然满足
+  窗口预算。
+* `tests/test_web.py`：`/api/config` 带当前值；`POST /api/settings/output-limit`
+  接受 `5k` / `-1`、落盘、立刻反映；坏值 400 且不落盘。
+* 前端自检：常规页多出这一段、5000/5k/1M/-1 的保存与显示、0 在本地被拦住、
+  后端 400 时状态不动。
+* **真实 API 实测**（`deepseek-flash`，2026-10-24，窗口 12k / 2.5k）：12k 下
+  6 轮长对话在第 4 轮触发一次 compact（覆盖 3 组 / 6 条），摘要正确；
+  2.5k 窗口 + 长消息时 `provider.calls == 0`、`stop_reason=context_limit`、
+  `turn_end` 照常。**两种协议各测了一遍**：Anthropic 兼容时 `-1` 的 `max_tokens`
+  走 3000 的预留；之后用户把接口切成 OpenAI 兼容再测，`-1` 时请求体里
+  **完全没有** `max_tokens`，其余行为一致（都 ≤ 窗口）。
+  **实测还抓到一处**：provider 在读取 `data/settings.json` 之前构造，`-1` 的
+  兜底用了 `.env` 的 5000 —— 已改成 `resolve_provider()` 先折算再造 provider，
+  `ResolveProviderTests` 钉住。
+* 全量 1013 条 `OK (skipped=2)`；前端 544 断言 0 失败。
+
+**教训**：**把一个设置从 `.env` 搬到界面，真正的工作量不在那个输入框，而在
+"谁在读它、什么时候读"**。这次必须同时改 `Runtime`（装配时折算）、窗口预算
+（`output_reserve`）、两个 provider（一个能省略、一个不能）与四个读端
+（config / store / loop / 前端），少一处就会出现"界面显示 5k、实际还在用 2048"
+那种自相矛盾。另一个教训：**"不限"必须与"没有边界"分开** —— 用户要的是
+"我们不设上限"，而窗口、服务端和协议仍然是边界；把它们混为一谈，
+就会得到一个看起来能无限输出、实际上连一句话都写不完的设置。
+
+---
+
+## ADR-102 Anthropic 的 prompt_tokens 要把缓存命中/写入算进去（与 OpenAI 同口径）
+
+**背景**：实测（`deepseek-flash` 的 Anthropic 兼容端点，12k 窗口）发现用量里的
+`prompt_tokens` 比真实输入小一大截：`input_tokens` 只是**未命中**的输入，
+`cache_read_input_tokens` / `cache_creation_input_tokens` 是另外两列。旧实现直接
+`prompt_tokens = input_tokens`，于是：
+
+* 用量页的 prompt/total 少算缓存部分（实测每轮少 896~3712 token）；
+* 单轮 token 熔断（`max_tokens_per_turn`）也不数缓存，闸门实际比标称松；
+* 窗口保证不受影响（它用的是我们自己的估算器，不是 `usage`），但"错的数字
+  比没有数字更糟"（ADR-032 / 052 / 095）。
+
+**决定**：在 `AnthropicCompatProvider` 里按 OpenAI 的语义折算：
+
+```
+prompt_tokens     = input_tokens + cache_read + cache_creation
+cached_tokens     = cache_read
+cache_miss_tokens = input_tokens + cache_creation
+total_tokens      = prompt_tokens + output_tokens
+```
+
+`cached_tokens` 从此是 `prompt_tokens` 的**子集**（与 OpenAI 一致），不是额外的一列。
+
+**理由**：`Usage` 是跨厂商的通用类型，同一个字段在两家的含义必须一致；否则用量页、
+缓存报告（`scripts/cache_report.py`）与熔断会在不同接口上给出不同的数。
+缓存命中确实便宜（1/50），但它是**真实输入**，应计入"输入 token"与单轮 token 上限；
+费用估算早已移除，所以这里不需要按单价折扣。
+
+**验证**：`tests/test_anthropic.py` 的流式用例改成 input 100 + cache_read 40 →
+prompt 140 / cached 40 / miss 100 / total 147；全量 1013 条 `OK (skipped=2)`；
+真实 API 实测（window 12k）的 `prompt_tokens` 与"估算器 × 实际"对得上
+（估算仍约 1.4~1.9 倍保守）。
+
+**教训**：**同名指标在不同厂商那里未必是同一个东西。** `input_tokens` 听起来像
+"全部输入"，实际只是"未命中缓存的那部分"；不做一次真实请求、只看文档字段名，
+就会把一个少算 30%~80% 的数字当成总量。修这种 bug 的判据不是"看起来合理"，
+而是"拿一次真请求对一下"。
+
+---
+
+## ADR-103 整理用哪个模型是可调的：`providers.json` 的 `dream`，CLI 与 Web 共用
+
+**背景（用户要求）**：Dream 页上"用哪个模型整理"不可调。实际行为有两处，而且
+**不是同一个答案**：
+
+* Web 端整理把**聊天页顶栏当时选中的模型**直接发上去（`runDream()` 发
+  `state.selection`）—— 所以它既不可见，也不可调；想换整理模型得先切聊天模型，
+  而那样会顺手把聊天自己的模型也改掉；
+* CLI 的 `--dream` 走 `resolve_provider()` 的**全局默认**，与 Web 无关。
+
+用户要求在 Dream 页工具栏右侧（「N 次运行 · M 个待整理」左边）放一个调模型的小窗，
+并做相应的后端改动。
+
+**决定**：
+
+1. 新增一份**整理专用**的接口 / 模型选择，存在 `data/providers.json` 的 `dream`
+   键下（与 `default` 并列）：`{provider, model, effort}`。**空 = 跟随 `default`**，
+   所以全新机器不用先配一遍、已有用户升级后行为完全不变；
+2. `resolve_dream_provider()`（`harness/runtime.py`）是**唯一的决策点**：CLI 与 Web
+   共用。它只做三件事：没设过 → 全局默认；设了但**接口已被删 / 模型已从该接口的
+   列表里删掉** → 退回全局默认（不采用 `resolve_provider()` 内部那条 `profiles[0]`
+   兜底，那会悄悄换一家）；只设接口没设模型 → 用该档案的第一个模型；
+3. Web 新增 `POST /api/providers/dream`：校验接口存在、有 API key、模型在该接口的
+   模型列表里；`provider` 与 `model` 都为空 = 清掉设置（界面上叫「跟随默认」）。
+   `GET /api/providers` 多回一个 `dream`；
+4. Dream 页工具栏右侧加一个 `.picker` 下拉框（与聊天页顶栏那个**互相独立**）。
+   `runDream()` 的请求体**只带 `limit`**，不再把聊天页的 provider/model/effort 带上去；
+5. **旧页面兼容**：`POST /api/dream` 仍接受 payload 里的 `provider`/`model` 作为
+   **一次性覆盖** —— 忽略它等于在用户不知情时换模型（ADR-072 对 `dry_run` 的同一条
+   理由，只是这次不销毁任何东西，所以降级成"接受覆盖"而不是 400）。新前端不再发；
+6. 运行记录 `data/dreams/<run-id>.json` 多一个 `generation` 字段，记下这次用的是
+   哪家 / 哪个模型 —— 换过模型之后，"档案是谁整理的"必须还能回答；
+7. `ProviderStore.remove()` 顺手清掉指向被删接口的 `dream` 选择：否则存储里留着一个
+   不存在的 id，而界面显示成「跟随默认」—— 存储与界面各说一套。
+
+**理由**：
+
+* "哪个模型整理"是一个**长期影响成本与质量**的选择（实测一轮约 27k token），
+  不该只能靠"记得先去聊天页切一下"—— 而那次切换还会改掉聊天自己的模型；
+* 两个选择必须是**两个**：后台整理与对话的取舍不同（长窗口 / 便宜 / 质量），
+  没有理由强迫它们一致；
+* **持久化而不是随请求传**：CLI 与 Web 才能给出同一个答案。随请求传会让
+  "CLI 用默认、Web 用聊天页选中项"这种分家再次出现；
+* 空 = 跟随默认，是"加功能时不改变旧行为"的最小代价（ADR-058 的教训：
+  不要在用户没要求的地方自造需求）。
+
+**验证**：
+
+* `tests/test_providers.py`：`dream` 的空默认、往返 / 清空、删除接口后清掉、
+  `public_state` 暴露；`resolve_dream_provider()` 的跟随默认 / 显式选择 /
+  **不影响聊天默认** / 接口被删退回默认 / **模型被删退回默认** / 只给接口取第一个模型 /
+  档位透传 / 命令行只覆盖档位；
+* `tests/test_web.py`：`/api/providers/dream` 的保存、读回、清空，以及四类拒绝
+  （只给一项、接口不存在、模型不在列表、接口没 key）；`/api/dream` 走的是设置
+  （patch 断言调用的是 `resolve_dream_provider`）、旧页面的 payload 覆盖仍然生效；
+  `/api/providers` 里有 `dream` 键；
+* `scripts/ui_check/dom-stub.test.mjs`：下拉框的第一项（「跟随默认」+ 默认模型名）
+  与按接口分组、改模型发 `{provider, model}`、选回跟随默认发两个空串；
+  另外把"整理请求体里只有 `limit`"那条旧断言收紧成精确的键集合；
+* **真机验收：未做**（需要真接口与真钱）。这次只跑了离线测试与前端自检；
+  换模型后跑一次整理、核对运行记录里的 `generation` 属人工验收项。
+
+**教训**：`state.selection` 这种"当前页面的临时选择"被当成参数喂给**另一条业务
+路径**，读代码时很难发现 —— 它长得像一次正常传参。凡是"某个动作该用哪个模型 /
+哪份配置"的问题，都应该有一个**具名的决策点**（这里是 `resolve_dream_provider`），
+而不是让每个调用方各自从 UI 状态里抓一份。
+
+---
+
+## ADR-104 对齐 Kimi 原生 Dream vault：清单驱动、生成物只读、原生路径与 frontmatter
+
+**背景（用户提供的真档案）**：把 Kimi.com 原生 Dream vault 的导出 zip
+（`dream-vault-1a1506af-…zip`）量了一遍：59 个条目，34 份 `entities/`、7 份
+`sections/`（6 个固定 section + `sections/archived_month/2026-09/this_month.md`）、
+6 张 `raw/source_<ref>/` 图片 + 6 份 `.meta.json`，另有根级 `README.md` /
+`index.md` / `log.md` / `observations.md` / `sections.yaml` / `memory_instruction.md`。
+它和我们原来的 vault 有几处**硬冲突**：
+
+* 我们只允许 `sections/<name>.md` / `entities/<name>.md` 两层；原生多出归档月份与 raw；
+* 我们的 README 由模型用 `readme_write` 写；原生的 README/index/earlier_months 是
+  `sections.yaml` 的投影，由程序生成；
+* 我们的 frontmatter 是扁平的 `title/kind/relation/status/updated`；原生用
+  `name/tags/created/last_updated`，且 `relation` 是列表套映射、`date` 是嵌套映射、
+  还有 `place`；
+* 原生正文有 `[[sections/x|别名]]` 与 `![[raw/source_<n>/x.jpg]]`，我们只认 `[[名字]]`；
+* 原生 README 的 `chars` 是**正文字节数**、`inject_char_cap` 是**字符**预算；
+  我们一直是 token 预算；
+* 我们无法导入原生 zip（会拒绝三层路径和 raw），原生 vault 也无法直接放进我们的
+  `data/vault/`。
+
+这次先做 A（读/导入兼容）+ B（输出格式对齐）；C（observations 生命周期、完整
+`log.md` 语义、`source_ref`/引用、raw 图片入库、归档轮转）明确留到下一步。
+
+**决定**：
+
+1. **以 `sections.yaml` 是否存在作为“原生模式”开关**。有清单 = 原生：README/index/
+   earlier_months 由 harness 生成、模型只写 sections/entities；没有清单 = 旧 vault：
+   保持模型写 README、token 预算、两层路径的老行为，**不做迁移**。
+   `VaultStore.ensure_manifest()` 只在空 vault 建清单，不会把旧 vault 变成原生。
+2. **canonical / 生成物分开**：
+   * canonical：`sections/<name>.md`（含 `sections/archived_month/<YYYY-MM>/this_month.md`）、
+     `entities/<name>.md`；
+   * 生成物：`README.md`、`index.md`、`sections/earlier_months.md`；
+   * 根级旁路：`log.md`、`observations.md`、`memory_instruction.md`、`sections.yaml`；
+   * raw：`raw/source_<数字>/<图片>` 与同名 `.meta.json`，只读（本轮不做入库）。
+   `normalize_rel_path()` 与新增的 `normalize_raw_path()` 是两边唯一的路径闸。
+3. **`sections.yaml` 是唯一顺序来源**：`inject_char_cap` + 有序 `sections`（path/title）。
+   生成 README 时按清单顺序把 section 正文拼成 `## title` 块；`earlier_months` 由归档
+   月份按“新的在前”拼出；`index.md` 按 sections / entities 生成 `[[path|title]]`。
+   自定义 section 在重建时**追加**进清单（不丢），删除固定 section 则拒绝。
+4. **frontmatter 保留原生的嵌套与未知键**：新增 `name` / `created` / `last_updated` /
+   `place`，`relation` 既接受字符串（旧字段）也接受列表套映射（进 `extra`），
+   `date` 等未知键**原样 round-trip**。`created` / `last_updated` 由 harness 盖章；
+   原生写 `last_updated`，旧 vault 继续写 `updated`（旧测试与界面都读它）。
+5. **README 合同按原生实测口径**：正文用 UTF-8 字节数写 `chars`；注入上限用
+   `sections.yaml` 的 `inject_char_cap`（字符），由 harness 按段落截断并补提示；
+   `sections` / `top_tags` 是清单；`last_avatar` / `user_id` 这类 Kimi 专有字段
+   保留原值（缺失时给稳定本地值），**不假装懂它们**。
+6. **写权限**：原生模式下 `save_note()` 拒绝 README/index/earlier_months/
+   `sections.yaml`/归档月份（`_assert_editable`）；`delete_file()` 额外拒绝清单里的
+   固定 section。网页 `editable=false` 的只读标记与后端同一判据。raw 只读。
+7. **导入是安全的一等入口**：新增 `--vault-import <zip>`，先逐条校验（根级白名单、
+   两层/归档/raw 形状、拒绝符号链接与 `..`、大小写撞名、单文件/总量/条目上限、
+   图片按内容嗅探、扩展名与内容一致），全部通过后才从一次性暂存目录搬进空 vault；
+   目标非空必须显式 `--yes`。导入不改写内容，`check()` 如实报告生成物是否过期。
+8. **dream 管线**：原生模式不注册 `readme_write`；提示词改成“只写 sections/entities，
+   原生 frontmatter，不写 README/index/sections.yaml”；整理结束（以及网页保存/
+   删除后）调用 `rebuild_generated()` 重建生成物，再算 diff/check。
+9. **界面**：`![[raw/...]]` 渲染成图片（走 `/api/vault/raw`，后端再校验一次）、
+   `[[path|别名]]` 可点、嵌套树继续递归、查看器显示新字段、生成物隐藏编辑/删除
+   并说明原因；旧 vault 的 README 仍可编辑。
+10. **C 明确不做**：observations 生命周期、完整 log、`[^N]`/`source_ref` 引用、
+    raw 图片入库、归档轮转。导入的 observations/log/raw 可以**读和看**，但不会
+    自动维护；本轮不假装它们已经对齐。
+
+**理由**：
+
+* **“生成物”与“canonical”必须分家**。Kimi 的 README 是 sections 的投影；
+  让模型写 README，就必然出现“正文更新了、索引没更新”的旧问题。机械生成比提示词
+  自觉可靠，也才能把 `inject_char_cap` 真正落在字节/字符上。
+* **原生 bug 不能照抄**。真档案的 `earlier_months.md` 同时有
+  `No Earlier Months yet` 和 `## 2026-09`；`index.md` 的别名也有张冠李戴。
+  我们按“投影应当自洽”生成，导入时 `check()` 会把这些报成
+  `readme_stale` / `index_stale` / `earlier_months_stale`，重建后清零。
+* **兼容优先于迁移**。已有用户没有 `sections.yaml`，强行切原生会换掉他们模型写的
+  README、改变路径与预算。用“清单存在即原生”做开关，旧 vault 不需要一夜迁移。
+* **导入先落空 vault**。原生 zip 里可能有任意路径，直接解压就是 zip-slip；
+  先校验再暂存再搬，失败时一个字节都不动，比“解完再删”可证明得多。
+
+**验证**：
+
+* `tests/test_vault_native.py`（16 条）：归档/raw 路径接受与拒绝、嵌套 frontmatter
+  round-trip、清单解析/序列化、生成 README/index/earlier_months、`chars` 字节数、
+  生成物只读、固定 section 不可删、自定义 section 追加、字符 cap 截断、生成物过期
+  检测、raw 引用存在性、省略 `.md` 的链接目标、旧 vault 不被 `--vault-init` 转原生；
+* `tests/test_vault_import.py`（7 条）：真实形状的合成 zip 导入、非空 vault 拒绝与
+  `--yes` 覆盖、zip-slip/未知根级路径、坏图片/扩展名不符、符号链接条目、系统垃圾、
+  非 zip 文件；
+* `tests/test_web.py`：原生 `/api/vault` 的嵌套树/raw 计数、`/api/vault/file` 的新字段、
+  `/api/vault/raw` 的 200/400/404、生成物 400、改 section 后 README 重建且 check 清零；
+* `scripts/ui_check/dom-stub.test.mjs`：`![[...]]` 先于 `[[...]]`、raw `<img>` 的 src、
+  `[[path|别名]]`、生成物无编辑/删除；前端断言 554 条全绿；
+* **真机导入实测**：用户那份 59 条目 zip 导入成功（47 份档案 + 12 个 raw 条目，
+  原生模式），`check()` 如实报 3 类 stale，`rebuild_generated()` 后归零；
+  README 注入 4351 字符 / cap 6000，未截断；
+* **C 的真实维护未验**（本轮只保证可读/可显示）。
+
+**教训**：“照原样对齐”不等于“照抄原文件”。真档案里既有应当对齐的合同，也有
+导出器自己的 bug；**先量、再分清“事实形态”与“实现瑕疵”**，才不会把别人的 bug
+变成自己的不变量。另一个教训是模式开关要选**已有数据里能判断的东西**
+（`sections.yaml`），而不是新加一个“用户记得去打开”的选项。
 
 ---
 

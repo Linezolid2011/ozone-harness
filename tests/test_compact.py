@@ -39,15 +39,53 @@ class HistoryBudgetTests(unittest.TestCase):
         wide = test_settings(self.tmp, context_token_budget=24_000, context_window=1_000_000)
         self.assertEqual(wide.history_budget(), 24_000)
 
-        # 窗口只有 12K → 窗口说话（要留出系统提示与输出的余量）
+        # 窗口只有 12K → 窗口说话（要留出输出、安全余量与固定开销）
         narrow = test_settings(self.tmp, context_token_budget=24_000, context_window=12_000)
         self.assertLess(narrow.history_budget(), 12_000)
-        self.assertEqual(narrow.history_budget(), 12_000 - max(2048, 256 + 4096))
+        self.assertEqual(
+            narrow.history_budget(),
+            12_000 - narrow.max_output_tokens - narrow.context_margin(),
+            "没有工具/system 开销时，窗口那一半就是窗口减输出再减余量（ADR-100）",
+        )
 
     def test_model_window_is_never_ignored_for_cost_savings(self) -> None:
         """成本上限放宽到很大时，仍不能超过模型窗口 —— 否则会直接 400。"""
         settings = test_settings(self.tmp, context_token_budget=1_000_000, context_window=32_000)
-        self.assertLessEqual(settings.history_budget(), 32_000)
+        self.assertLessEqual(
+            settings.history_budget()
+            + settings.max_output_tokens
+            + settings.context_margin(),
+            32_000,
+        )
+
+    def test_fixed_overhead_is_subtracted_from_the_window(self) -> None:
+        """工具/system/记忆/摘要这些固定开销必须先扣掉（ADR-100）。
+
+        旧算法把它们当免费的：窗口 32K、历史预算 24K，看着没超，
+        但工具 + system + 记忆 + README 又能有一万 —— 请求就出去了。
+        """
+        settings = test_settings(
+            self.tmp, context_token_budget=1_000_000, context_window=32_000
+        )
+        overhead = 5_000
+        self.assertEqual(
+            settings.history_budget() - settings.history_budget(overhead_tokens=overhead),
+            overhead,
+        )
+
+    def test_budget_is_never_negative(self) -> None:
+        """窗口比固定开销还小时返回 0，而不是负数（负数会让裁剪逻辑发疯）。"""
+        settings = test_settings(
+            self.tmp, context_token_budget=1_000_000, context_window=2_000
+        )
+        self.assertEqual(settings.history_budget(overhead_tokens=10_000), 0)
+
+    def test_safety_margin_can_be_disabled_and_is_capped_by_a_small_window(self) -> None:
+        off = test_settings(self.tmp, context_safety_tokens=0, context_window=32_000)
+        self.assertEqual(off.context_margin(), 0)
+
+        tiny = test_settings(self.tmp, context_safety_tokens=10_000, context_window=4_000)
+        self.assertEqual(tiny.context_margin(), 200, "小窗口按 5% 收紧，不能被余量吃光")
 
 
 class CompactionTests(unittest.TestCase):
@@ -151,12 +189,14 @@ class CompactionTests(unittest.TestCase):
         narrow = self._harness(
             list(script),
             context_token_budget=1_000_000,
-            context_window=12_000,          # 只剩约 7400 的预算
+            # 窗口要小到"扣掉工具/system 之后"只剩两三千：ADR-100 之后
+            # 固定开销也算在里面，所以触发得比旧算法更早、也更靠真实窗口。
+            context_window=6_000,
         )
-        self._fill_history(narrow, turns=3)
+        self._fill_history(narrow, turns=4)   # 约 3600 token
         narrow.loop.run("现在呢")
         self.assertTrue(
-            last_summary(narrow.log.path)[0], "12K 窗口下必须更早触发"
+            last_summary(narrow.log.path)[0], "6K 窗口下必须更早触发"
         )
 
     def test_two_compactions_accumulate_the_covered_count(self) -> None:

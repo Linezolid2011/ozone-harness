@@ -85,12 +85,17 @@ def new_dream_id() -> str:
     return "dream-" + datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
 
 
-def build_dream_system_message(settings: Settings) -> Message:
+def build_dream_system_message(
+    settings: Settings, *, readme_budget: int | None = None
+) -> Message:
+    budget = (
+        settings.vault_readme_token_budget
+        if readme_budget is None
+        else int(readme_budget)
+    )
     return Message(
         role="system",
-        content=bundle().DREAM_SYSTEM_PROMPT.format(
-            readme_budget=settings.vault_readme_token_budget
-        ),
+        content=bundle().DREAM_SYSTEM_PROMPT.format(readme_budget=budget),
     )
 
 
@@ -107,6 +112,9 @@ class DreamOutcome:
     error: str | None = None
     advanced: dict[str, int] = field(default_factory=dict)
     skipped: bool = False  # 没有待整理的记录，压根没调模型
+    #: 这次整理用的是哪家 / 哪个模型（ADR-103）。写进运行记录，事后能回答
+    #: "档案是哪个模型整理的" —— 换过模型之后这一点尤其重要。
+    generation: dict[str, str] = field(default_factory=dict)
 
     @property
     def changed(self) -> int:
@@ -277,10 +285,14 @@ class DreamRunner:
         vault: VaultStore,
         emit: Callable[..., None] | None = None,
         max_sessions: int | None = None,
+        generation: dict[str, str] | None = None,
     ) -> None:
         self.settings = settings
         self.memory = memory
         self.emit = emit or (lambda kind, **data: None)
+        # 这次整理用的是哪家 / 哪个模型（ADR-103）。由调用方（CLI / Web）传进来，
+        # 因为它才是决定解析那一步；runner 只负责把它写进运行记录。
+        self.generation = dict(generation or {})
         self.run_id = new_dream_id()
         self.store = DreamRunStore(settings.dreams_dir)
         # 上一次被杀/断电留下的"跑步中"记录：这里收尾（见 mark_interrupted）
@@ -292,9 +304,21 @@ class DreamRunner:
             settings.sessions_dir, self.cursors, limit=limit
         )
         self.tracker = ReadTracker(self.cursors)
-        self.system_message = build_dream_system_message(settings)
-
         self.vault = vault
+        # 全新/空 vault：第一次**真的有记录要整理**时才切到原生格式
+        # （sections.yaml + 生成 README）。没记录就什么都不写 —— 那一次本来
+        # 就不会调用模型，没有理由顺手在 data/ 里落一个文件。
+        # 有内容但没有清单的旧 vault **不迁移**，保持"模型写 README"的旧行为。
+        if self.pending:
+            self.vault.ensure_manifest()
+        if self.vault.is_native():
+            budget = self.vault.manifest().inject_char_cap
+        else:
+            budget = settings.vault_readme_token_budget
+        self.system_message = build_dream_system_message(
+            settings, readme_budget=budget
+        )
+
         self.real_root = Path(vault.root)
         # **运行前的内存影像**：算差异要有"之前"可比，但绝不能落盘成快照
         # （那又是备份了，ADR-065）。进程结束它自然就没了。
@@ -367,6 +391,7 @@ class DreamRunner:
             "mode": mode,
             "status": "running",
             "pending": pending,
+            "generation": dict(self.generation),
             "advanced": {},
             "diff": {},
             "check": {},
@@ -399,6 +424,7 @@ class DreamRunner:
                 summary=str(record["summary"]),
                 stop_reason="nothing_pending",
                 skipped=True,
+                generation=dict(self.generation),
             )
 
         self.store.save(record)
@@ -419,6 +445,11 @@ class DreamRunner:
             # `close()` 是幂等的（文件对象重复关不报错），所以这里无条件调，
             # 不去看 EventLog 的内部句柄状态 —— 那是别人的私有字段。
             self.log.close()
+
+        # 原生模式的生成物（README / index / earlier_months）在**模型写完之后**
+        # 由 harness 重建。旧 vault 无清单，这里是 no-op。
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.vault.rebuild_generated(today=today, last_dream=today)
 
         # 差异 = 内存影像对比：运行前那份在内存里，运行后从磁盘读（同一个函数）
         diff = diff_images(vault_image(self.vault.root), self.before_image)
@@ -459,6 +490,7 @@ class DreamRunner:
             stop_reason=outcome.stop_reason,
             error=outcome.error,
             advanced=advanced,
+            generation=dict(self.generation),
         )
 
 
@@ -500,14 +532,24 @@ def render_diff(diff: dict[str, list[dict[str, Any]]]) -> str:
 
 
 def render_check(check: dict[str, Any]) -> str:
-    """结构校验那一段（README 由模型写，所以跑完必须机械地看一眼）。"""
+    """结构校验那一段（原生模式 README 是生成物，旧模式由模型写；都要机械地看一眼）。"""
     problems = list(check.get("problems") or [])
     if not check.get("exists"):
         return t("ui.dream.check_no_vault")
-    header = t(
-        "ui.dream.check_files",
-        files=check.get("files", 0),
-        tokens=f"{check.get('readme_tokens', 0)}/{check.get('readme_budget', 0)}",
+    cap = int(check.get("readme_char_cap") or 0)
+    header = (
+        t(
+            "ui.dream.check_files_chars",
+            files=check.get("files", 0),
+            used=check.get("readme_chars", 0),
+            cap=cap,
+        )
+        if cap
+        else t(
+            "ui.dream.check_files",
+            files=check.get("files", 0),
+            tokens=f"{check.get('readme_tokens', 0)}/{check.get('readme_budget', 0)}",
+        )
     )
     if not problems:
         return header + t("ui.dream.check_ok")

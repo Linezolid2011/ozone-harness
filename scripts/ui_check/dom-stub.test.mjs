@@ -400,6 +400,8 @@ function primeShell() {
     'brand-sub',
     // 设置 → 接口（providerCard / wireProviderCards 要往这些容器里画）
     'settings-meta', 'api-body', 'preset-pick', 'preset-add',
+    // 设置 → Dream 的整理模型选择器（ADR-103；选项由 renderDreamPicker 填）
+    'dream-model',
   ]) {
     doc.getElementById(id);
   }
@@ -603,7 +605,8 @@ const EXPORTS = `
   highlightMultimodalToggle, multimodalAttentionClass: () => 'attention',
   // 设置 → 接口：档案表单里的 vision_models（列表 → 文本 → 列表）
   renderApiPane, wireProviderCards, providerCard, splitModelList, parseTokenLimit,
-  loadProviders, modelRowsHtml, renderPickers,
+  loadProviders, modelRowsHtml, renderPickers, renderDreamPicker,
+  onDreamModelChange,
   // 恢复出厂设置这条路：面板装配 + 重置之后的刷新
   loadResetPane, refreshAfterFactoryReset, renderBrandAndHint, applySelection,
   // 界面语言（docs/12-i18n.md §5）：就地重渲染、语言子页、以及 i18n.js 本身
@@ -611,6 +614,7 @@ const EXPORTS = `
   renderLanguagePane, chooseLanguage, rerenderMessages, setLanguageNow,
   languageLabel, emptyChatHtml, renderThemePane, renderSessions,
   renderGeneralPane, renderTimezonePane, chooseTimezone, timezoneLabel,
+  renderOutputPane, saveOutputLimit, outputLimitLabel,
   currentLanguage: () => I18N.current(),
   // 设置 → 提示词（docs/13-prompts-page.md）：整页渲染 + 那两处要单独验的零件
   // （复制按钮的降级路径、折叠块）
@@ -2486,22 +2490,22 @@ await scenario('字段标签：界面是中文，写进文件的键名仍然是�
   await tick();
   const labels = () => hasClass(editBox(), 'vault-field-label').map((n) => n.textContent);
 
-  check('六个字段的标签都是中文', () => {
+  check('七个字段的标签都是中文', () => {
     const all = labels();
-    for (const want of ['标题', '类型', '关系', '状态', '标签（逗号分隔）', '别名（逗号分隔）']) {
+    for (const want of ['标题', '类型', '关系', '状态', '地点', '标签（逗号分隔）', '别名（逗号分隔）']) {
       assert.ok(all.includes(want), `缺少中文标签「${want}」，实际：${all.join(' / ')}`);
     }
   });
   check('标签里不再出现英文键名（也没有"tags（逗号分隔）"这种半截中文）', () => {
     const all = labels();
-    for (const bad of ['title', 'kind', 'relation', 'status',
+    for (const bad of ['title', 'kind', 'relation', 'status', 'place',
       'tags（逗号分隔）', 'aliases（逗号分隔）', 'tags', 'aliases']) {
       assert.ok(!all.includes(bad), `标签里不该还有「${bad}」`);
     }
   });
   check('键名没被丢掉：进了输入框的 title 提示（想知道文件格式的人还看得到）', () => {
     const pairs = [['vault-title', 'title'], ['vault-kind', 'kind'], ['vault-relation', 'relation'],
-      ['vault-status', 'status'], ['vault-tags', 'tags'], ['vault-aliases', 'aliases']];
+      ['vault-status', 'status'], ['vault-place', 'place'], ['vault-tags', 'tags'], ['vault-aliases', 'aliases']];
     for (const [id, key] of pairs) {
       assert.equal(field(id).getAttribute('title'), `写进 frontmatter 的键名：${key}`);
     }
@@ -2520,11 +2524,11 @@ await scenario('字段标签：界面是中文，写进文件的键名仍然是�
   fixture = (url) => (url === '/api/vault' ? { status: 200, body: VAULT } : route({})(url));
   await app.saveVaultEdit();
   await tick();
-  check('保存请求体里的键名仍然是英文（10 个键，一个不多一个不少）', () => {
+  check('保存请求体里的键名仍然是英文（11 个键，一个不多一个不少）', () => {
     assert.equal(sends.length, 1, `实际发了 ${sends.length} 次`);
     assert.deepEqual(
       Object.keys(sends[0].payload).sort(),
-      ['aliases', 'body', 'expect_hash', 'kind', 'mode', 'path', 'relation', 'status', 'tags', 'title'],
+      ['aliases', 'body', 'expect_hash', 'kind', 'mode', 'path', 'place', 'relation', 'status', 'tags', 'title'],
     );
   });
   check('中文标签没有把"哪个框对应哪个键"弄串（值都落在对的键上）', () => {
@@ -2720,7 +2724,7 @@ await scenario('整理：请求体里没有 dry_run（旧页面才会带它，�
     assert.ok(post, `应发出一次整理请求，实际：${sends.map((s) => s.url).join(',')}`);
     assert.equal('dry_run' in post.payload, false,
       'dry_run 发出去后端会 400（老页面正是这样）；被忽略则更糟 —— 那会变成一次真整理');
-    assert.deepEqual(Object.keys(post.payload).sort(), ['effort', 'limit', 'model', 'provider']);
+    assert.deepEqual(Object.keys(post.payload).sort(), ['limit']);
   });
   check('进度里是真整理的完成话术，一个"预演"都没有', () => {
     const text = byId.get('dream-progress').textContent;
@@ -2734,6 +2738,101 @@ await scenario('整理：请求体里没有 dry_run（旧页面才会带它，�
     assert.match(line, /4 条新记录（游标 0 → 末尾 4）/);
   });
 });
+
+/* ── Dream 页的整理模型（ADR-103）────────────────────────────
+   以前整理用的是**聊天页当时选中的那个模型**（不可见、不可调），CLI 又走
+   全局默认 —— 两边还不是同一个答案。现在它是一份**持久设置**：
+     ① 下拉框里第一项是「跟随默认」，并写出默认是哪个模型；
+     ② 显式选择 → POST /api/providers/dream（只发 provider + model）；
+     ③ 选回「跟随默认」= 发两个空串，把设置清掉；
+     ④ 整理请求本身**不再带** provider/model（由后端读设置）。 */
+await scenario('整理模型：跟随默认 / 显式选择，改动存到 /api/providers/dream', async () => {
+  app.state.providers = {
+    providers: [
+      {
+        id: 'deepseek', label: 'DeepSeek',
+        models: ['deepseek-flash', 'deepseek-v4-pro'],
+        masked_key: '••••', has_key: true,
+      },
+    ],
+    default: { provider: 'deepseek', model: 'deepseek-flash', effort: '' },
+    dream: { provider: '', model: '', effort: '' },
+    models: [
+      {
+        provider: 'deepseek', provider_label: 'DeepSeek', model: 'deepseek-flash',
+        model_label: 'DeepSeek V4.1 Flash', label: 'DeepSeek · DeepSeek V4.1 Flash',
+      },
+      {
+        provider: 'deepseek', provider_label: 'DeepSeek', model: 'deepseek-v4-pro',
+        model_label: 'DeepSeek V4 Pro', label: 'DeepSeek · DeepSeek V4 Pro',
+      },
+    ],
+    presets: [],
+  };
+  app.state.dreamModelSaving = null;
+  const select = shell('dream-model');
+  app.renderDreamPicker();
+
+  check('没设过 → 选中「跟随默认」，并在那一项里写出默认是哪个模型', () => {
+    assert.equal(select.value, '');
+    assert.equal(select.options.length, 3, '跟随默认 + 两个模型');
+    assert.match(select.options[0].textContent, /跟随默认/);
+    assert.match(select.options[0].textContent, /DeepSeek V4\.1 Flash/);
+    assert.equal(select.disabled, false);
+  });
+
+  check('模型按接口分组列出（与聊天页顶栏同一套数据）', () => {
+    const groups = select.children.filter((node) => node.tagName === 'OPTGROUP');
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].label, 'DeepSeek');
+    assert.deepEqual(
+      groups[0].children.map((node) => node.value),
+      ['deepseek|deepseek-flash', 'deepseek|deepseek-v4-pro'],
+    );
+  });
+
+  sends.length = 0;
+  posts = {
+    '/api/providers/dream': (payload) => ({
+      status: 200,
+      body: {
+        ok: true,
+        dream: { provider: payload.provider, model: payload.model, effort: '' },
+      },
+    }),
+  };
+  select.value = 'deepseek|deepseek-v4-pro';
+  app.onDreamModelChange();
+  await app.state.dreamModelSaving;
+  await tick();
+
+  check('改模型 → POST /api/providers/dream，而且只发 provider + model', () => {
+    const sent = sends.filter((item) => item.url === '/api/providers/dream').pop();
+    assert.ok(sent, `应发出保存请求，实际：${sends.map((item) => item.url).join(',')}`);
+    assert.deepEqual(sent.payload, {
+      provider: 'deepseek', model: 'deepseek-v4-pro',
+    });
+  });
+  check('保存后下拉框与 state 都指向它（下一轮整理就用它）', () => {
+    assert.equal(app.state.providers.dream.provider, 'deepseek');
+    assert.equal(app.state.providers.dream.model, 'deepseek-v4-pro');
+    assert.equal(select.value, 'deepseek|deepseek-v4-pro');
+  });
+
+  sends.length = 0;
+  select.value = '';
+  app.onDreamModelChange();
+  await app.state.dreamModelSaving;
+  await tick();
+  check('选回「跟随默认」= 清掉设置（两个空串），不是存一个假模型', () => {
+    const sent = sends.filter((item) => item.url === '/api/providers/dream').pop();
+    assert.ok(sent);
+    assert.deepEqual(sent.payload, { provider: '', model: '' });
+    assert.equal(app.state.providers.dream.model, '');
+    assert.equal(select.value, '');
+  });
+});
+
 
 /* 那一行**曾经是** app.js 里拼的硬编码中文（`· ${id}「${title || '(无标题)'}」`）：
    英文界面下它照样冒出「」和"(无标题)"。现在整行走 i18n，所以补一条英文侧的断言
@@ -3494,7 +3593,7 @@ await scenario('历史回放：会话视图里的 attachments 渲染成缩略图
   });
 });
 
-await scenario('分叉：每条历史用户消息都挂「分叉」按钮，点击发 /fork 并切过去', async () => {
+await scenario('分叉：每轮结尾那行统计右侧挂「分叉」按钮，点击发 /fork 并切过去', async () => {
   resetAttachments();
   const forkView = (sid) => ({
     status: 200,
@@ -3504,9 +3603,13 @@ await scenario('分叉：每条历史用户消息都挂「分叉」按钮，点�
       messages: [
         { role: 'user', text: '第一问', seq: 1 },
         { role: 'assistant', text: '答一' },
+        { role: 'meta', steps: 1, stop_reason: 'completed', elapsed: 1.2, usage: { total_tokens: 30 }, turn_seq: 1 },
         { role: 'user', text: '第二问', seq: 4 },
         { role: 'assistant', text: '答二' },
+        { role: 'meta', steps: 1, stop_reason: 'completed', elapsed: 1.5, usage: { total_tokens: 40 }, turn_seq: 4 },
         { role: 'user', text: '第三问', seq: 7 },
+        { role: 'assistant', text: '答三' },
+        { role: 'meta', steps: 1, stop_reason: 'completed', elapsed: 1.8, usage: { total_tokens: 50 }, turn_seq: 7 },
       ],
     },
   });
@@ -3526,15 +3629,23 @@ await scenario('分叉：每条历史用户消息都挂「分叉」按钮，点�
   await app.openSession('sid-fork');
   await tick();
 
-  check('每一条历史用户消息都挂「分叉」按钮（保留分叉点及以前，第一条也分得出去）', () => {
+  check('每一轮结尾那行统计都有「分叉」按钮（和步数/用量同一行，不在用户气泡上）', () => {
     assert.equal(userBubbles().length, 3);
+    assert.equal(hasClass(shell('messages'), 'meta').length, 3);
     const buttons = hasClass(shell('messages'), 'fork-btn');
     assert.equal(buttons.length, 3);
+    for (const btn of buttons) {
+      assert.ok(btn.parentNode.classList.contains('meta'), '按钮必须挂在 .meta 那一行里');
+    }
   });
 
-  await check('点第二条的「分叉」：POST /api/sessions/sid-fork/fork + {seq:4}，然后刷新侧栏并切到新会话', async () => {
+  await check('点第二轮那一行的「分叉」：POST /api/sessions/sid-fork/fork + {seq:4}，然后刷新侧栏并切到新会话', async () => {
     sends.length = 0;
-    await app.forkSession(4);
+    const buttons = hasClass(shell('messages'), 'fork-btn');
+    buttons[1].onclick({ stopPropagation() {} });
+    await tick();
+    await tick();
+    await tick();
     const sent = sends[sends.length - 1];
     assert.equal(sent.url, '/api/sessions/sid-fork/fork');
     assert.deepEqual(sent.payload, { seq: 4 });
@@ -5321,6 +5432,7 @@ await scenario('设置 → 常规：主题 / 语言 / 时区都在，改时区�
   primeShell();
   primeStaticTexts();
   app.state.timezone = 8;
+  app.state.maxOutputTokens = 5000;
   app.setLanguageNow('zh');
   app.showSettings('general');
 
@@ -5349,6 +5461,93 @@ await scenario('设置 → 常规：主题 / 语言 / 时区都在，改时区�
     await app.chooseTimezone(99);
     assert.equal(app.state.timezone, 9, '失败时状态不动');
     assert.match(shell('toast').textContent, /改时区失败/);
+  });
+});
+
+await scenario('设置 → 常规 → 单轮最大输出：5000 / 5k / 1M / -1，走 /api/settings/output-limit', async () => {
+  byId.clear();
+  primeShell();
+  primeStaticTexts();
+  app.state.maxOutputTokens = 5000;
+  app.setLanguageNow('zh');
+  app.showSettings('general');
+
+  check('常规页多出「单轮最大输出」，当前值 5000，输入框预填 5000', () => {
+    assert.match(shell('output-body').textContent, /单轮最大输出/);
+    assert.match(shell('output-body').textContent, /当前：5000/);
+    // stub 的 getElementById 是"边用边造"的：按 id 取会拿到一个不在页面上的空 div，
+    // 所以从容器里查（与查看器那几条用的是同一条规矩）。
+    const input = shell('output-body').querySelector('.num');
+    assert.ok(input, '输入框要在');
+    assert.equal(input.value, '5000');
+    assert.ok(shell('output-body').querySelector('.btn-ghost'), '保存按钮要在');
+  });
+
+  await check('保存 5k：POST {max_output_tokens:5000}，state 跟着变', async () => {
+    posts = {
+      '/api/settings/output-limit': (payload) => ({
+        status: 200,
+        body: { ok: true, max_output_tokens: payload.max_output_tokens },
+      }),
+    };
+    sends.length = 0;
+    await app.saveOutputLimit('5k');
+    const sent = sends.filter((item) => item.url === '/api/settings/output-limit').pop();
+    assert.ok(sent, '应发出保存请求');
+    assert.deepEqual(sent.payload, { max_output_tokens: 5000 });
+    assert.equal(app.state.maxOutputTokens, 5000);
+  });
+
+  await check('保存 1M：解析成 1000000（k=1000 / M=1000000，不是 1024）', async () => {
+    posts = {
+      '/api/settings/output-limit': (payload) => ({
+        status: 200,
+        body: { ok: true, max_output_tokens: payload.max_output_tokens },
+      }),
+    };
+    sends.length = 0;
+    await app.saveOutputLimit('1M');
+    const sent = sends.filter((item) => item.url === '/api/settings/output-limit').pop();
+    assert.deepEqual(sent.payload, { max_output_tokens: 1000000 });
+  });
+
+  await check('保存 -1 = 不限：POST -1，界面显示「当前：不限」', async () => {
+    posts = {
+      '/api/settings/output-limit': (payload) => ({
+        status: 200,
+        body: { ok: true, max_output_tokens: payload.max_output_tokens },
+      }),
+    };
+    sends.length = 0;
+    await app.saveOutputLimit('-1');
+    const sent = sends.filter((item) => item.url === '/api/settings/output-limit').pop();
+    assert.deepEqual(sent.payload, { max_output_tokens: -1 });
+    assert.equal(app.state.maxOutputTokens, -1);
+    assert.match(shell('output-body').textContent, /当前：不限/);
+  });
+
+  await check('0 / -2 本地就拦住（不发请求），并如实 toast', async () => {
+    sends.length = 0;
+    await app.saveOutputLimit('0');
+    assert.equal(
+      sends.filter((item) => item.url === '/api/settings/output-limit').length, 0,
+      '非法值不该发请求',
+    );
+    assert.match(shell('toast').textContent, /-1（不限）或 ≥1/);
+  });
+
+  await check('后端 400 时如实 toast，state 不变', async () => {
+    posts = {
+      '/api/settings/output-limit': () => ({
+        status: 400,
+        body: { error: '看不懂这个单轮最大输出：0' },
+      }),
+    };
+    app.state.maxOutputTokens = 5000;
+    sends.length = 0;
+    await app.saveOutputLimit('5000');
+    assert.equal(app.state.maxOutputTokens, 5000, '失败时状态不动');
+    assert.match(shell('toast').textContent, /保存失败/);
   });
 });
 
@@ -6830,6 +7029,82 @@ await scenario('守卫 10：i18n.js 的 zh 与 en 键集完全一致（漏翻只
     const en = keysOf('en');
     const missing = en.filter((key) => !keysOf('zh').includes(key));
     assert.deepEqual(missing, [], `中文里缺这些 key：${missing.join(', ')}`);
+  });
+});
+
+/* ── 原生 vault：raw 图片、path|alias 双链、生成物只读 ─────────── */
+await scenario('原生：raw 图片嵌入 / path|alias 双链 / 生成物只读', async () => {
+  check('inlineTokens 先认 ![[...]] 嵌入，再认 [[...]] 链接', () => {
+    const tokens = app.inlineTokens('![[raw/source_1/pic.png]] 和 [[sections/taste|Taste]]');
+    assert.equal(tokens.map((t) => t.t).join(','), 'embed,text,link');
+    assert.equal(tokens[0].v, 'raw/source_1/pic.png');
+    assert.equal(tokens[2].v, 'sections/taste|Taste');
+  });
+
+  setupVault();
+  const native = {
+    path: 'entities/project_photon.md',
+    title: 'project_photon',
+    name: 'project_photon',
+    tags: ['project'],
+    body: '见 [[sections/taste|Taste]] 与 ![[raw/source_1/pic.png]]。',
+    links: [{ name: 'sections/taste', path: 'sections/taste.md', title: 'Taste' }],
+    backlinks: [],
+    related: [],
+    editable: true,
+    is_generated: false,
+    extra: {
+      relation: [{ classmate_of: 'user' }],
+      date: { '2026_edition': '2026-10-18' },
+    },
+    chars: 10,
+    total_chars: 10,
+    hash: 'h1',
+  };
+  fixture = route({ 'entities/project_photon.md': native });
+  await app.openVaultFile('entities/project_photon.md', { canonical: 'entities/project_photon.md' });
+  const viewer = byId.get('vault-viewer');
+  check('path|alias 双链显示别名，点的是目标路径', () => {
+    const link = findEl(viewer, (n) => n.classList.contains('vault-link'));
+    assert.equal(link.textContent, 'Taste');
+    assert.equal(link.title, '打开 sections/taste.md');
+  });
+  check('raw 图片渲染成 <img>，src 走 /api/vault/raw', () => {
+    const img = findEl(viewer, (n) => n.tagName === 'IMG');
+    assert.ok(img, '应有图片节点');
+    assert.equal(
+      img.getAttribute('src'),
+      '/api/vault/raw?path=raw%2Fsource_1%2Fpic.png',
+    );
+    assert.equal(img.getAttribute('alt'), 'pic.png');
+  });
+  check('原生嵌套 frontmatter（relation / date）显示成可读键值，不是 [object Object]', () => {
+    const extras = hasClass(viewer, 'vault-attr-extra').map((n) => n.textContent);
+    assert.ok(extras.some((t) => t.includes('classmate_of: user')), extras.join('|'));
+    assert.ok(extras.some((t) => t.includes('2026_edition: 2026-10-18')), extras.join('|'));
+  });
+
+  fixture = route({
+    'README.md': {
+      ...native,
+      path: 'README.md',
+      title: 'README',
+      is_readme: true,
+      is_generated: true,
+      editable: false,
+      body: '## Personal Context\n\n正文。',
+      links: [],
+      name: '',
+      tags: ['user-profile'],
+    },
+  });
+  await app.openVaultFile('README.md', { canonical: 'README.md' });
+  check('原生 README 是生成物：没有编辑/删除按钮，并说明原因', () => {
+    const actions = hasClass(viewer, 'vault-view-actions').map((n) => n.textContent).join('|');
+    assert.ok(!actions.includes('编辑'), '生成物不该有编辑按钮');
+    assert.ok(!actions.includes('删除'), '生成物不该有删除按钮');
+    const note = findEl(viewer, (n) => n.classList.contains('vault-view-note'));
+    assert.ok(note && note.textContent.includes('生成'));
   });
 });
 

@@ -34,7 +34,7 @@ from harness.web import (
     serve,
 )
 
-from .helpers import seed_provider, test_settings
+from .helpers import FakeProvider, seed_provider, test_settings
 
 
 class ForwardEventTests(unittest.TestCase):
@@ -62,6 +62,19 @@ class ForwardEventTests(unittest.TestCase):
         self.assertEqual(name, "tool_result")
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["result"], {"id": 7})
+
+    def test_turn_end_carries_the_user_seq(self) -> None:
+        """前端「分叉」按钮靠 turn_end 帧里的 user_seq 定位，实时流那一侧必须有它。"""
+        from harness.loop import TurnOutcome
+
+        name, payload = forward_event(
+            "turn_end", {"outcome": TurnOutcome(text="hi", steps=1, user_seq=42)}
+        )
+        self.assertEqual(name, "turn_end")
+        self.assertEqual(payload["user_seq"], 42)
+        # 老构造方式（没有 user_seq）不能炸，给 None 就行
+        name, payload = forward_event("turn_end", {"outcome": TurnOutcome(text="hi")})
+        self.assertIsNone(payload["user_seq"])
 
 
 class ViewBuilderTests(unittest.TestCase):
@@ -106,6 +119,29 @@ class ViewBuilderTests(unittest.TestCase):
         self.assertEqual(view["messages"][1]["reasoning"], "想想")
         self.assertEqual(view["messages"][2]["display"], "记住 #1")
         self.assertEqual(view["usage"]["total_tokens"], 15)
+
+    def test_meta_line_carries_the_turn_seq_for_the_fork_button(self) -> None:
+        """每轮结尾那行统计要带这一轮 user_message 的 seq —— 「分叉」按钮靠它定位。"""
+        log = EventLog(self.settings.sessions_dir / "s-fork.jsonl", "s-fork")
+        first = log.append("user_message", text="第一问")
+        log.append(
+            "assistant_message", step=1, finish_reason="stop",
+            usage={"total_tokens": 5},
+            message=Message(role="assistant", content="答一").to_record(),
+        )
+        log.append("turn_end", steps=1, stop_reason="completed", elapsed=1.0, usage={})
+        second = log.append("user_message", text="第二问")
+        log.append(
+            "assistant_message", step=1, finish_reason="stop",
+            usage={"total_tokens": 5},
+            message=Message(role="assistant", content="答二").to_record(),
+        )
+        log.append("turn_end", steps=1, stop_reason="completed", elapsed=1.0, usage={})
+        log.close()
+
+        view = build_session_view(self.settings, "s-fork")
+        metas = [m for m in view["messages"] if m["role"] == "meta"]
+        self.assertEqual([m["turn_seq"] for m in metas], [first["seq"], second["seq"]])
 
     def test_missing_session_reports_error(self) -> None:
         self.assertIn("error", build_session_view(self.settings, "nope"))
@@ -212,6 +248,8 @@ class HttpServerTests(unittest.TestCase):
 
         self.assertEqual(config["version"], version())
         self.assertTrue(config["version"], "版本号不能是空串")
+        # 单轮最大输出（ADR-101）：默认是 .env 种子值（测试 Settings 里是 256）
+        self.assertEqual(config["max_output_tokens"], self.settings.max_output_tokens)
 
         status, body, _ = self._get("/api/sessions")
         self.assertEqual(json.loads(body)["sessions"], [])
@@ -700,6 +738,125 @@ class HttpServerTests(unittest.TestCase):
         tree = json.loads(self._get("/api/vault")[1])["tree"]
         self.assertEqual([node for node in tree if node.get("is_readme")], [])
         self.assertEqual([node["name"] for node in tree], ["sections"])
+
+    # -- 原生 vault（ADR-104）----------------------------------------
+
+    def _native_vault(self):
+        from harness.vault import (
+            Frontmatter,
+            SectionSpec,
+            SectionsManifest,
+            VaultStore,
+        )
+
+        settings = test_settings(Path(self._tmp.name) / "native")
+        store = VaultStore(settings.vault_dir)
+        store.init_skeleton()
+        store.write_manifest(
+            SectionsManifest(
+                inject_char_cap=6000,
+                sections=(
+                    SectionSpec("sections/personal_context.md", "Personal Context"),
+                    SectionSpec("sections/earlier_months.md", "Earlier Months"),
+                ),
+            )
+        )
+        store.save_note(
+            "sections/personal_context.md",
+            "Hello [[project_photon]] and ![[raw/source_1/pic.png]].",
+            Frontmatter(),
+        )
+        store.save_note(
+            "entities/project_photon.md",
+            "Body.",
+            Frontmatter(name="project_photon", tags=("project",)),
+        )
+        store.write_file(
+            "sections/archived_month/2026-09/this_month.md",
+            "---\nmonth: 2026-09\n---\n\n# 2026-09\n\nOld month.",
+        )
+        raw_dir = settings.vault_dir / "raw/source_1"
+        raw_dir.mkdir(parents=True)
+        (raw_dir / "pic.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        store.rebuild_generated(today="2026-11-07", last_dream="2026-11-07")
+        self.server.settings = settings
+        return settings, store
+
+    def test_native_vault_view_tree_nested_and_raw(self) -> None:
+        settings, store = self._native_vault()
+        view = json.loads(self._get("/api/vault")[1])
+        self.assertTrue(view["native"])
+        self.assertEqual(view["raw_files"], 1)
+        self.assertEqual(view["manifest"]["inject_char_cap"], 6000)
+        sections = next(
+            node for node in view["tree"] if node.get("type") == "dir" and node["name"] == "sections"
+        )
+        archived = next(
+            node for node in sections["children"] if node.get("name") == "archived_month"
+        )
+        self.assertEqual(archived["children"][0]["name"], "2026-09")
+        self.assertTrue(
+            any(
+                item["path"] == "sections/archived_month/2026-09/this_month.md"
+                for item in (view["files"] or [])
+            )
+        )
+        # 实体视图带原生字段
+        status, body, _ = self._get("/api/vault/file?path=entities/project_photon.md")
+        self.assertEqual(status, 200)
+        entity = json.loads(body)
+        self.assertEqual(entity["name"], "project_photon")
+        self.assertEqual(entity["tags"], ["project"])
+        self.assertTrue(entity["editable"])
+        self.assertIn("last_updated", entity)
+        # 嵌套 section 也能读
+        status, body, _ = self._get(
+            "/api/vault/file?path=sections/archived_month/2026-09/this_month.md"
+        )
+        self.assertEqual(status, 200)
+        # raw 图片（200 / 400 / 404）
+        status, payload, content_type = self._get(
+            "/api/vault/raw?path=raw/source_1/pic.png"
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("image/png", content_type)
+        self.assertTrue(payload.startswith(b"\x89PNG"))
+        status, _body, _ct = self._get("/api/vault/raw?path=raw/source_1/%2E%2E/pic.png")
+        self.assertIn(status, (400, 404))
+        status, _body, _ct = self._get("/api/vault/raw?path=raw/source_1/gone.png")
+        self.assertEqual(status, 404)
+
+    def test_native_generated_files_are_read_only_but_sections_rebuild(self) -> None:
+        settings, store = self._native_vault()
+        status, body, _ = self._get("/api/vault/file?path=README.md")
+        self.assertEqual(status, 200)
+        readme = json.loads(body)
+        self.assertFalse(readme["editable"])
+        self.assertTrue(readme["is_generated"])
+
+        status, result = self._post(
+            "/api/vault/file",
+            {"path": "README.md", "body": "nope", "mode": "update"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("生成", result["error"])
+
+        status, body, _ = self._get("/api/vault/file?path=sections/personal_context.md")
+        section = json.loads(body)
+        status, result = self._post(
+            "/api/vault/file",
+            {
+                "path": "sections/personal_context.md",
+                "body": "Changed body [[project_photon]].",
+                "mode": "update",
+                "expect_hash": section["hash"],
+                "title": "Personal Context",
+            },
+        )
+        self.assertEqual(status, 200, result)
+        self.assertIn("Changed body", (settings.vault_dir / "README.md").read_text(encoding="utf-8"))
+        self.assertEqual(store.check()["problems"], [])
+
 
     def test_vault_file_endpoint_returns_content_and_neighborhood(self) -> None:
         """点开一个档案：全文 + 元信息 + "它指向谁 / 谁指向它"。"""
@@ -1353,6 +1510,106 @@ class HttpServerTests(unittest.TestCase):
             self.settings.dreams_dir.glob("dream-*.json")
         ))
 
+    def test_dream_uses_the_saved_model_setting(self) -> None:
+        """整理模型来自**设置**（ADR-103），不是聊天页当前选中的那个。"""
+        from harness.providers.store import ProviderStore
+        from harness.runtime import GenerationChoice, ResolvedProvider
+
+        log = EventLog(
+            self.settings.sessions_dir / "s-dream-model.jsonl", "s-dream-model"
+        )
+        log.append("user_message", text="你好")
+        log.close()
+
+        status, result = self._post(
+            "/api/providers/dream",
+            {"provider": "deepseek", "model": "deepseek-v4-pro"},
+        )
+        self.assertEqual(status, 200, result)
+
+        store = ProviderStore(self.settings.data_dir / "providers.json")
+        profile = store.get("deepseek")
+        assert profile is not None
+        resolved = ResolvedProvider(
+            choice=GenerationChoice(
+                provider_id="deepseek",
+                model="deepseek-v4-pro",
+                effort="",
+                label="DeepSeek",
+            ),
+            profile=profile,
+            settings=test_settings(Path(self._tmp.name), model="deepseek-v4-pro"),
+            provider=FakeProvider([]),
+        )
+
+        with mock.patch(
+            "harness.web.resolve_dream_provider", return_value=resolved
+        ) as patched:
+            request = urllib.request.Request(
+                self.base + "/api/dream",
+                data=json.dumps({}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=60) as resp:
+                body = resp.read().decode("utf-8")
+
+        self.assertTrue(patched.called, "应当走「Dream 设置」那条解析路径")
+        self.assertIn('"model": "deepseek-v4-pro"', body)
+        # 运行记录里也记下了这次用的是哪个模型（事后能回答"档案是谁整理的"）
+        records = sorted(self.settings.dreams_dir.glob("dream-*.json"))
+        self.assertTrue(records)
+        record = json.loads(records[-1].read_text(encoding="utf-8"))
+        self.assertEqual(record["generation"]["model"], "deepseek-v4-pro")
+
+    def test_dream_payload_override_still_wins_for_old_pages(self) -> None:
+        """旧页面（缓存着旧 app.js）仍会带 provider/model；不能悄悄忽略它。
+
+        新前端已经不发了，但"请求里写了却不用"等于在用户不知情时换模型。
+        """
+        from harness.providers.store import ProviderStore
+        from harness.runtime import GenerationChoice, ResolvedProvider
+
+        log = EventLog(
+            self.settings.sessions_dir / "s-dream-override.jsonl", "s-dream-override"
+        )
+        log.append("user_message", text="你好")
+        log.close()
+
+        store = ProviderStore(self.settings.data_dir / "providers.json")
+        profile = store.get("deepseek")
+        assert profile is not None
+        resolved = ResolvedProvider(
+            choice=GenerationChoice(
+                provider_id="deepseek",
+                model="deepseek-flash",
+                effort="",
+                label="DeepSeek",
+            ),
+            profile=profile,
+            settings=self.settings,
+            provider=FakeProvider([]),
+        )
+
+        with mock.patch(
+            "harness.web.resolve_provider", return_value=resolved
+        ) as old_path, mock.patch(
+            "harness.web.resolve_dream_provider"
+        ) as saved_path:
+            request = urllib.request.Request(
+                self.base + "/api/dream",
+                data=json.dumps(
+                    {"provider": "deepseek", "model": "deepseek-flash"}
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=60) as resp:
+                resp.read()
+
+        self.assertTrue(old_path.called)
+        self.assertFalse(saved_path.called)
+
     def test_dream_with_pending_but_no_provider_says_so(self) -> None:
         """反过来：**真的有待整理**但没有接口时，必须明说是接口的问题。"""
         from harness.events import EventLog
@@ -1409,6 +1666,10 @@ class HttpServerTests(unittest.TestCase):
         blob = json.dumps(state, ensure_ascii=False)
         self.assertNotIn("test-key", blob, "完整 key 绝不能出现在响应里")
         self.assertTrue(state["providers"][0]["has_key"])
+        # 整理模型（ADR-103）：默认是"没设过"，前端据此显示「跟随默认」
+        self.assertEqual(
+            state["dream"], {"provider": "", "model": "", "effort": ""}
+        )
 
     def test_provider_save_default_and_delete(self) -> None:
         status, result = self._post(
@@ -1441,6 +1702,88 @@ class HttpServerTests(unittest.TestCase):
         profile = json.loads(body)["providers"][0]
         self.assertEqual(profile["label"], "改名了")
         self.assertTrue(profile["has_key"], "留空 key 时不能把已有的 key 清掉")
+
+    def test_dream_model_endpoint_saves_and_clears(self) -> None:
+        """整理模型（ADR-103）：保存、读回、清空（= 跟随默认）。"""
+        status, result = self._post(
+            "/api/providers/dream",
+            {"provider": "deepseek", "model": "deepseek-v4-pro"},
+        )
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["dream"]["provider"], "deepseek")
+        self.assertEqual(result["dream"]["model"], "deepseek-v4-pro")
+
+        status, body, _ = self._get("/api/providers")
+        state = json.loads(body)
+        self.assertEqual(
+            state["dream"],
+            {"provider": "deepseek", "model": "deepseek-v4-pro", "effort": ""},
+        )
+        # 聊天默认一个字节都没动：两个选择是独立的
+        self.assertEqual(state["default"]["model"], "deepseek-flash")
+
+        status, result = self._post(
+            "/api/providers/dream", {"provider": "", "model": ""}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            result["dream"], {"provider": "", "model": "", "effort": ""}
+        )
+
+    def test_dream_model_endpoint_validates(self) -> None:
+        """下拉框之外的写法一律拒绝：存进去的东西必须是能用的。"""
+        # 只给接口、不给模型
+        status, result = self._post(
+            "/api/providers/dream", {"provider": "deepseek"}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("模型", result["error"])
+
+        # 只给模型、不给接口
+        status, result = self._post(
+            "/api/providers/dream", {"model": "deepseek-flash"}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("接口", result["error"])
+
+        # 没有这个接口
+        status, result = self._post(
+            "/api/providers/dream", {"provider": "nope", "model": "x"}
+        )
+        self.assertEqual(status, 404)
+
+        # 接口里没有这个模型（界面上选不到，但手写请求能送到）
+        status, result = self._post(
+            "/api/providers/dream",
+            {"provider": "deepseek", "model": "not-in-the-list"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("not-in-the-list", result["error"])
+
+        # 三次拒绝都没有把它写进去
+        status, body, _ = self._get("/api/providers")
+        self.assertEqual(
+            json.loads(body)["dream"],
+            {"provider": "", "model": "", "effort": ""},
+        )
+
+    def test_dream_model_endpoint_rejects_a_provider_without_a_key(self) -> None:
+        """没有 key 的接口不能拿来整理 —— 现在拒，别等整理跑起来才失败。"""
+        status, _result = self._post(
+            "/api/providers/save",
+            {
+                "id": "nokey",
+                "preset": "__custom",
+                "base_url": "https://nokey.example.com/v1",
+                "models": "n-1",
+            },
+        )
+        self.assertEqual(status, 200)
+        status, result = self._post(
+            "/api/providers/dream", {"provider": "nokey", "model": "n-1"}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("API key", result["error"])
 
     def test_provider_save_rejects_empty_base_url(self) -> None:
         status, result = self._post(
@@ -2224,6 +2567,51 @@ class HttpServerTests(unittest.TestCase):
         self.assertFalse(
             (self.settings.data_dir / "settings.json").exists(), "失败时不该落盘"
         )
+
+    # -- 单轮最大输出（ADR-101）--------------------------------------
+
+    def test_output_limit_round_trip_and_reflects_in_config(self) -> None:
+        """接受 5k / -1；落盘；/api/config 立刻反映当前值。"""
+        _status, body, _ = self._get("/api/config")
+        self.assertEqual(
+            json.loads(body)["max_output_tokens"], self.settings.max_output_tokens
+        )
+
+        status, result = self._post(
+            "/api/settings/output-limit", {"max_output_tokens": "5k"}
+        )
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["max_output_tokens"], 5_000)
+
+        saved = json.loads(
+            (self.settings.data_dir / "settings.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(saved["max_output_tokens"], 5_000)
+
+        _status, config, _ = self._get("/api/config")
+        self.assertEqual(json.loads(config)["max_output_tokens"], 5_000)
+
+        # -1 = 不限
+        status, result = self._post(
+            "/api/settings/output-limit", {"max_output_tokens": -1}
+        )
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["max_output_tokens"], -1)
+        _status, config, _ = self._get("/api/config")
+        self.assertEqual(json.loads(config)["max_output_tokens"], -1)
+
+    def test_output_limit_rejects_bad_value_and_writes_nothing(self) -> None:
+        for raw in (0, -2, "abc", "1.5M"):
+            with self.subTest(raw=raw):
+                status, result = self._post(
+                    "/api/settings/output-limit", {"max_output_tokens": raw}
+                )
+                self.assertEqual(status, 400, result)
+                self.assertIn("-1", result.get("error", ""))
+                self.assertFalse(
+                    (self.settings.data_dir / "settings.json").exists(),
+                    "失败时不该落盘",
+                )
 
     def test_malformed_json_is_reported_as_malformed(self) -> None:
         """坏 JSON 必须报"JSON 不合法"，**不能**报成"你没填这个字段"。

@@ -13,7 +13,6 @@ key 只存在这个文件里。这样"抹掉 data/ 就等于抹掉所有 key"，
 from __future__ import annotations
 
 import json
-import re
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field, replace
@@ -24,6 +23,7 @@ from urllib.parse import urlsplit
 from ..atomic_io import write_text_atomic
 from ..config import Settings
 from ..i18n import t
+from ..token_limit import parse_token_limit
 from .base import ProviderError
 
 # --------------------------------------------------------------------------
@@ -51,35 +51,10 @@ class Preset:
 # 所以只保留**按模型**覆盖，没设就用这个默认值，界面上能直接改。
 DEFAULT_CONTEXT_WINDOW = 200_000
 
-# 上下文上限的写法（ADR-093）：`1000000`、`1m`、`1M`、`1000k`、`200K` 是同一个数。
-#   * k / K = **1000**、m / M = **1000000** —— 不是 1024：这里说的是"多少 token 能塞进
-#     模型"，各家标称的 200k / 1M 都是十进制；把 k 当 1024 会让 200k 变成 204800，
-#     看起来只差 2%，但那是个没人核对过的数字；
-#   * **只接受这一种"数字 + 一个单位"的形式**。`1.5M`（要配一条"怎么取整"的规则，
-#     而没有任何人给过）、`1kk`、`1k5`、`1e6`、`1kb` 一律看不懂；
-#   * 返回 `None` 而不是抛异常：调用方本来就要把"看不懂"当成"没写"，
-#     但它们**各自决定要不要说出来**（界面会拦住，见 `readModels()` 那条注释）。
-_TOKEN_UNIT = {"k": 1_000, "m": 1_000_000}
-_TOKEN_PATTERN = re.compile(r"^([0-9]+)([kKmM]?)$")
-
-
-def parse_token_limit(raw: Any) -> int | None:
-    """把 `"1000000"` / `"1M"` / `"200k"` 解析成正整数；看不懂就返回 `None`。
-
-    **全项目只有这一个实现**（Python 侧）：读 `providers.json`、解析
-    `/api/providers/save` 的 `model_limits`、以及 `context_window()` 都走它，
-    规则才不会分家。前端那份 `parseTokenLimit()` 是同一条规则的另一份实现
-    （它是"先拦一下，别发一个后端会静默丢掉的请求"），两者靠同一批用例钉住。
-    """
-    if isinstance(raw, bool):  # bool 是 int 的子类：别把 True 当成 1
-        return None
-    if isinstance(raw, int):
-        return raw if raw > 0 else None
-    match = _TOKEN_PATTERN.match(str(raw if raw is not None else "").strip())
-    if match is None:
-        return None
-    value = int(match.group(1)) * _TOKEN_UNIT.get(match.group(2).lower(), 1)
-    return value if value > 0 else None
+# token 写法（`1000000` / `1M` / `200k`）的解析在 `harness/token_limit.py`：
+# 上下文上限与「设置 → 常规」的单轮最大输出共用同一个实现（ADR-093 / ADR-101）。
+# 这里把它 re-export 出去：`harness.providers.store.parse_token_limit` 是既有调用点
+# 与测试一直在用的名字，不要因为搬家而改别人的 import。
 
 
 # 注意：除 DeepSeek 外，这里**刻意不预填模型名**。
@@ -509,6 +484,27 @@ class ProviderStore:
             "effort": str(raw.get("effort") or ""),
         }
 
+    def dream_defaults(self) -> dict[str, str]:
+        """整理（dream）用哪家 / 哪个模型 / 哪个档位。
+
+        **空串 = 跟随 `default`**（没设过就是"用聊天那套默认"）。这样全新
+        机器上不需要先配一次 dream：它继承现有的默认选择，行为与加这个设置之前
+        完全一致（ADR-103）。
+
+        为什么不放到 `data/settings.json`：那个文件有语言、时区、单轮输出，
+        都是"与用哪家接口无关"的偏好；而这里的三个字段与 `default` 是同一类
+        东西（选哪家、哪个模型），放在同一个 store 里才能让"接口被删了怎么办"
+        只有一处实现（见 `remove()`）。
+        """
+        raw = self._data.get("dream") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        return {
+            "provider": str(raw.get("provider") or ""),
+            "model": str(raw.get("model") or ""),
+            "effort": str(raw.get("effort") or ""),
+        }
+
     def all_models(self) -> list[dict[str, str]]:
         """给前端下拉用：把每家已配置好的模型摊平成一个列表。
 
@@ -536,6 +532,10 @@ class ProviderStore:
         return {
             "providers": [p.to_public() for p in self.providers()],
             "default": self.defaults(),
+            # 整理专用的选择（ADR-103）：空串 = 跟随 `default`。前端拿它画
+            # Dream 页那个模型选择器；**不在这里替它折叠成生效值** ——
+            # "没设过"与"设成了某个值"在界面上是两种状态（前者显示「跟随默认」）。
+            "dream": self.dream_defaults(),
             "models": self.all_models(),
             "presets": presets(),
         }
@@ -593,6 +593,12 @@ class ProviderStore:
                 if profiles[0].models:
                     default["model"] = profiles[0].models[0]
         self._data["default"] = default
+        # 整理的那份选择也要跟着清：否则它会继续指着一个已经不存在的接口，
+        # 而界面上那个下拉框会显示成「跟随默认」（模型不在列表里）——
+        # 存储与界面各说一套。清空之后语义与"没设过"一致：跟随 default。
+        dream = self.dream_defaults()
+        if dream["provider"] == provider_id:
+            self._data["dream"] = {"provider": "", "model": "", "effort": ""}
         self.save()
 
     def set_defaults(
@@ -608,6 +614,25 @@ class ProviderStore:
         self._data["default"] = default
         self.save()
         return default
+
+    def set_dream_defaults(
+        self, provider: str | None = None, model: str | None = None, effort: str | None = None
+    ) -> dict[str, str]:
+        """改整理（dream）专用的接口 / 模型 / 档位。**传空串 = 跟随 default**。
+
+        与 `set_defaults` 一样只负责存；"这家接口还在不在、这个模型列没列出来"
+        由调用方（Web 接口）校验 —— store 层保持"只存不判"的一致性。
+        """
+        dream = self.dream_defaults()
+        if provider is not None:
+            dream["provider"] = _clean_id(provider)
+        if model is not None:
+            dream["model"] = model.strip()
+        if effort is not None:
+            dream["effort"] = effort.strip()
+        self._data["dream"] = dream
+        self.save()
+        return dream
 
 
 # --------------------------------------------------------------------------

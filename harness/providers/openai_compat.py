@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Iterator, Sequence
 
-from ..config import Settings
+from ..config import Settings, UNLIMITED_OUTPUT
 from ..i18n import t
 from ..llm_types import (
     Finished,
@@ -99,8 +99,12 @@ class OpenAICompatProvider:
             "model": self._settings.model,
             "messages": [self._message_payload(message) for message in messages],
             "stream": True,
-            "max_tokens": max_tokens or self._settings.max_output_tokens,
         }
+        # `max_tokens` 是**可选**的（ADR-101）：-1 = 不限 → 整个字段不发，
+        # 让服务端用自己的默认/模型上限。发 -1 过去会被当成非法参数拒绝。
+        wanted = self._settings.max_output_tokens if max_tokens is None else max_tokens
+        if int(wanted) != UNLIMITED_OUTPUT:
+            payload["max_tokens"] = int(wanted)
         if tools:
             payload["tools"] = list(tools)
         if self._settings.reasoning_effort:

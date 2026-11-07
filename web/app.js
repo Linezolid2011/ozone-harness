@@ -19,6 +19,9 @@ const state = {
   // `time` 工具的时区偏移（小时），从 /api/config 读；「设置 → 常规」里改。
   // 默认 8 = UTC+8。真正的值在服务端（data/settings.json），这份只是界面镜子。
   timezone: 8,
+  // 单轮最大输出（token；-1 = 不限），从 /api/config 读；「设置 → 常规」里改（ADR-101）。
+  // 真正的值在服务端（data/settings.json），这份只是界面镜子。
+  maxOutputTokens: 5000,
   sessionId: null,
   sessions: [],
   config: null,
@@ -71,6 +74,10 @@ const state = {
   // 存在 state 里而不是只弹一个 toast：这个动作不可逆，结果必须留在页面上看得见，
   // 而且重刷（renderVaultPane）不能把它擦掉。点「刷新」时清掉。
   dreamFormatResult: null,
+  // 正在保存的「整理模型」选择（ADR-103）。整理开始时 `runDream()` 会等它落盘 ——
+  // 否则用户改完模型立刻点「整理一次」，后端存下的还是上一个模型，
+  // 界面显示的却是新选的那个（WYSIWYG 被一次网络往返打破）。
+  dreamModelSaving: null,
   // 提示词页（GET /api/prompts）：最近一次拉到的整份负载。
   // 它是**当前语言那一份**，所以切语言时必须重新拉，不能拿它重画（见 loadPrompts）。
   // 没有 loaded 标记：这一页没有"局部刷新"的读法，只有整拉 / 整画。
@@ -532,7 +539,7 @@ async function openSession(id) {
 function renderStoredMessage(message) {
   // 历史里的用户消息带 attachments（契约 §7.4）：刷新页面之后图片还在，
   // 这就是"事件日志是唯一真相来源"在界面上的样子。
-  if (message.role === 'user') { addUser(message.text, message.attachments, message.modality, message.seq); return; }
+  if (message.role === 'user') { addUser(message.text, message.attachments, message.modality); return; }
   if (message.role === 'summary') {
     addSummaryBlock(message.text, message.covered, false);
     return;
@@ -552,8 +559,9 @@ function renderStoredMessage(message) {
   }
   if (message.role === 'notice') { addNotice(message.level, message.text); return; }
   if (message.role === 'meta') {
+    // `turn_seq` 是这一轮 user_message 的 seq：右上角「分叉」按钮用它定位分叉点
     addMeta(t("meta.steps_line", { steps: message.steps, reason: message.stop_reason, elapsed: message.elapsed })
-      + usageText(message.usage));
+      + usageText(message.usage), message.turn_seq);
   }
 }
 
@@ -812,9 +820,8 @@ function stripEmpty() { $('chat-empty')?.classList.add('hidden'); }
 
 /* 用户气泡的节点（把建 DOM 与"插到哪里"分开）：发送那一刻要用它，
    这一轮结束后"按会话视图重画那一条"也要用它 —— 两边必须是同一个形状。
-   `forkSeq` 只在**历史回放**时才有（发送那一刻还没有 seq）：
-   分叉按钮挂在每一条历史用户消息上（"保留分叉点及以前"—— 第一条也分得出去）。 */
-function userBubbleNode(text, attachments, modality, forkSeq) {
+   分叉按钮**不挂在这里**：它挂在每一轮结尾那行统计（`.meta`）上，见 addMeta()。 */
+function userBubbleNode(text, attachments, modality) {
   const node = document.createElement('div');
   node.className = 'msg user';
   const bubble = el('div', 'bubble');
@@ -825,15 +832,6 @@ function userBubbleNode(text, attachments, modality, forkSeq) {
   }
   if (text) bubble.appendChild(el('div', 'bubble-text', text));
   node.appendChild(bubble);
-  if (forkSeq != null) {
-    const btn = el('button', 'fork-btn', t("chat.fork"));
-    btn.title = t("chat.fork_title");
-    btn.onclick = (event) => {
-      event.stopPropagation();
-      forkSession(Number(forkSeq));
-    };
-    node.appendChild(btn);
-  }
   return node;
 }
 
@@ -845,9 +843,9 @@ function userBubbleNode(text, attachments, modality, forkSeq) {
    （契约 §13.3）。这时气泡里必须把模型实际收到的那段文字原样摆出来 ——
    数据来自**会话视图**（`message.modality` / `attachment.ocr`），不是发送那一刻
    临时拼的：刷新页面之后看到的东西要一模一样。 */
-function addUser(text, attachments, modality, forkSeq) {
+function addUser(text, attachments, modality) {
   stripEmpty();
-  messagesEl().appendChild(userBubbleNode(text, attachments, modality, forkSeq));
+  messagesEl().appendChild(userBubbleNode(text, attachments, modality));
   state.stick = true;
   scrollToBottom();
 }
@@ -989,11 +987,30 @@ function addMemoryNote(payload) {
   scrollToBottom();
 }
 
-function addMeta(text) {
-  const el = document.createElement('div');
-  el.className = 'meta';
-  el.textContent = text;
-  messagesEl().appendChild(el);
+/* 一轮结尾那一行统计（步数 / 用时 / 用量）。
+   `forkSeq` = 这一轮 user_message 的 seq：给了就在**同一行的右侧**摆一个「分叉」
+   按钮（与"步数 / 缓存命中"那一行对齐）；不给就只是一行字（老日志 / 没有 seq 的轮）。
+   注意 `el` 是全局的建节点助手，这里用 `document.createElement` 免得被局部变量遮住。 */
+function addMeta(text, forkSeq) {
+  const row = document.createElement('div');
+  row.className = 'meta';
+  const label = document.createElement('span');
+  label.className = 'meta-text';
+  label.textContent = text;
+  row.appendChild(label);
+  if (forkSeq != null) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'fork-btn';
+    btn.textContent = t("chat.fork");
+    btn.title = t("chat.fork_title");
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      forkSession(Number(forkSeq));
+    };
+    row.appendChild(btn);
+  }
+  messagesEl().appendChild(row);
   scrollToBottom();
 }
 
@@ -1590,8 +1607,9 @@ async function send() {
         // **这一条流后面所有帧都不再被处理**（界面看着像"卡住了"，其实早就炸了）。
         // 后端目前总是带 usage（web.py 的 turn_end），但这条不该由后端来保证。
         const usage = (payload && payload.usage) || null;
+        // `user_seq` 是后端在 turn_end 帧里带回来的这一轮分叉点（老后端没有它 → 不给按钮）
         addMeta(t("meta.steps_line", { steps: payload.steps, reason: payload.stop_reason, elapsed: payload.elapsed })
-          + usageText(usage));
+          + usageText(usage), payload && payload.user_seq);
         updateUsageHint(usage && usage.total_tokens ? usage : null);
       },
       // 某一帧的处理函数抛异常时：只报一次，然后继续读后面的帧
@@ -1652,7 +1670,7 @@ async function refreshLastUserMessage(text, pending) {
   if (lastUser.text !== text) return;
   if (attachmentSignature(lastUser.attachments) !== attachmentSignature(pending)) return;
 
-  const fresh = userBubbleNode(lastUser.text, lastUser.attachments, lastUser.modality, lastUser.seq);
+  const fresh = userBubbleNode(lastUser.text, lastUser.attachments, lastUser.modality);
   const users = Array.from(messagesEl().querySelectorAll('.msg'))
     .filter((node) => node.classList.contains('user'));
   const old = users[users.length - 1];
@@ -1821,6 +1839,111 @@ async function loadDreams() {
   renderDreamMeta();
 }
 
+/* ── Dream 页的整理模型（ADR-103）───────────────────────────
+   以前整理用的是**聊天页当时选中的那个模型**（runDream 直接把 state.selection
+   发上去），所以它既看不见也调不了；而 CLI 走的是全局默认 —— 两边还不是
+   同一个答案。现在它是一种**持久设置**（存在 providers.json 的 `dream` 里），
+   CLI 与 Web 共用同一份：
+     * 空 = 「跟随默认」—— 与加这个设置之前的行为完全一样；
+     * 有值 = 明确指定；接口后来被删掉时后端会退回默认（不静默换一家）。 */
+
+/* 当前设置的那一项，形状 `provider|model`；空串 = 跟随默认。 */
+function dreamModelValue() {
+  const dream = (state.providers && state.providers.dream) || {};
+  const provider = String(dream.provider || '');
+  const model = String(dream.model || '');
+  return provider && model ? `${provider}|${model}` : '';
+}
+
+/* 「跟随默认」那一项上写什么：**模型的显示名**（不带接口前缀 —— 下拉列表里
+   本来就按接口分了组，那一项被挤窄时先丢掉接口名比丢掉模型名更合理）。
+   取不到就退回模型 id；再取不到就只写「跟随默认」。 */
+function defaultModelLabel() {
+  const data = state.providers || {};
+  const def = data.default || {};
+  const hit = (data.models || []).find(
+    (item) => item.provider === def.provider && item.model === def.model,
+  );
+  if (hit) return hit.model_label || hit.model;
+  return def.model || '';
+}
+
+function renderDreamPicker() {
+  const select = $('dream-model');
+  if (!select) return;
+  const models = (state.providers && state.providers.models) || [];
+  select.innerHTML = '';
+  if (!models.length) {
+    // 一个可用模型都没有：与聊天页顶栏那句一致，别让它看起来还能选。
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = t('dream.model_none');
+    select.appendChild(option);
+    select.disabled = true;
+    return;
+  }
+  const fallback = document.createElement('option');
+  fallback.value = '';
+  const fallbackLabel = defaultModelLabel();
+  fallback.textContent = fallbackLabel
+    ? t('dream.model_follow_named', { model: fallbackLabel })
+    : t('dream.model_follow');
+  select.appendChild(fallback);
+
+  // 与顶栏模型选择器同样的分组方式（按接口分 optgroup）
+  const groups = new Map();
+  for (const entry of models) {
+    const key = entry.provider_label || entry.provider;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  }
+  const values = [''];
+  for (const [groupLabel, list] of groups) {
+    const group = document.createElement('optgroup');
+    group.label = groupLabel;
+    for (const entry of list) {
+      const option = document.createElement('option');
+      option.value = `${entry.provider}|${entry.model}`;
+      option.textContent = entry.model_label || entry.model;
+      group.appendChild(option);
+      values.push(option.value);
+    }
+    select.appendChild(group);
+  }
+  // 存着的值不在列表里（接口 / 模型被删了）：显示「跟随默认」，
+  // 与后端的兜底行为一致；**不改写**存储（等用户下一次显式选择）。
+  const wanted = dreamModelValue();
+  select.value = values.includes(wanted) ? wanted : '';
+  select.disabled = false;
+}
+
+async function setDreamModel(provider, model) {
+  const select = $('dream-model');
+  if (select) select.disabled = true;
+  try {
+    const result = await postJSON('/api/providers/dream', { provider, model });
+    state.providers.dream =
+      (result && result.dream) || { provider, model, effort: '' };
+    toast(t('dream.model_saved'));
+  } catch (err) {
+    // **失败时不改 state**：下面那句 renderDreamPicker() 会把下拉框退回原值，
+    // 免得界面显示一个后端并没有存上的选择。
+    toast(t('dream.model_save_failed', { msg: err.message || err }));
+  } finally {
+    renderDreamPicker();
+  }
+}
+
+function onDreamModelChange() {
+  const raw = $('dream-model').value;
+  const [provider, model] = raw ? raw.split('|') : ['', ''];
+  // **串行化**：连续改两次时，后一个 POST 必须等前一个落盘才发 ——
+  // 否则两个请求的到达顺序不确定，最后存下的可能不是你最后选的那个。
+  // 这个 promise 也用于 `runDream()`：整理开始前等它落盘（见那里）。
+  const previous = state.dreamModelSaving || Promise.resolve();
+  state.dreamModelSaving = previous.then(() => setDreamModel(provider, model));
+}
+
 function renderDreamMeta() {
   const runs = state.dreams || 0;
   const pending = ((state.vault || {}).pending) || {};
@@ -1892,8 +2015,22 @@ function attrRow(label, values) {
 }
 
 /* frontmatter 里的自定义键（extra）也照原样显示成键值对。 */
+/* frontmatter 里的自定义键（extra）也照原样显示成键值对。
+   原生的 `relation` 是"列表套映射"、`date` 是嵌套映射 —— 直接 String() 会变成
+   `[object Object]`，所以这里递归展开。 */
+function extraValue(value) {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) return value.map(extraValue).join('、');
+  if (typeof value === 'object') {
+    return Object.entries(value)
+      .map(([key, inner]) => `${key}: ${extraValue(inner)}`)
+      .join('；');
+  }
+  return String(value);
+}
+
 function extraRow(key, value) {
-  const text = Array.isArray(value) ? value.join('、') : String(value === undefined || value === null ? '' : value);
+  const text = extraValue(value);
   if (!text.trim()) return null;
   const row = el('div', 'vault-attr vault-attr-extra');
   row.appendChild(el('span', 'va-k', key));
@@ -1968,14 +2105,16 @@ function staleNoticeHtml(pending) {
 function inlineTokens(text) {
   const out = [];
   const src = String(text || '');
-  const re = /\[\[([^\[\]\n]{1,120})\]\]|`([^`\n]+)`|\*\*([^*\n]+)\*\*/g;
+  // `![[raw/...]]` 是图片嵌入，必须排在普通 `[[...]]` 前面匹配。
+  const re = /!\[\[([^\[\]\n]{1,200})\]\]|\[\[([^\[\]\n]{1,200})\]\]|`([^`\n]+)`|\*\*([^*\n]+)\*\*/g;
   let last = 0;
   let match;
   while ((match = re.exec(src)) !== null) {
     if (match.index > last) out.push({ t: 'text', v: src.slice(last, match.index) });
-    if (match[1] !== undefined) out.push({ t: 'link', v: match[1].trim() });
-    else if (match[2] !== undefined) out.push({ t: 'code', v: match[2] });
-    else out.push({ t: 'bold', v: match[3] });
+    if (match[1] !== undefined) out.push({ t: 'embed', v: match[1].trim() });
+    else if (match[2] !== undefined) out.push({ t: 'link', v: match[2].trim() });
+    else if (match[3] !== undefined) out.push({ t: 'code', v: match[3] });
+    else out.push({ t: 'bold', v: match[4] });
     last = re.lastIndex;
   }
   if (last < src.length) out.push({ t: 'text', v: src.slice(last) });
@@ -2044,11 +2183,31 @@ function mdBlocks(body) {
    （比如允许内容里再出现 `*`），也不会在这里转不出来。
    `code` 刻意**不递归**：markdown 的行内代码语义就是"原样显示"，
    `` `[[X]]` `` 必须还是字面量。 */
+/* 原生 raw 素材的 URL（ADR-104）。路径本身由后端 `read_raw` 再校验一次，
+   前端只做编码 —— 绝不能把查询参数当成"已经校验过了"。 */
+function vaultRawUrl(path) {
+  return `/api/vault/raw?path=${encodeURIComponent(String(path || ''))}`;
+}
+
 function renderMdInline(host, text) {
   const src = String(text === undefined || text === null ? '' : text);
   for (const token of inlineTokens(src)) {
     if (token.t === 'text') { host.appendChild(document.createTextNode(token.v)); continue; }
     if (token.t === 'code') { host.appendChild(el('code', 'ic', token.v)); continue; }
+    if (token.t === 'embed') {
+      // 只接受 raw/ 下的图片嵌入；别的 `![[...]]` 按文字显示，不猜。
+      if (/^raw\/[^/]+\/.+\.(png|jpe?g|webp|gif)$/i.test(token.v)) {
+        const img = el('img', 'vault-raw-image');
+        img.setAttribute('src', vaultRawUrl(token.v));
+        img.setAttribute('alt', token.v.split('/').pop() || 'image');
+        img.title = token.v;
+        img.onclick = () => openLightbox(vaultRawUrl(token.v), token.v.split('/').pop() || '');
+        host.appendChild(img);
+      } else {
+        host.appendChild(document.createTextNode(`![[${token.v}]]`));
+      }
+      continue;
+    }
     if (token.t === 'bold') {
       const strong = el('strong', '');
       if (token.v.length < src.length) renderMdInline(strong, token.v);
@@ -2056,19 +2215,26 @@ function renderMdInline(host, text) {
       host.appendChild(strong);
       continue;
     }
-    // `[[名字]]`：后端已经告诉我们这个名字映射到哪个文件了，命中就做成真链接
-    const path = (state.vaultFileLinks || {})[token.v] || '';
+    // `[[名字]]` / `[[path|别名]]`：后端已经告诉我们目标映射到哪个文件了
+    const target = token.v.split('|', 1)[0].trim();
+    const label = token.v.includes('|')
+      ? token.v.slice(token.v.indexOf('|') + 1).trim() || target
+      : target;
+    const path = (state.vaultFileLinks || {})[target] || '';
     if (path) {
-      const link = el('button', 'vault-link', token.v);
+      const link = el('button', 'vault-link', label);
       link.type = 'button';
       link.title = t("vault.open_link", { name: path });
       link.onclick = () => openVaultFile(path, { canonical: path });
       host.appendChild(link);
     } else {
-      const missing = el('span', 'vault-link missing', token.v);
+      const missing = el('span', 'vault-link missing', label);
       missing.title = t("vault.not_written");
       // 「还没写」那一段文字**本身就是入口**：点它就问一句"要建一份叫《X》的吗？"
-      host.appendChild(missingLinkCreateWrap(token.v, missing));
+      // 带路径的目标（`sections/...`）不在这里建：它要么是生成物，要么是拼错了。
+      host.appendChild(
+        target.includes('/') ? missing : missingLinkCreateWrap(target, missing),
+      );
     }
   }
 }
@@ -2336,6 +2502,7 @@ function vaultNoteRow(note) {
    在界面上放一个按了必然失败的按钮是在骗人。 */
 function viewerActions(data) {
   const row = el('div', 'vault-view-actions');
+  if (data.editable === false) return row;   // 生成物 / 观察层 / 日志：没有编辑按钮
   const edit = el('button', 'mini', t("action.edit"));
   edit.type = 'button';
   edit.title = t("vault.edit_title");
@@ -2356,9 +2523,14 @@ function viewerActions(data) {
 function vaultActionRow(data) {
   const row = el('div', 'vault-actions');
   const info = el('div', 'vault-actions-info');
-  info.appendChild(el('span', '', data.is_readme
-    ? t("vault.action.index_note")
-    : t("vault.action.file_note")));
+  const note = data.is_readme
+    ? (data.editable === false
+      ? t("vault.action.generated_note")
+      : t("vault.action.index_note"))
+    : (data.is_generated
+      ? t("vault.action.generated_note")
+      : (data.editable === false ? t("vault.action.readonly_note") : t("vault.action.file_note")));
+  info.appendChild(el('span', '', note));
   row.appendChild(info);
   row.appendChild(viewerActions(data));
   return row;
@@ -2405,17 +2577,25 @@ function renderVaultViewer() {
   head.appendChild(el('div', 'vault-view-path', String(data.path || file.canonical || '')));
   head.appendChild(el('div', 'vault-view-title', String(data.title || '')));
   if (data.is_readme) {
-    head.appendChild(el('div', 'vault-view-note', t("vault.index_note")));
+    head.appendChild(el('div', 'vault-view-note',
+      data.editable === false ? t("vault.action.generated_note") : t("vault.index_note")));
   }
   host.appendChild(head);
   host.appendChild(vaultActionRow(data));
   if (state.vaultNote) host.appendChild(vaultNoteRow(state.vaultNote));
 
   const attrRows = [
+    attrRow('name', data.name),
     attrRow('kind', data.kind),
     attrRow('relation', data.relation),
     attrRow('status', data.status),
-    attrRow('updated', data.updated),
+    attrRow('created', data.created),
+    // 原生用 last_updated；旧档案只有 updated —— 标签跟着实际存在的那个走。
+    attrRow(
+      data.last_updated ? 'last_updated' : 'updated',
+      data.last_updated || data.updated,
+    ),
+    attrRow('place', data.place),
     attrRow('tags', data.tags || []),
     attrRow('aliases', data.aliases || []),
     attrRow('sources', data.sources || []),
@@ -2501,6 +2681,7 @@ function vaultDraftFromView(view) {
     kind: String(view.kind || ''),
     relation: String(view.relation || ''),
     status: String(view.status || ''),
+    place: String(view.place || ''),
     tags: (view.tags || []).join(', '),
     aliases: (view.aliases || []).join(', '),
     body: String(view.body || '').replace(/\r\n?/g, '\n'),
@@ -2509,7 +2690,7 @@ function vaultDraftFromView(view) {
 
 function vaultDraftFromCreate(dir) {
   return {
-    path: '', dir, name: '', title: '', kind: '', relation: '', status: '',
+    path: '', dir, name: '', title: '', kind: '', relation: '', status: '', place: '',
     tags: '', aliases: '', body: '',
   };
 }
@@ -2896,6 +3077,9 @@ function renderVaultEditor(viewer) {
   form.appendChild(vaultField(host, 'vault-status', t("vault.field_status"), edit.draft.status, {
     keyName: 'status', placeholder: t("vault.field_status_placeholder"),
   }));
+  form.appendChild(vaultField(host, 'vault-place', t("vault.field_place"), edit.draft.place, {
+    keyName: 'place', placeholder: t("vault.field_place_placeholder"),
+  }));
   form.appendChild(vaultField(host, 'vault-tags', t("vault.field_tags"), edit.draft.tags, {
     keyName: 'tags', placeholder: t("vault.field_tags_placeholder"),
   }));
@@ -2923,7 +3107,8 @@ function renderVaultEditor(viewer) {
   // 拿到的都是用户最新的字，而不是载入时那份。
   const single = {
     'vault-title': 'title', 'vault-kind': 'kind', 'vault-relation': 'relation',
-    'vault-status': 'status', 'vault-tags': 'tags', 'vault-aliases': 'aliases',
+    'vault-status': 'status', 'vault-place': 'place',
+    'vault-tags': 'tags', 'vault-aliases': 'aliases',
   };
   for (const [id, key] of Object.entries(single)) {
     const field = findElIn(host, id);
@@ -3115,6 +3300,7 @@ function vaultEditPayload(edit) {
     kind: String(edit.draft.kind || '').trim(),
     relation: String(edit.draft.relation || '').trim(),
     status: String(edit.draft.status || '').trim(),
+    place: String(edit.draft.place || '').trim(),
     tags: splitVaultList(edit.draft.tags),
     aliases: splitVaultList(edit.draft.aliases),
     // 载入时那一份的指纹。后端拿它判断"你看的还是不是现在磁盘上那份"。
@@ -3383,6 +3569,9 @@ function renderVaultBrowser(host) {
 }
 
 function renderVaultPane() {
+  // 整理模型选择器与 vault 数据无关：档案读不到时它照样该显示
+  // （选哪个模型不需要先有档案）。所以放在下面那个 early return **之前**。
+  renderDreamPicker();
   const data = state.vault;
   const host = $('dream-list');
   if (!host || !data) return;
@@ -3406,11 +3595,19 @@ function renderVaultPane() {
 
   const tokens = Number(check.readme_tokens || 0);
   const budget = Number(check.readme_budget || 0);
+  const charCap = Number(check.readme_char_cap || 0);
+  const readmeChars = Number(check.readme_chars || 0);
   const truncated = !!check.readme_truncated;
-  // 超预算必须醒目：README 每轮都进上下文，截掉的那半截等于白写
-  const budgetTone = truncated ? ' err' : budget && tokens > budget * 0.85 ? ' warn' : '';
-  const budgetLine = budget
-    ? `README ${fmtInt(tokens)} / ${budget} token` + (truncated ? t("vault.budget_over") : '')
+  // 超预算必须醒目：README 每轮都进上下文，截掉的那半截等于白写。
+  // 原生模式按字符 cap，旧模式按 token —— 单位不能混着说。
+  const used = charCap ? readmeChars : tokens;
+  const limit = charCap || budget;
+  const budgetTone = truncated ? ' err' : limit && used > limit * 0.85 ? ' warn' : '';
+  const budgetLine = limit
+    ? (charCap
+      ? t("vault.readme_chars", { used: fmtInt(readmeChars), cap: fmtInt(charCap) })
+      : `README ${fmtInt(tokens)} / ${fmtInt(budget)} token`)
+      + (truncated ? t("vault.budget_over") : '')
     : t("vault.readme_missing");
   const filesLine = t("vault.file_count", { files: fmtInt(check.files || 0) })
     + (check.has_readme ? '' : t("vault.no_readme"));
@@ -3838,6 +4035,9 @@ function renderFinalNote(run) {
    所以前端这边必须一个字都不发；这条也有断言盯着（脚本里会检查请求体的键）。 */
 async function runDream() {
   if (state.busy) { toast(t("toast.busy_running")); return; }
+  // 刚改完模型就点「整理一次」：等那次保存落盘再用 —— 否则后端会用上一个
+  // 模型跑这一轮，而界面上显示的是新选的那个（ADR-103）。
+  if (state.dreamModelSaving) await state.dreamModelSaving;
   const limit = Number($('dream-limit').value) || 3;
   setBusy(true);
   $('dream-run').disabled = true;
@@ -3851,10 +4051,9 @@ async function runDream() {
 
   try {
     await streamPost('/api/dream', {
+      // 整理模型**不再随请求发**：它存在 providers.json 的 `dream` 里，
+      // 由后端 / CLI 共用（ADR-103）。请求体只带这一轮的业务参数。
       limit,
-      provider: state.selection.provider,
-      model: state.selection.model,
-      effort: state.selection.effort,
     }, {
       // 这几个中间帧（step / tool_call / tool_result / notice / text / reasoning）
       // 与对话页是同一套 emitter 发出来的，所以按对话页的老办法复用即可。
@@ -3959,12 +4158,18 @@ async function loadUsage() {
    这是后端 `parse_token_limit()` 的**同一套规则**（两份实现）：这一份的职责是
    "别发一个后端会静默丢掉、而用户以为存上了的请求"，权威那一份在 Python 里
    （档案也可能被人手改）。两边靠同一批用例钉住。 */
-function parseTokenLimit(raw) {
+function parseTokenLimit(raw, options = {}) {
+  // `allowUnlimited` 只给「设置 → 常规 → 单轮最大输出」用（ADR-101）：`-1` = 不限。
+  // 上下文上限那条路径不传它，所以那里 -1 仍然不认（窗口没有"不限"这回事）。
+  const allowUnlimited = !!(options && options.allowUnlimited);
   const text = String(raw === undefined || raw === null ? '' : raw).trim();
-  const match = /^([0-9]+)([kKmM]?)$/.exec(text);
+  const match = /^(-?)([0-9]+)([kKmM]?)$/.exec(text);
   if (!match) return null;
-  const unit = match[2].toLowerCase();
-  const value = Number(match[1]) * (unit === 'm' ? 1000000 : unit === 'k' ? 1000 : 1);
+  const unit = match[3].toLowerCase();
+  const value = (match[1] === '-' ? -1 : 1)
+    * Number(match[2])
+    * (unit === 'm' ? 1000000 : unit === 'k' ? 1000 : 1);
+  if (allowUnlimited && value === -1) return -1;
   // `Number.isSafeInteger`：`9999999999999m` 这种会溢出成不精确的数，那就不认
   return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
@@ -3986,6 +4191,8 @@ async function loadProviders() {
   state.providers = await getJSON('/api/providers');
   renderApiPane();
   renderPickers();
+  // 接口页增删模型之后，Dream 页那个选择器也要跟着变（它列的是同一批模型）
+  renderDreamPicker();
 }
 
 function renderApiPane() {
@@ -4246,6 +4453,7 @@ function renderGeneralPane() {
   renderThemePane();
   renderLanguagePane();
   renderTimezonePane();
+  renderOutputPane();
 }
 
 /* ── 主题面板 ─────────────────────────────────────────── */
@@ -4406,6 +4614,66 @@ async function chooseTimezone(offset) {
   renderTimezonePane();
 }
 
+/* ── 单轮最大输出（token；-1 = 不限，ADR-101）──────────────────
+   与语言不同，它是**下一轮对话**装配 Runtime 时才读的，所以生成中也能改。
+   接受 `5000` / `5k` / `1M`；`-1` = 不限。前端先解析一次（别发一个后端会
+   静默丢掉的请求），权威那一份仍在后端（`parse_token_limit`）。 */
+
+function outputLimitLabel(value) {
+  return Number(value) === -1 ? t('settings.output.unlimited') : String(value);
+}
+
+function renderOutputPane() {
+  const host = $('output-body');
+  if (!host) return;
+  clearNode(host);
+
+  const card = el('div', 'reset-card');
+  card.appendChild(el('div', 'section-title', t('settings.general.output')));
+  card.appendChild(el('p', 'reset-lead', t('settings.output.lead')));
+
+  const row = el('div', 'toolbar');
+  const input = el('input', 'num');
+  input.type = 'text';   // 允许 `5k` / `-1`：type=number 会把它们当成非法输入
+  input.id = 'output-limit-input';
+  input.value = String(state.maxOutputTokens);
+  input.placeholder = '5000';
+  row.appendChild(input);
+  const save = el('button', 'btn-ghost', t('settings.output.save'));
+  save.type = 'button';
+  save.id = 'output-limit-save';
+  save.onclick = () => { saveOutputLimit(input.value); };
+  row.appendChild(save);
+  card.appendChild(row);
+
+  card.appendChild(el('div', 'hint',
+    t('settings.output.current', { value: outputLimitLabel(state.maxOutputTokens) })));
+  card.appendChild(el('div', 'hint', t('settings.output.note')));
+  host.appendChild(card);
+}
+
+let outputSaving = false;
+async function saveOutputLimit(raw) {
+  if (outputSaving) return;
+  const parsed = parseTokenLimit(raw, { allowUnlimited: true });
+  if (parsed === null) { toast(t('settings.output.invalid')); return; }
+  outputSaving = true;
+  try {
+    const result = await postJSON('/api/settings/output-limit', {
+      max_output_tokens: parsed,
+    });
+    state.maxOutputTokens = result.max_output_tokens ?? parsed;
+    toast(t('settings.output.saved', {
+      value: outputLimitLabel(state.maxOutputTokens),
+    }));
+  } catch (err) {
+    toast(t('settings.output.failed', { msg: err.message || err }));
+  } finally {
+    outputSaving = false;
+  }
+  renderOutputPane();
+}
+
 /* 这一轮之后该重跑的东西（契约 §5 的第 1~5 项，一项都不能少）：
      1. applyStaticTexts()（含 document.title）；
      2. 会话列表、顶部品牌行、模型/档位选择器、两个开关与它们的提示句；
@@ -4427,6 +4695,8 @@ async function rerenderForLanguage() {
   renderSessions();
   renderBrandAndHint();
   renderPickers();
+  // 「跟随默认（接口 · 模型）」那一项的字也是文案：切语言时必须重画
+  renderDreamPicker();
   renderWebToggle();
   renderMultimodalToggle();
   // 3. 输入框占位符在 index.html 上（data-i18n-placeholder，第 1 步已经填过），
@@ -5431,6 +5701,12 @@ async function refreshAfterFactoryReset() {
 
   // 接口配置没了：重拉才知道"现在一个接口都没有"
   state.config = await getJSON('/api/config').catch(() => state.config);
+  // `data/` 整个没了，`settings.json` 里的时区与单轮最大输出也回到种子值：
+  // 界面镜子必须跟着回默认，否则重置之后进「常规」还会显示旧值。
+  if (state.config) {
+    state.timezone = state.config.timezone ?? 8;
+    state.maxOutputTokens = state.config.max_output_tokens ?? 5000;
+  }
   state.providers = await getJSON('/api/providers')
     .catch(() => ({ providers: [], models: [], presets: [], default: {} }));
   renderPickers();   // 没有可用模型时它自己会落到"（没有可用模型…）"，并顺手修好 state.selection
@@ -5513,6 +5789,8 @@ async function init() {
   setLanguageNow((state.config || {}).language || 'zh');
   // 时区从 /api/config 读初值（默认 8 = UTC+8），设置 → 常规 里改
   state.timezone = (state.config || {}).timezone ?? 8;
+  // 单轮最大输出从 /api/config 读初值（默认 5000；-1 = 不限），设置 → 常规 里改
+  state.maxOutputTokens = (state.config || {}).max_output_tokens ?? 5000;
   // 静态字（含 <title> 与 <html lang>）：先把页面壳换成该显示的语言，再往下画
   applyStaticTexts();
   // 「有没有可用模型」这个判据由 renderBrandAndHint 一起算好返回（见它的注释）
@@ -5521,6 +5799,9 @@ async function init() {
   const defaults = state.providers.default || {};
   if (defaults.provider && defaults.model) applySelection(defaults);
   else renderPickers();
+  // 整理模型（ADR-103）：与聊天顶栏那个选择器是**两个独立的选择**，
+  // 初始值来自 /api/providers 的 `dream`（空 = 跟随默认）。
+  renderDreamPicker();
   renderWebToggle();
   renderMultimodalToggle();   // 默认开：不依赖任何 config，页面上先亮起来
 
@@ -5580,6 +5861,8 @@ async function init() {
     loadDreamPane().catch((err) => toast(String(err.message || err)));
   };
   $('usage-reload').onclick = loadUsage;
+  // 整理模型：改了就存（**不影响聊天页那个选择器**，两者是独立的设置）
+  $('dream-model').onchange = onDreamModelChange;
   $('dream-run').onclick = () => {
     // 二次确认说的是**现在这件事的代价**：单向、没有预演、补救只有清空重来
     if (confirm(t("dream.confirm_1")

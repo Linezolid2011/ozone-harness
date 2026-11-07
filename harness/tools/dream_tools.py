@@ -247,10 +247,18 @@ class VaultOutlineTool:
         prefix = str(args.get("prefix") or "")
         entries = self._store.list_files(prefix)
         readme, truncated = self._store.readme_text()
+        manifest = self._store.manifest() if self._store.is_native() else None
         payload: dict[str, Any] = {
             "files": [],
             "readme_tokens": estimate_tokens(readme),
-            "readme_budget": self._store.readme_token_budget,
+            "readme_chars": len(readme),
+            "readme_budget": (
+                manifest.inject_char_cap
+                if manifest is not None
+                else self._store.readme_token_budget
+            ),
+            "readme_char_cap": manifest.inject_char_cap if manifest is not None else 0,
+            "native": manifest is not None,
             "readme_truncated": truncated,
         }
         if not self._store.exists():
@@ -359,6 +367,7 @@ class VaultWriteTool:
             "properties": {
                 "path": {"type": "string", "description": _path_hint()},
                 "body": {"type": "string", "description": t("tool.vault_write.param.body")},
+                "name": {"type": "string", "description": t("tool.vault_write.param.name")},
                 "title": {"type": "string", "description": t("tool.vault_write.param.title")},
                 "kind": {
                     "type": "string",
@@ -372,6 +381,10 @@ class VaultWriteTool:
                     "type": "string",
                     "description": t("tool.vault_write.param.status"),
                 },
+                "place": {
+                    "type": "string",
+                    "description": t("tool.vault_write.param.place"),
+                },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -381,6 +394,10 @@ class VaultWriteTool:
                     "type": "array",
                     "items": {"type": "string"},
                     "description": t("tool.vault_write.param.aliases"),
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": t("tool.vault_write.param.metadata"),
                 },
             },
             "required": ["path", "body"],
@@ -410,14 +427,47 @@ class VaultWriteTool:
                 return tuple(part.strip() for part in value.split(",") if part.strip())
             return ()
 
+        extra: dict[str, Any] = {}
+        metadata = args.get("metadata")
+        if isinstance(metadata, dict):
+            known = {
+                "name",
+                "title",
+                "kind",
+                "relation",
+                "status",
+                "created",
+                "last_updated",
+                "updated",
+                "place",
+                "tags",
+                "aliases",
+                "sources",
+            }
+            extra = {
+                str(key): value
+                for key, value in metadata.items()
+                if str(key) not in known
+            }
+        relation_value = args.get("relation")
+        if isinstance(relation_value, (list, dict)):
+            # 原生 `relation` 是"列表套映射"（`- classmate_of: user`）；
+            # 工具参数保留 string 兼容，结构化写法走 extra。
+            extra["relation"] = relation_value
+            relation_text = ""
+        else:
+            relation_text = str(relation_value or "").strip()
+
         incoming = Frontmatter(
+            name=str(args.get("name") or "").strip(),
             title=str(args.get("title") or "").strip(),
             kind=str(args.get("kind") or "").strip(),
-            relation=str(args.get("relation") or "").strip(),
+            relation=relation_text,
             status=str(args.get("status") or "").strip(),
-            updated=self._today,
+            place=str(args.get("place") or "").strip(),
             tags=_list("tags"),
             aliases=_list("aliases"),
+            extra=extra,
         )
 
         try:
@@ -547,6 +597,13 @@ class ReadmeWriteTool:
                 {"error": t("tool.readme_write.empty")},
                 t("tool.readme_write.empty.display"),
             )
+        if self._store.is_native():
+            # 原生模式 README 是 sections 的投影，由 harness 重建。
+            return ToolResult(
+                False,
+                {"error": t("tool.readme_write.generated")},
+                t("tool.readme_write.generated.display"),
+            )
         # `status: placeholder` 是 harness 给"空骨架"用的标记：带上它，
         # README 会被**永久判为占位、一个字都不注入**（readme_text 返回空）。
         # 模型自己写出这个状态就等于把整个档案层静音了 —— 直接拒绝。
@@ -610,8 +667,13 @@ def build_dream_tools(
     max_result_chars: int = 2000,
     today: str = "",
 ) -> tuple[Any, ...]:
-    """按固定顺序组装 dream 的工具集（顺序固定 = tools 数组字节稳定）。"""
-    return (
+    """按固定顺序组装 dream 的工具集（顺序固定 = tools 数组字节稳定）。
+
+    原生 vault（有 `sections.yaml`）不注册 `readme_write`：README 由 harness
+    从 sections 重建，模型不该直接写它。旧 vault 保持原样（模型仍写 README），
+    这样升级不会让既有档案失去维护手段。
+    """
+    tools: list[Any] = [
         RecordsListTool(sessions_dir, cursors, max_result_chars=max_result_chars),
         RecordsReadTool(
             sessions_dir,
@@ -625,5 +687,7 @@ def build_dream_tools(
         VaultReadTool(store, max_result_chars=max_result_chars),
         VaultWriteTool(store, today=today),
         VaultDeleteTool(store),
-        ReadmeWriteTool(store),
-    )
+    ]
+    if not store.is_native():
+        tools.append(ReadmeWriteTool(store))
+    return tuple(tools)

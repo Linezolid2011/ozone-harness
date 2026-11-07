@@ -225,6 +225,8 @@ const I18N = {
   "vault.edit_title": '改这份档案的正文与元信息',   // app.js:2169
   "vault.delete_title": '删除这份档案（会先让你确认，并列出谁指向它）',   // app.js:2175
   "vault.action.index_note": '这是索引，模型每一轮都能看到它；可以直接改它（删除会被后端拒绝）。',   // app.js:2188
+  "vault.action.generated_note": '这是 harness 生成/维护的文件（README / index / earlier_months），只读；改 sections / entities 后会自动重建。',   // app.js:2188
+  "vault.action.readonly_note": '这份文件只读（观察层 / 运行日志 / 旁路导出），不能在这里改。',   // app.js:2188
   "vault.action.file_note": '这份档案模型下一轮就会看到。改它不会自动更新 README 与别处的双链。',   // app.js:2189
   "vault.viewer_empty": '从左边点一个档案看看。',   // app.js:2212
   "vault.loading": '读取中…',   // app.js:2221
@@ -284,6 +286,8 @@ const I18N = {
   "vault.field_relation_placeholder": '例如：用户本人、同事',   // app.js:2722
   "vault.field_status": '状态',   // app.js:2724
   "vault.field_status_placeholder": '例如：活跃 / 进行中',   // app.js:2725
+  "vault.field_place": '地点',   // app.js:2726
+  "vault.field_place_placeholder": '例如：北京中关村学院',   // app.js:2726
   "vault.field_tags": '标签（逗号分隔）',   // app.js:2727
   "vault.field_tags_placeholder": '例如：用户, 同学',   // app.js:2728
   "vault.field_aliases": '别名（逗号分隔）',   // app.js:2730
@@ -330,6 +334,7 @@ const I18N = {
   "vault.chip_pending": '<span class="chip warn">待整理</span>',   // app.js:3232
   "vault.chip_latest": '<span class="chip ok">最新</span>',   // app.js:3233
   "vault.budget_over": '（超预算，注入时会被截断）',   // app.js:3241
+  "vault.readme_chars": 'README {used} / {cap} 字符',   // app.js:3242
   "vault.readme_missing": '还没读到 README',   // app.js:3242
   "vault.file_count": `{files} 份档案`,   // app.js:3243
   "vault.no_readme": ' · 没有 README（模型看不到索引）',   // app.js:3244
@@ -427,6 +432,12 @@ const I18N = {
   "dream.starting": '开始整理…（会真正写档案并推进游标，而且不可撤销）\n',   // app.js:3683
   "dream.run_started": `运行 {id}（{when}）`,   // app.js:3700
   "dream.model": `模型 {model}`,   // app.js:3703
+  // ── Dream 页的整理模型（ADR-103）──────────────────────────
+  "dream.model_follow": '跟随默认',   // app.js:1891
+  "dream.model_follow_named": `跟随默认（{model}）`,   // app.js:1893
+  "dream.model_none": '（没有可用模型，先去「接口」页添加）',   // app.js:1878
+  "dream.model_saved": '整理模型已保存',   // app.js:1943
+  "dream.model_save_failed": `保存整理模型失败：{msg}`,   // app.js:1946
   "dream.new_records": ` {n} 条新记录（游标 {from} → 末尾 {to}）`,   // app.js:3706
   // 待整理会话那一行**整行**是一条文案：引号也是各语言自己的（英文界面下不该冒出「」）
   "dream.record_line": `· {id}「{title}」`,   // app.js:3731
@@ -820,6 +831,8 @@ const I18N = {
   "action.refresh": "刷新",
   "dream.run_once": "整理一次",
   "dream.session_limit": "会话上限",
+  "dream.model_label": "整理模型",
+  "dream.model_title": "用哪个模型整理背景档案（只影响整理，不影响对话）",
   "dream.note_1": `
               dream 把会话记录整理成<strong>背景档案</strong>：<code>data/vault/README.md</code>
               ＋ <code>sections/</code> 段落 ＋ <code>entities/</code> 实体。
@@ -863,6 +876,15 @@ const I18N = {
   "settings.timezone.saved": "时区已改为 {zone}",
   "settings.timezone.failed": "改时区失败：{msg}",
   "settings.timezone.note": "存在 data/settings.json 里；改完下一轮对话生效。",
+  "settings.general.output": "单轮最大输出",
+  "settings.output.lead": "每一轮最多让模型输出多少 token。改完下一轮对话生效。",
+  "settings.output.save": "保存",
+  "settings.output.current": "当前：{value}",
+  "settings.output.saved": "单轮最大输出已改为 {value}",
+  "settings.output.failed": "保存失败：{msg}",
+  "settings.output.invalid": "要填一个整数：-1（不限）或 ≥1；也可以写 5k / 1M。",
+  "settings.output.unlimited": "不限",
+  "settings.output.note": "接受 5000 / 5k / 1M（k = 1000、M = 1000000）；-1 = 不限。存在 data/settings.json 里。",
   },
 
   /* ── English (en) ───────────────────────────────────
@@ -1056,6 +1078,8 @@ const I18N = {
   "vault.edit_title": "Edit the body and metadata of this file",   // app.js:2169
   "vault.delete_title": "Delete this file (you are asked first, and everyone pointing at it is listed)",   // app.js:2175
   "vault.action.index_note": "This is the index, the model sees it every turn; you can edit it directly (deleting it is refused by the backend).",   // app.js:2188
+  "vault.action.generated_note": "This file is generated/maintained by the harness (README / index / earlier_months) and is read-only; edit sections / entities and it rebuilds automatically.",   // app.js:2188
+  "vault.action.readonly_note": "This file is read-only (observations / run log / auxiliary export) and cannot be edited here.",   // app.js:2188
   "vault.action.file_note": "The model will see this file on the next turn. Editing it does not update the README or backlinks elsewhere automatically.",   // app.js:2189
   "vault.viewer_empty": "Click a file on the left to look at it.",   // app.js:2212
   "vault.loading": "Loading…",   // app.js:2221
@@ -1115,6 +1139,8 @@ const I18N = {
   "vault.field_relation_placeholder": "e.g. the user, a colleague",   // app.js:2722
   "vault.field_status": "Status",   // app.js:2724
   "vault.field_status_placeholder": "e.g. active / in progress",   // app.js:2725
+  "vault.field_place": "Place",   // app.js:2726
+  "vault.field_place_placeholder": "e.g. Beijing Zhongguancun Academy",   // app.js:2726
   "vault.field_tags": "Tags (comma separated)",   // app.js:2727
   "vault.field_tags_placeholder": "e.g. user, classmate",   // app.js:2728
   "vault.field_aliases": "Aliases (comma separated)",   // app.js:2730
@@ -1161,6 +1187,7 @@ const I18N = {
   "vault.chip_pending": "<span class=\"chip warn\">To tidy up</span>",   // app.js:3232
   "vault.chip_latest": "<span class=\"chip ok\">Up to date</span>",   // app.js:3233
   "vault.budget_over": "(over budget, truncated on injection)",   // app.js:3241
+  "vault.readme_chars": "README {used} / {cap} characters",   // app.js:3242
   "vault.readme_missing": "README not read yet",   // app.js:3242
   "vault.file_count": "{files} files",   // app.js:3243
   "vault.no_readme": " · no README (the model cannot see the index)",   // app.js:3244
@@ -1259,6 +1286,12 @@ const I18N = {
 `,   // app.js:3683
   "dream.run_started": "Run {id} ({when})",   // app.js:3700
   "dream.model": "Model {model}",   // app.js:3703
+  // ── Dream page: which model does the tidy-up (ADR-103) ──
+  "dream.model_follow": "Follow the default",   // app.js:1891
+  "dream.model_follow_named": "Follow the default ({model})",   // app.js:1893
+  "dream.model_none": "(No models available — add one under Providers)",   // app.js:1878
+  "dream.model_saved": "Tidy-up model saved",   // app.js:1943
+  "dream.model_save_failed": "Failed to save the tidy-up model: {msg}",   // app.js:1946
   "dream.new_records": " {n} new records (cursor {from} → end {to})",   // app.js:3706
   "dream.record_line": '· {id} "{title}"',   // app.js:3731
   "dream.untitled": "(untitled)",   // app.js:3733
@@ -1660,6 +1693,8 @@ Only {language} is touched: the other language is left untouched.`,
   "action.refresh": "Refresh",
   "dream.run_once": "Tidy up once",
   "dream.session_limit": "Chat limit",
+  "dream.model_label": "Tidy-up model",
+  "dream.model_title": "Which model consolidates the background archives (tidy-up only; chat is unaffected)",
   "dream.note_1": `
               dream compresses chat logs into <strong>vault files</strong>: <code>data/vault/README.md</code>
               + <code>sections/</code> entries + <code>entities/</code> entities.
@@ -1702,6 +1737,15 @@ Only {language} is touched: the other language is left untouched.`,
   "settings.timezone.saved": "Timezone changed to {zone}",
   "settings.timezone.failed": "Failed to change timezone: {msg}",
   "settings.timezone.note": "Stored in data/settings.json; takes effect on the next turn.",
+  "settings.general.output": "Max output per turn",
+  "settings.output.lead": "The most tokens the model may produce in one turn. Takes effect on the next turn.",
+  "settings.output.save": "Save",
+  "settings.output.current": "Current: {value}",
+  "settings.output.saved": "Per-turn max output changed to {value}",
+  "settings.output.failed": "Failed to save: {msg}",
+  "settings.output.invalid": "Enter an integer: -1 (unlimited) or >= 1; 5k / 1M shorthand is accepted.",
+  "settings.output.unlimited": "unlimited",
+  "settings.output.note": "Accepts 5000 / 5k / 1M (k = 1000, M = 1000000); -1 = unlimited. Stored in data/settings.json.",
   },
 };
 

@@ -278,23 +278,31 @@ MESSAGES: dict[str, str] = {
     "tool.vault_read.display": "read {path}",
     "tool.vault_write.desc": (
         "Write an archive (create or update). The path must be sections/<name>.md or "
-        "entities/<name>.md; "
-        "the README is written with readme_write, not here. "
-        "sections holds prose background (about you / preferences / work and study / this "
-        "month / relationships ...); "
-        "entities holds one file each for a person, a project or a concept, with [[name]] "
-        "links to other entities in the body. "
+        "entities/<name>.md (archived months are a harness-managed exception). "
+        "README / index / sections.yaml are generated artifacts: do not write them. "
+        "sections holds prose background (personal_context / work_context / this_month / "
+        "taste / memory_tips ...); "
+        "entities holds one file each for a person, a project or a concept, using a "
+        "**lowercase ASCII slug** as the file name (for example entities/project_photon.md), "
+        "with [[slug]] links to other entities in the body. "
+        "frontmatter uses the native name / tags / relation / status / date / place; "
+        "`created` and `last_updated` are stamped by the harness, so do not write them. "
         "**When updating an existing archive, write only what you actually know**: frontmatter "
-        "fields you do not give keep their current values, "
-        "and the `updated` date is stamped by the harness, so do not write it."
+        "fields you do not give keep their current values."
     ),
     "tool.vault_write.param.body": "The body (markdown).",
-    "tool.vault_write.param.title": "The title, usually the file name.",
-    "tool.vault_write.param.kind": "The kind: person / project / concept / section, and so on.",
-    "tool.vault_write.param.relation": "The relationship to the user (common for entities, for example \"colleague\").",
+    "tool.vault_write.param.name": "The entity name (lowercase ASCII slug, usually the file name; defaults to the file name).",
+    "tool.vault_write.param.title": "Display name (optional; defaults to name / file name).",
+    "tool.vault_write.param.kind": "The old kind field; new archives should use tags (person / project / concept ...).",
+    "tool.vault_write.param.relation": "The relationship to the user (a string, for example \"colleague\"); structured relations go in metadata.",
     "tool.vault_write.param.status": "The status (common for projects, for example \"in progress\", \"finished\").",
-    "tool.vault_write.param.tags": "Tags, used for grouping and retrieval.",
+    "tool.vault_write.param.place": "The place (common for event / place entities).",
+    "tool.vault_write.param.tags": "Tags (put the type here too: person / place / project / concept / event ...).",
     "tool.vault_write.param.aliases": "**Other names** for this entity (so that [[other name]] points at this archive too).",
+    "tool.vault_write.param.metadata": (
+        "Other native frontmatter keys (an object), for example "
+        "{\"relation\": [{\"classmate_of\": \"user\"}], \"date\": {\"2026_edition\": \"2026-10-18\"}}."
+    ),
     "tool.vault_write.bad_path": "{path} cannot be written this way",
     "tool.vault_write.bad_path.hint": (
         "use readme_write for the README; write other archives as sections/<name>.md or "
@@ -331,6 +339,11 @@ MESSAGES: dict[str, str] = {
     "tool.readme_write.param.markdown": "The complete markdown body of the README.",
     "tool.readme_write.empty": "markdown must not be empty",
     "tool.readme_write.empty.display": "missing markdown",
+    "tool.readme_write.generated": (
+        "README is a projection of the sections and the harness rebuilds it automatically; "
+        "it cannot be written directly. Edit the bodies under sections/ instead."
+    ),
+    "tool.readme_write.generated.display": "README is generated",
     "tool.readme_write.placeholder": (
         "The README must not be marked as placeholder (that is the marker the harness uses "
         "for an empty skeleton; "
@@ -355,7 +368,8 @@ MESSAGES: dict[str, str] = {
     "tool.common.path_missing.display": "missing path",
     "tool.common.vault_path_hint": (
         "The path must be a relative path inside the vault: sections/<name>.md, "
-        "entities/<name>.md or {readme}."
+        "entities/<name>.md or {readme}. Native mode also allows "
+        "sections/archived_month/<YYYY-MM>/this_month.md (archives are harness-managed)."
     ),
     "tool.common.archive_missing": "No such archive: {raw}",
     "tool.common.write_failed": "Write failed: {error}",

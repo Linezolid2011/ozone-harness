@@ -10,13 +10,13 @@ M6 起多了"选哪家接口、哪个模型、哪个思考档位"这件事。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .config import Settings
 from .context import vault_prompt_text, web_tools_text
 from .events import EventLog, new_session_id
-from .i18n import t, timezone_for
+from .i18n import max_output_tokens_for, t, timezone_for
 from .loop import AgentLoop
 from .memory import open_memory
 from .net.config import TOOLS_FILE, ToolStore
@@ -133,7 +133,17 @@ def resolve_provider(
     if not chosen_effort and is_default:
         chosen_effort = default["effort"]
 
-    effective = resolve_settings(settings, profile, chosen_model, chosen_effort)
+    # 单轮最大输出是**运行期设置**（ADR-101）：必须在**造 provider 之前**折算进去。
+    # 否则 `-1`（不限）时 Anthropic 的兜底 `max_tokens` 会读到 `.env` 的旧种子值，
+    # 而循环的窗口预算用的是 `settings.json` 里的新值 —— 两边分家（实测发现：
+    # 种子 5000 / 真正的预留 3000，请求会比预算多带 2000 token 的输出预留）。
+    runtime_settings = replace(
+        settings,
+        max_output_tokens=max_output_tokens_for(
+            settings.data_dir, settings.max_output_tokens
+        ),
+    )
+    effective = resolve_settings(runtime_settings, profile, chosen_model, chosen_effort)
     provider = build_provider(effective, profile)
     return ResolvedProvider(
         choice=GenerationChoice(
@@ -148,6 +158,60 @@ def resolve_provider(
     )
 
 
+def resolve_dream_provider(
+    settings: Settings,
+    *,
+    store: ProviderStore | None = None,
+    effort: str = "",
+) -> ResolvedProvider:
+    """决定**整理（dream）**用哪家 / 哪个模型（ADR-103）。
+
+    优先级：`providers.json` 里的 `dream` 选择 > 全局 `default`。
+
+    * **没设过**（`dream.provider` 与 `dream.model` 都为空）→ 与加这个设置之前
+      完全一样：走 `resolve_provider()` 的全局默认。这样全新机器不需要先配一遍，
+      已有用户也不会因为升级而换模型；
+    * **设了但接口已经不存在** → 同样退回全局默认。不能走 `resolve_provider()`
+      内部那条"取 `profiles[0]`"的兜底：那会让它悄悄用**另一家**接口，
+      而用户看到的是"我明明选过"（与本项目讨厌的静默降级同一条理由）；
+    * **设了但模型已从这家接口的列表里删掉** → 也退回全局默认。界面那边
+      同样显示成「跟随默认」（值不在列表里），两边必须一致；
+    * **只设了 provider、没设 model** → 用这家档案里的第一个模型（与接口页
+      "默认模型"那一栏的行为一致）。
+
+    CLI 与 Web **都走这里**，所以"用哪个模型整理"只有一个答案。
+
+    `effort` 只给命令行留一个口子：`--dream --effort high` 想只改这一轮的档位、
+    不改模型时用（空串 = 用设置里存的那个）。
+    """
+    store = store or provider_store(settings)
+    dream = store.dream_defaults()
+    provider_id = dream["provider"].strip()
+    model = dream["model"].strip()
+    chosen_effort = (effort or dream["effort"]).strip()
+    if not provider_id and not model:
+        return resolve_provider(settings, effort=chosen_effort, store=store)
+    profile = store.get(provider_id) if provider_id else None
+    if profile is None:
+        # 选过的那家已经被删了 / 档案被手改坏了：退回全局默认，**不改写配置**
+        # （下一次用户在界面上显式选一次就会覆盖它）。
+        return resolve_provider(settings, effort=chosen_effort, store=store)
+    if model and profile.models and model not in profile.models:
+        # 选过的模型已经从这家接口的模型列表里删掉了。界面那边会显示成
+        # 「跟随默认」（值不在列表里），所以这里也必须退回全局默认 ——
+        # 否则界面说"跟随默认"、实际却还在用那个已删掉的模型。
+        return resolve_provider(settings, effort=chosen_effort, store=store)
+    if not model and profile.models:
+        model = profile.models[0]
+    return resolve_provider(
+        settings,
+        provider_id=profile.id,
+        model=model,
+        effort=chosen_effort,
+        store=store,
+    )
+
+
 class Runtime:
     def __init__(
         self,
@@ -159,7 +223,15 @@ class Runtime:
         web: bool = True,
         web_search: bool = False,
     ) -> None:
-        self.settings = settings
+        # 单轮最大输出是**运行期可改**的（设置 → 常规，ADR-101）：
+        # `.env` 只是种子，`data/settings.json` 里的值优先。在这里统一折算一次，
+        # 循环、窗口预算、provider 都从 `self.settings` 读，不会两处读到不同的数。
+        self.settings = replace(
+            settings,
+            max_output_tokens=max_output_tokens_for(
+                settings.data_dir, settings.max_output_tokens
+            ),
+        )
         self.generation = generation
         self._web_enabled = web
         # 会话级的"联网搜索"开关（默认关）。
@@ -237,7 +309,7 @@ class Runtime:
                         )
                     )
             self.provider = provider or OpenAICompatProvider(
-                settings,
+                self.settings,
                 label=t("ui.runner.default_label"),
                 send_reasoning_content=True,
             )

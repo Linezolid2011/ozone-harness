@@ -36,6 +36,7 @@ from .runtime import (
     NO_PROVIDER_HELP,
     Runtime,
     provider_store,
+    resolve_dream_provider,
     resolve_provider,
 )
 from .web import serve as serve_web
@@ -742,8 +743,20 @@ def cmd_dream(settings: Settings, args: argparse.Namespace, renderer: ConsoleRen
         )
         emit_line()
 
+        # 整理用哪个模型（ADR-103）：**默认与 Web 走同一个决策点** ——
+        # Dream 页设了就用它，没设就跟全局默认。命令行上的 `--provider/--model`
+        # 是**这一次**的覆盖（与 `--once` 那套一致），不改持久设置。
+        override = bool(args.provider or args.model)
         try:
-            resolved = resolve_provider(settings)
+            if override:
+                resolved = resolve_provider(
+                    settings,
+                    provider_id=args.provider or "",
+                    model=args.model or "",
+                    effort=args.effort or "",
+                )
+            else:
+                resolved = resolve_dream_provider(settings, effort=args.effort or "")
         except ProviderError as exc:
             emit_line(str(exc), "red")
             return 2
@@ -753,18 +766,22 @@ def cmd_dream(settings: Settings, args: argparse.Namespace, renderer: ConsoleRen
                 f" · thinking {resolved.settings.reasoning_effort}"
                 if resolved.settings.reasoning_effort
                 else ""
-            ),
+            )
+            + ("" if override else "  （来自 Dream 设置或全局默认）"),
             "dim",
         )
         emit_line()
 
         runner = DreamRunner(
             provider=resolved.provider,
-            settings=settings,
+            # 用**折算过的** settings：context_window 已按选中的模型解析，
+            # 否则 dream 的窗口保证会拿兜底的 200k 去算（ADR-100）。
+            settings=resolved.settings,
             memory=memory,
             vault=vault,
             emit=renderer,
             max_sessions=args.dream_limit or settings.dream_max_sessions,
+            generation=resolved.choice.to_dict(),
         )
         outcome = runner.run()
 
@@ -1052,8 +1069,6 @@ def cmd_vault(settings: Settings) -> int:
         )
         return 0
 
-    used = int(report.get("readme_tokens") or 0)
-    budget = int(report.get("readme_budget") or 0)
     emit_line(
         f"  档案 {report.get('files', 0)} 个（上限 {settings.vault_max_files}）"
         + (
@@ -1063,10 +1078,32 @@ def cmd_vault(settings: Settings) -> int:
             else "  ← 没有 README，模型看不到索引"
         )
     )
-    emit_line(
-        f"  README {used}/{budget} token"
-        + ("  ← 已超预算，注入时会被截断" if report.get("readme_truncated") else "")
-    )
+    char_cap = int(report.get("readme_char_cap") or 0)
+    if char_cap:
+        emit_line(
+            f"  README {int(report.get('readme_chars') or 0)}/{char_cap} 字符"
+            + (
+                "  ← 已超注入上限，注入时会被截断"
+                if report.get("readme_truncated")
+                else ""
+            )
+        )
+    else:
+        used = int(report.get("readme_tokens") or 0)
+        budget = int(report.get("readme_budget") or 0)
+        emit_line(
+            f"  README {used}/{budget} token"
+            + ("  ← 已超预算，注入时会被截断" if report.get("readme_truncated") else "")
+        )
+    manifest = report.get("manifest") or {}
+    if manifest:
+        emit_line(
+            f"  sections {len(manifest.get('sections') or [])} 个"
+            f"（inject_char_cap {manifest.get('inject_char_cap')}）",
+            "dim",
+        )
+    if report.get("raw_files"):
+        emit_line(f"  raw 素材 {report['raw_files']} 个", "dim")
     emit_line()
     entries = [entry for entry in store.list_files() if entry.path != README_NAME]
     if entries:
@@ -1127,10 +1164,68 @@ def cmd_vault_init(settings: Settings) -> int:
     for item in created:
         emit_line(f"  + {item}")
     emit_line(
-        "（README 的正文由整理流程写。现在这份只是占位，"
+        "（README 的正文由第一次整理按 sections 生成；现在这份只是占位，"
         "所以对话模型还看不到任何档案内容。）",
         "dim",
     )
+    return 0
+
+
+def cmd_vault_import(settings: Settings, zip_path: str, *, assume_yes: bool = False) -> int:
+    """导入原生 Kimi Dream vault（zip）。**只写空 vault**，除非显式 --yes。"""
+    from .vault_import import VaultImportError, import_vault_zip
+
+    store = _vault_store(settings)
+    try:
+        result = import_vault_zip(zip_path, store, overwrite=assume_yes)
+    except VaultImportError as exc:
+        emit_line(str(exc), "red")
+        return 2
+    emit_line(
+        f"已导入 {result['files']} 个文件"
+        f"（档案 {result['notes']} / raw {result['raw']}）：{result['path']}",
+        "green",
+    )
+    emit_line(
+        f"  原生格式：{'是（有 sections.yaml）' if result.get('native') else '否（没有 sections.yaml）'}",
+        "dim",
+    )
+    for warning in result.get("warnings") or []:
+        emit_line(f"  ⚠ {warning}", "yellow")
+    report = store.check()
+    problems = report.get("problems") or []
+    if problems:
+        emit_line("结构校验发现的问题：", "yellow")
+        for problem in problems:
+            emit_line(f"  - {problem}", "yellow")
+    else:
+        emit_line("结构校验通过。", "green")
+    return 0
+
+
+def cmd_vault_rebuild(settings: Settings) -> int:
+    """重建原生 vault 的 README / index / earlier_months。旧 vault 拒绝。"""
+    store = _vault_store(settings)
+    if not store.is_native():
+        emit_line(
+            "这个 vault 没有 sections.yaml（旧格式），不重建 README/index。"
+            "旧档案继续由模型写 README；要迁移请手工加 sections.yaml。",
+            "yellow",
+        )
+        return 1
+    result = store.rebuild_generated()
+    emit_line(
+        f"已重建 README / index / earlier_months（sections {len(result['sections'])} 个）",
+        "green",
+    )
+    report = store.check()
+    problems = report.get("problems") or []
+    if problems:
+        emit_line("结构校验发现的问题：", "yellow")
+        for problem in problems:
+            emit_line(f"  - {problem}", "yellow")
+    else:
+        emit_line("结构校验通过。", "green")
     return 0
 
 
@@ -1211,6 +1306,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vault-init", action="store_true", help="建立背景档案的空骨架（不写任何内容）"
     )
+    parser.add_argument(
+        "--vault-import",
+        metavar="ZIP",
+        help="导入原生 Kimi Dream vault（zip；目标必须是空 vault，--yes 覆盖）",
+    )
+    parser.add_argument(
+        "--vault-rebuild",
+        action="store_true",
+        help="按 sections.yaml 重建 README / index / earlier_months（仅原生 vault）",
+    )
     parser.add_argument("--web", action="store_true", help="启动 Web 界面（默认只监听本机）")
     parser.add_argument("--port", type=int, default=8787, help="Web 端口，默认 8787")
     parser.add_argument("--host", default="127.0.0.1", help="Web 监听地址，默认仅本机 127.0.0.1")
@@ -1286,6 +1391,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_vault_show(settings, args.vault_show)
     if args.vault_init:
         return cmd_vault_init(settings)
+    if args.vault_import:
+        return cmd_vault_import(settings, args.vault_import, assume_yes=args.yes)
+    if args.vault_rebuild:
+        return cmd_vault_rebuild(settings)
     if args.usage:
         return cmd_usage(settings, args.session)
     if args.replay:

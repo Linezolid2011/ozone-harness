@@ -378,6 +378,10 @@ set CHROME=<chrome.exe 的完整路径>       :: 或者装好 Chrome 后直接�
   保存时发出去的 URL 与请求体（含 `expect_hash`）、409 被改过时输入框不丢字、
   409 撞名的"打开它"、删除确认里列出反链、成功后的重刷与 `dangling` 展示、
   编辑态里的 `<script>` 只作为文本。
+* 原生 vault（ADR-104）：`![[raw/...]]` 渲染成 `<img>`（src 走
+  `/api/vault/raw`）、`[[sections/x|别名]]` 显示别名并点向真实路径、
+  嵌套 frontmatter（`relation` 列表套映射 / `date` 嵌套映射）不显示成
+  `[object Object]`、生成物没有编辑/删除按钮并说明原因。
 * 后来这一轮加的（三条，见下面的"这一轮"）：
   * **加粗里的双链**：`**[[X]]**` 必须渲染成 `<strong>` 里的可点链接。
     以前 `bold` 是按纯文本塞进 `<strong>` 的，于是同一段里 `[[X]]` 是蓝的、

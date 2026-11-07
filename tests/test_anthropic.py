@@ -173,9 +173,11 @@ class SseParsingTests(unittest.TestCase):
         self.assertEqual(assembler.text, "你好")
         self.assertEqual(assembler.finish_reason, "stop")
         assert assembler.usage is not None
-        self.assertEqual(assembler.usage.prompt_tokens, 100)
-        self.assertEqual(assembler.usage.cached_tokens, 40)
+        self.assertEqual(assembler.usage.prompt_tokens, 140)
+        self.assertEqual(assembler.usage.cached_tokens, 40, "缓存命中是 prompt 的一部分")
+        self.assertEqual(assembler.usage.cache_miss_tokens, 100, "未命中 + 新建缓存")
         self.assertEqual(assembler.usage.completion_tokens, 7)
+        self.assertEqual(assembler.usage.total_tokens, 147, "total 必须含缓存")
 
     def test_tool_use_stream(self) -> None:
         assembler = self._assemble(

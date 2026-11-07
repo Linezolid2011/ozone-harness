@@ -46,6 +46,7 @@ harness/
   events.py         事件溯源 JSONL：唯一真相来源；seq 分配、重放、悬空 tool_calls 修补
   memory.py         记忆条目（SQLite）：软删除、可调上限、整理游标
   vault.py          背景档案：路径安全、frontmatter、README 预算、结构校验
+  vault_import.py   原生 Kimi vault zip 的安全导入（ADR-104）
   dream.py          整理流水线（单向门，无预演）+ 格式化重来
   dream_records.py  会话事件 → 可读记录（渲染/分页/游标只认连续区间）
   providers/        供应商档案（providers.json）、OpenAI/Anthropic 兼容客户端
@@ -73,6 +74,11 @@ scripts/ui_check/   前端自检（自写 DOM stub 跑真 app.js）、截图、�
 * **完整 API key 永不出现在任何响应里**（只给掩码）。
 * **"只看一眼"的接口不落盘**（预览、`GET /api/reset`、`prompt_view`）。
 * **README 注入有硬上限**（ADR-056）：由 harness 截断，不靠提示词自觉。
+* **原生 vault 的生成物只读**（ADR-104）：有 `sections.yaml` 时，README / index /
+  earlier_months / 清单 / archived_month 由 harness 维护；模型只写 sections/entities。
+  模式开关是**已有文件** `sections.yaml`，不是新设置项；旧 vault 不自动迁移。
+* **原生 zip 导入只写空 vault**（ADR-104）：逐条校验路径/符号链接/大小/图片内容，
+  全过才从暂存搬入；非空要 `--yes`。
 * **SSRF 判据要自己归一化、fail-closed**（ADR-052）：不认的输入一律拒。
 
 ## 怎么验证（每次改完都跑）

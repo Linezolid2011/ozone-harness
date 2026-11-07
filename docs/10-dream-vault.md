@@ -41,19 +41,39 @@
 
 ## 目录结构
 
+**原生模式（ADR-104，有 `sections.yaml`）**：
+
 ```
 data/vault/
-  README.md                ← 投影：每轮注入的那一份，有硬上限
-  sections/口味.md          ← prose 段落（身份 / 偏好 / 工作学习 / 本月 / 关系…）
-  entities/小林.md          ← 一人·一项目·一概念一个文件，YAML frontmatter
+  README.md                ← 生成物：sections 的投影，每轮注入
+  index.md                 ← 生成物：[[path|title]] 索引
+  sections.yaml            ← 清单：inject_char_cap + 有序 section
+  sections/personal_context.md
+  sections/work_context.md
+  sections/this_month.md
+  sections/earlier_months.md   ← 生成物：由归档月份拼出
+  sections/taste.md
+  sections/memory_tips.md
+  sections/archived_month/2026-09/this_month.md
+  entities/project_photon.md
+  raw/source_11/icais2026_pic1.jpg
+  raw/source_11/icais2026_pic1.jpg.meta.json
+  log.md / observations.md / memory_instruction.md  ← 旁路导出/日志，可读
 ```
 
-只有三种位置，而且**只有两层**（ADR-054）：目录名必须小写、深度恰好为 2。
+**旧模式（没有 `sections.yaml`）**：仍然只有 `README.md` + `sections/<名字>.md` +
+`entities/<名字>.md`，README 由模型写。路径校验的统一规则是：目录名小写、深度恰好为 2；
+原生模式额外允许 `sections/archived_month/<YYYY-MM>/this_month.md` 与
+`raw/source_<数字>/<图片>`（或 `.meta.json`）。`sections.yaml` 存在与否就是模式开关，
+**不会**因为一次整理把旧 vault 迁成原生（ADR-104）。
 
-frontmatter 是我们自己实现的**一个刻意做小的 YAML 子集**（标量 + 字符串列表），
-不引入 PyYAML —— frontmatter 的内容有一半是模型生成的，用一个规范里全是边角
-（锚点、标签、类型推断、`no` 被解析成 False……）的解析器去接它，
-等于把风险请进核心路径。不认识的键**原样保留**，用户手改时加的 `pinned: true` 不会被吃掉。
+frontmatter 是我们自己实现的**一个刻意做小的 YAML 子集**（标量 + 字符串列表，
+原生还用到**列表套映射**与**嵌套映射**），不引入 PyYAML —— frontmatter 的内容有一半是
+模型生成的，用一个规范里全是边角（锚点、标签、类型推断、`no` 被解析成 False……）的
+解析器去接它，等于把风险请进核心路径。不认识的键（包括 `date` 这种嵌套映射）
+**原样保留**，用户手改时加的 `pinned: true` 不会被吃掉。原生的已知键是
+`name/title/kind/relation/status/created/last_updated/place` + `tags/aliases/sources`；
+`created`/`last_updated` 由 harness 盖章。
 
 ## 图邻接不建数据库
 
@@ -67,21 +87,29 @@ frontmatter 是我们自己实现的**一个刻意做小的 YAML 子集**（标�
 vault 规模有上限，所以这个扫描是有界的。好处是**永远不会和文件内容脱节**：
 用户手改一个文件，邻域立刻正确。代价是 O(文件数)，可接受。
 
-## README：模型写，但上限由 harness 强制
+## README：原生生成 / 旧模式模型写，上限都由 harness 强制
 
 README **每轮都进上下文**。所以"模型把它写长了"的代价不是一次性的，
 而是此后每一轮都付 —— 而模型只在写它的那一次看到代价。
 
-* 模型写正文（它比机械拼接更懂什么值得放进取景框）；
-* harness 在**注入时**按 `HARNESS_VAULT_README_TOKEN_BUDGET`（默认 1200）截断，
-  切在**段落边界**，并附一句"已截断，细节请用 dream_read 去查"；
-  截断提示本身的 token **也算进预算** —— 否则会出现"截断了但总量还是超"，
-  测试直接断言 `estimate_tokens(截断结果) <= 预算`；
-* 机械装配因此退化成**机械校验**：超预算 / 孤儿档案 / 坏 frontmatter / 不合规文件名，
-  `--vault` 直接打给人看。
+**原生模式（ADR-104）**：README 是 `sections.yaml` 的投影，由 `rebuild_generated()`
+机械生成；模型**不写** README，也不写 `index.md` / `sections/earlier_months.md`。
+生成时按清单顺序把 section 正文拼成 `## title` 块，`earlier_months` 由
+`sections/archived_month/<YYYY-MM>/this_month.md` 拼出；README 的 `chars` 是**正文字节数**，
+`inject_char_cap`（原生实测 6000）是**字符**上限，`readme_text()` 按段落截断并补提示。
+**旧模式**仍由模型用 `readme_write` 写，harness 按
+`HARNESS_VAULT_README_TOKEN_BUDGET`（默认 1200）截断，切在段落边界。
+
+两种模式的截断提示本身都**算进预算** —— 否则会出现"截断了但总量还是超"，
+测试直接断言 `len(截断结果) <= cap` / `estimate_tokens(截断结果) <= 预算`。
+
+* 原生模式的机械校验因此从"模型有没有写对 README"变成"生成物是否与 sections 一致"：
+  README/index/earlier_months 过期、清单里的 section 缺失、raw 引用缺失，`--vault`
+  直接打给人看；`rebuild_generated()` 后应当清零；
+* 旧模式的机械校验仍是：超预算 / 孤儿档案 / 坏 frontmatter / 不合规文件名。
 
 **vault 是投影，原始记录才是真相来源**（同 ADR-006）：
-vault 整个删掉可以重建，README 写错也不会污染历史。这是敢让模型自由写它的底气。
+vault 整个删掉可以重建，README 写错也不会污染历史。
 
 ## 注入位次
 
@@ -127,8 +155,9 @@ vault 整个删掉可以重建，README 写错也不会污染历史。这是敢�
 拒绝  entities/nul.x.md      判第一个点之前那一段，同样是设备
 拒绝  entities/X.MD          大小写不敏感的系统上会和 x.md 撞成同一个文件
 拒绝  entities/X.md          ← 与已存在的 x.md 撞名（会静默覆盖掉那份档案）
-拒绝  entities/sub/x.md      只允许两层
+拒绝  entities/sub/x.md      只允许两层（原生例外：sections/archived_month/<YYYY-MM>/this_month.md）
 拒绝  Entities/x.md          目录名必须小写
+拒绝  raw/source_x/a.png     raw 只允许 raw/source_<数字>/<图片> 或同名 .meta.json
 拒绝  穿越（点点斜杠）、POSIX 绝对路径、盘符路径、UNC 共享路径、波浪号开头
 拒绝  entities/a:b.md  entities/a?.md  entities/a.md.  entities/ x.md
 拒绝  超过 40 字符的名字
@@ -154,7 +183,10 @@ vault 整个删掉可以重建，README 写错也不会污染历史。这是敢�
 这一层专门挡**符号链接**：`entities/x.md` 本身完全合法，只有解析后比较才发现它跑到外面去了。
 
 写入口只有一个（`VaultStore.write_file()`），**校验在 store 层而不是工具层**，
-所以将来新增任何写入口都不会绕过它。
+所以将来新增任何写入口都不会绕过它。原生模式还多两道：`_assert_editable()`
+拒绝一切生成物 / 清单 / 归档月份；`--vault-import` 在解压前逐条校验
+（白名单、大小写撞名、符号链接、图片内容嗅探、单文件/总量/条目上限），
+全部通过后才从一次性暂存目录搬进**空 vault**（非空要 `--yes`）。
 
 ## 整理流水线
 
@@ -174,7 +206,11 @@ data/sessions/*.jsonl ──(dream_records 渲染)──▶ 记录文本 ──(
 | | 对话 agent | 整理者 |
 |---|---|---|
 | 记忆条目 | `mem_create / mem_edit / mem_del` | **一个都没有**（连读都没有） |
-| 背景档案 | `dream_list / dream_read / dream_search`（只读） | `vault_read / vault_write / vault_delete / readme_write` |
+| 背景档案 | `dream_list / dream_read / dream_search`（只读） | `vault_read / vault_write / vault_delete` + **旧模式的** `readme_write` |
+
+原生模式（有 `sections.yaml`）**不注册 `readme_write`**：README 由 harness 重建。
+旧模式保持原样。两种模式都不给整理者任何记忆条目工具，也不给它直接改
+`sections.yaml` / `index.md` / raw 的能力。
 | 会话记录 | 看不到 | `records_list / records_read` |
 
 **分页与游标**：整理者用 `records_read` 一次读一段（默认 40 条 / 6000 字符）。
@@ -182,10 +218,18 @@ data/sessions/*.jsonl ──(dream_records 渲染)──▶ 记录文本 ──(
 补上之后才一起推进（`ReadTracker` 合并读过的区间，ADR-060）。
 **没有待整理的记录时根本不调模型**（那是一次白花的钱）。
 
+**整理用哪个模型**（ADR-103）：Web 端是 Dream 页工具栏右侧的「整理模型」选择器，
+CLI 端是 `--dream`（命令行上的 `--provider` / `--model` 是单次覆盖）。两边都走
+`resolve_dream_provider()`：`providers.json` 的 `dream` 选择优先，**空 = 跟随全局
+`default`**（所以升级后行为与之前一致）。它与聊天页顶栏的模型选择器**互相独立**；
+选过的那家接口被删掉（或那个模型从接口的模型列表里删掉）时退回默认，**不会**
+悄悄改用另一家。
+运行记录里多一个 `generation` 字段，记下这次用的是哪个模型。
+
 **产物**（全部在 `data/dreams/`，ADR-063）：
 
 ```
-<run-id>.json        差异、用量、结构校验、推进了哪些游标
+<run-id>.json        差异、用量、结构校验、推进了哪些游标、这次用的模型（generation）
 <run-id>.jsonl       完整轨迹（每一次 vault_write 的全文都在里面）
 ```
 
@@ -203,9 +247,11 @@ data/sessions/*.jsonl ──(dream_records 渲染)──▶ 记录文本 ──(
 * 想追回某份档案当时写了什么，只能看轨迹 `data/dreams/<run-id>.jsonl`
   （**格式化会把运行记录一起清掉，要追回就先别格式化**）。
 
-**结构校验是机械的**：README 由模型写，所以跑完立刻 `VaultStore.check()` 一遍
-（超预算 / 孤儿档案 / 坏 frontmatter / 坏文件名），结果写进运行记录并打给人看。
-`vault_write` 还会**当场**告诉模型"README 超预算了"—— 它下一句就能改。
+**结构校验是机械的**：原生模式在整理结束（以及网页保存/删除）后先
+`rebuild_generated()`，再 `VaultStore.check()`；旧模式在模型写完后直接 check。
+超预算 / 生成物过期 / 清单 section 缺失 / 孤儿档案 / 坏 frontmatter / 坏文件名 /
+raw 引用缺失都会写进运行记录并打给人看。旧模式的 `vault_write` 还会**当场**告诉模型
+"README 超预算了"—— 它下一句就能改。
 
 ## 验收（已实测）
 
@@ -240,7 +286,11 @@ data/sessions/*.jsonl ──(dream_records 渲染)──▶ 记录文本 ──(
    判据是"**有没有真档案**"（`sections/` 或 `entities/` 里至少一个文件），
    不是"README 在不在" —— `--vault-init` 建的骨架只有一份占位 README，
    那时注册工具、注入一段"这里什么都没有"的 README 都是纯浪费；
-6. 恢复出厂设置的预览会列出"背景档案 N 个文件"，占用空间直接量整个数据目录。
+6. 恢复出厂设置的预览会列出"背景档案 N 个文件"，占用空间直接量整个数据目录；
+7. **原生导入实测（ADR-104）**：用户那份 Kimi 导出 zip（59 条目 / 47 份档案 /
+   12 个 raw 条目）导入空 vault 成功，自动进入原生模式；`check()` 如实报出
+   README/index/earlier_months 三类 stale（真档案里那几处导出瑕疵），
+   `rebuild_generated()` 后清零；README 注入 4351 字符 / cap 6000，未截断。
 
 ## 已知局限
 
@@ -276,6 +326,13 @@ data/sessions/*.jsonl ──(dream_records 渲染)──▶ 记录文本 ──(
   看不出来。
 * ~~README 可能被标成占位而永久不注入~~ —— 已修：写入端拒绝那个标记，
   `check()` 也把"被判为占位"与"真的没有 README"分开说（ADR-064）。
+* **C 阶段还没做**（ADR-104）：observations 生命周期、完整 `log.md` 语义、
+  `[^N]`/`source_ref` 引用、raw 图片入库、归档轮转。导入的原生
+  `observations.md` / `log.md` / `raw/` **可以读和看**，但不会自动维护；
+  原生 README 的 `user_id`/`last_avatar` 等 Kimi 专有字段只保留/给本地稳定值，
+  不假装懂它们的语义。
+* **原生导入不迁移旧 vault**：`sections.yaml` 存在才是原生模式；旧 vault 要迁移
+  得手工建清单（见 ADR-104）。
 
 ## 下一步
 
@@ -287,9 +344,10 @@ data/sessions/*.jsonl ──(dream_records 渲染)──▶ 记录文本 ──(
    档案、运行记录、整理进度全没，下一次整理从零开始；
    **只想清 dream 那一层就用 `--dream-format` / 界面上的同名按钮**（ADR-072）——
    它不碰对话、记忆与 key；
-3. **vault 的目录层级是两级**（`sections/`、`entities/`），前端那棵树是**递归**的、
-   所以哪天放宽层级限制（比如 `sections/archived_month/`）界面不用改；
-   要放宽得先改 `normalize_rel_path` 与相关的结构校验；
+3. **vault 的目录层级**：旧模式是两级（`sections/`、`entities/`）；原生模式额外允许
+   `sections/archived_month/<YYYY-MM>/this_month.md` 与 `raw/source_<n>/<图片>`。
+   前端那棵树是**递归**的，所以放宽层级界面不用改；要再放宽得先改
+   `normalize_rel_path` / `normalize_raw_path` 与相关的结构校验；
 4. **界面上可以改档案**（ADR-070，推翻了 ADR-067 的"只读"）：写入走
    `VaultStore.save_note()` / `delete_file()` —— 与整理工具**同一份实现**；
    保存带内容指纹（被改过就 409）、整理运行时拒绝写入、删除会报出会变成死链的反链。

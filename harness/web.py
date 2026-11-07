@@ -114,10 +114,17 @@ from .providers.store import (
     vision_support,
 )
 from .reset import UnsafeDataDirError, perform_reset, preview_reset
-from .runtime import Runtime, provider_store, resolve_provider
+from .runtime import Runtime, provider_store, resolve_dream_provider, resolve_provider
 from .vault import (
+    GENERATED_RELS,
+    INDEX_NAME,
+    LOG_NAME,
+    MEMORY_INSTRUCTION_NAME,
+    OBSERVATIONS_NAME,
     README_NAME,
+    SECTIONS_CONFIG,
     Frontmatter,
+    VaultEntry,
     VaultExistsError,
     VaultPathError,
     VaultStore,
@@ -431,12 +438,17 @@ def build_session_view(settings: Settings, session_id: str) -> dict[str, Any]:
     usage = Usage()
     summary_text, covered = last_summary(path)
     seen = 0  # 已数过的"对话消息"条数，口径与 events._build_messages 一致
+    current_turn_seq: Any = None  # 本轮 user_message 的 seq：meta 那一行的「分叉」要用
     if summary_text:
         # 被摘要覆盖的旧消息不再逐条展示，改成一个摘要块放在最前面
         messages.append({"role": "summary", "text": summary_text, "covered": covered})
 
     for record in read_events(path):
         kind = record.get("kind")
+        if kind == "user_message":
+            # **在 covered 判断之前**记下 seq：被摘要覆盖的那几轮，它们的 turn_end
+            # 仍然会画成 meta 行，那一行的分叉点也还是这条 user_message。
+            current_turn_seq = record.get("seq")
         if kind in ("user_message", "assistant_message", "tool_call"):
             if seen < covered:
                 seen += 1
@@ -507,6 +519,8 @@ def build_session_view(settings: Settings, session_id: str) -> dict[str, Any]:
                     "stop_reason": record.get("stop_reason"),
                     "elapsed": record.get("elapsed"),
                     "usage": record.get("usage") or {},
+                    # 这一轮的分叉点（那条 user_message 的 seq）；前端「分叉」按钮用它
+                    "turn_seq": current_turn_seq,
                 }
             )
     session_switches = session_tools(path)
@@ -594,7 +608,7 @@ _VAULT_VIEW_MAX_CHARS = 200_000
 
 
 def _vault_tree(
-    entries: list[Any], *, has_readme: bool, readme_chars: int = 0
+    entries: list[Any], *, has_readme: bool, readme_chars: int = 0, native: bool = False
 ) -> list[dict[str, Any]]:
     """把文件清单折成一棵目录树（给界面逐层点开）。
 
@@ -619,6 +633,27 @@ def _vault_tree(
             "kind": entry.kind,
             "chars": entry.chars,
             "summary": entry.summary,
+            "name": getattr(entry, "name", ""),
+            "tags": list(getattr(entry, "tags", ()) or ()),
+            "created": getattr(entry, "created", ""),
+            "last_updated": getattr(entry, "last_updated", ""),
+            "place": getattr(entry, "place", ""),
+            # 生成物 / 观察层 / 日志 / 旁路导出：**原生模式**下界面只读。
+            # 旧 vault 保持原来的"README 可编辑"行为（ADR-070）。
+            "editable": (not native)
+            or not (
+                entry.path in GENERATED_RELS
+                or entry.path
+                in (
+                    INDEX_NAME,
+                    LOG_NAME,
+                    OBSERVATIONS_NAME,
+                    MEMORY_INSTRUCTION_NAME,
+                    SECTIONS_CONFIG,
+                )
+                or entry.path.startswith("sections/archived_month/")
+            ),
+            "is_generated": native and entry.path in GENERATED_RELS,
         }
 
     def render(node: dict[str, Any]) -> list[dict[str, Any]]:
@@ -661,6 +696,8 @@ def _vault_tree(
                 "chars": readme_chars,
                 "summary": _t("web.vault.readme_summary"),
                 "is_readme": True,
+                "is_generated": native,
+                "editable": not native,
             }
         )
     out.extend(render(root))
@@ -684,11 +721,39 @@ def build_vault_view(settings: Settings) -> dict[str, Any]:
     # 否则界面上"档案 5 份"和这个列表的长度会对不上（这种"一个东西两个数字"
     # 已经栽过一次：见 reset.py 的 vault_files）。
     entries = [entry for entry in store.list_files() if entry.path != README_NAME]
+    existing_paths = {entry.path for entry in entries}
+    # 原生 vault 的根级文件（index/log/observations/memory_instruction）也要能点开看。
+    # observations 已经由 list_files 带出来；这里补上其余几个。
+    for rel, title, kind in (
+        (INDEX_NAME, "index", "generated"),
+        (LOG_NAME, "log", "log"),
+        (MEMORY_INSTRUCTION_NAME, "memory_instruction", "aux"),
+    ):
+        if rel in existing_paths:
+            continue
+        path = settings.vault_dir / rel
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        _front, body, _warn = parse_frontmatter(text)
+        entries.append(
+            VaultEntry(
+                path=rel,
+                title=title,
+                kind=kind,
+                chars=len(body),
+                summary=body.strip().replace("\n", " ")[:60],
+            )
+        )
+    entries.sort(key=lambda entry: entry.path)
     has_readme = (settings.vault_dir / README_NAME).is_file()
     # README 的**真实**字符数（正文，不含 frontmatter）。读它是对的：
     # 这个数字会显示在树上，而占位 0 会让"README 有 183 字"和"0 字"同时出现在一屏里。
-    readme_chars = 0
-    if has_readme:
+    readme_chars = int(report.get("readme_total_chars") or 0)
+    if has_readme and not readme_chars:
         try:
             _front, readme_body, _warn = parse_frontmatter(
                 (settings.vault_dir / README_NAME).read_text(encoding="utf-8")
@@ -708,18 +773,17 @@ def build_vault_view(settings: Settings) -> dict[str, Any]:
         "check": report,
         "pending": pending,
         "readme": readme,
+        "native": store.is_native(),
+        "manifest": report.get("manifest"),
+        "raw_files": report.get("raw_files", 0),
         # 逐层点开用（目录树）；`files` 是平铺清单，保留给"按名字找"的场景
-        "tree": _vault_tree(entries, has_readme=has_readme, readme_chars=readme_chars),
-        "files": [
-            {
-                "path": entry.path,
-                "title": entry.title,
-                "kind": entry.kind,
-                "chars": entry.chars,
-                "summary": entry.summary,
-            }
-            for entry in entries
-        ],
+        "tree": _vault_tree(
+            entries,
+            has_readme=has_readme,
+            readme_chars=readme_chars,
+            native=store.is_native(),
+        ),
+        "files": [entry.to_dict() for entry in entries],
     }
 
 
@@ -764,11 +828,15 @@ def build_vault_file_view(settings: Settings, raw_path: str) -> dict[str, Any]:
     neighbor = store.neighborhood(canonical)
     return {
         "path": file.path,
-        "title": front.title or Path(file.path).stem,
-        "kind": front.kind,
+        "title": front.title or front.name or Path(file.path).stem,
+        "name": front.name,
+        "kind": front.kind or (front.tags[0] if front.tags else ""),
         "relation": front.relation,
         "status": front.status,
+        "created": front.created,
+        "last_updated": front.last_updated,
         "updated": front.updated,
+        "place": front.place,
         "tags": list(front.tags),
         "aliases": list(front.aliases),
         "sources": list(front.sources),
@@ -781,8 +849,23 @@ def build_vault_file_view(settings: Settings, raw_path: str) -> dict[str, Any]:
         "links": neighbor["links"],
         "backlinks": neighbor["backlinks"],
         "related": neighbor["related"],
-        # 界面上"这个文件是从哪来的"：README 是索引，不是整理出来的档案
+        # 界面上"这个文件是从哪来的"：README 是索引，不是整理出来的档案；
+        # 生成物/观察层/日志只读。
         "is_readme": file.path == README_NAME,
+        "is_generated": store.is_native() and file.path in GENERATED_RELS,
+        "editable": (not store.is_native())
+        or not (
+            file.path in GENERATED_RELS
+            or file.path
+            in (
+                INDEX_NAME,
+                LOG_NAME,
+                OBSERVATIONS_NAME,
+                MEMORY_INSTRUCTION_NAME,
+                SECTIONS_CONFIG,
+            )
+            or file.path.startswith("sections/archived_month/")
+        ),
         # 保存时带回来，用于"这份档案在你编辑期间被改过"的检查
         "hash": _file_hash(settings.vault_dir / file.path),
     }
@@ -832,10 +915,12 @@ def save_vault_file(settings: Settings, payload: dict[str, Any]) -> dict[str, An
         return ()
 
     front = Frontmatter(
+        name=str(payload.get("name") or "").strip(),
         title=str(payload.get("title") or "").strip(),
         kind=str(payload.get("kind") or "").strip(),
         relation=str(payload.get("relation") or "").strip(),
         status=str(payload.get("status") or "").strip(),
+        place=str(payload.get("place") or "").strip(),
         tags=_list("tags"),
         aliases=_list("aliases"),
     )
@@ -846,10 +931,12 @@ def save_vault_file(settings: Settings, payload: dict[str, Any]) -> dict[str, An
     # 所以"出现过且为空"就等于用户把它抹了。模型侧不走这里，行为不受影响。
     clear = [
         key
-        for key in ("title", "kind", "relation", "status", "tags", "aliases")
+        for key in ("name", "title", "kind", "relation", "status", "place", "tags", "aliases")
         if key in payload and not front.to_dict().get(key)
     ]
     result = store.save_note(canonical, body, front, mode=mode, clear=clear)
+    if store.is_native():
+        store.rebuild_generated()
     view = build_vault_file_view(settings, result["path"])
     view["action"] = result["action"]
     view["check"] = store.check()
@@ -874,6 +961,8 @@ def delete_vault_file(settings: Settings, payload: dict[str, Any]) -> dict[str, 
     # 删之前先记下"谁指向它"：删完这些链接就变成"还没写"了，界面该说一声
     dangling = [item["path"] for item in store.neighborhood(canonical)["backlinks"]]
     removed = store.delete_file(canonical)
+    if store.is_native():
+        store.rebuild_generated()
     return {"ok": True, "path": removed, "dangling": dangling, "check": store.check()}
 
 
@@ -887,7 +976,12 @@ def language_store(settings: Settings) -> LanguageStore:
     **每次现建**：语言是运行期可改的，缓存一份实例迟早会读到旧值
     （同 `limit_for()` 那条注释的理由）。
     """
-    return LanguageStore(settings.data_dir / SETTINGS_FILE, default=settings.language)
+    return LanguageStore(
+        settings.data_dir / SETTINGS_FILE,
+        default=settings.language,
+        # 单轮最大输出的**种子**来自 .env；`data/settings.json` 里的值优先（ADR-101）
+        output_default=settings.max_output_tokens,
+    )
 
 
 def _parse_model_limits(raw: Any) -> dict[str, int]:
@@ -1035,6 +1129,8 @@ def forward_event(kind: str, data: dict[str, Any]) -> tuple[str, dict[str, Any]]
                 "error": outcome.error,
                 "elapsed": round(outcome.elapsed, 2),
                 "usage": outcome.usage.to_dict(),
+                # 实时流这一侧的「分叉」按钮靠它定位分叉点（历史回放走 turn_seq）
+                "user_seq": getattr(outcome, "user_seq", None),
             },
         )
     return None
@@ -1150,6 +1246,35 @@ class HarnessHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_vault_raw(self, query: dict[str, list[str]]) -> None:
+        """`GET /api/vault/raw?path=raw/source_<n>/<img>`：原生 vault 的图片素材。
+
+        路径校验全部走 `VaultStore.read_raw()`（只允许 `raw/source_<n>/<图片>`
+        或 `.meta.json`，不许穿越/盘符/符号链接），web 层不复制那套规则。
+        """
+        raw_path = (query.get("path") or [""])[0]
+        if not raw_path.strip():
+            self._send_json({"error": _t("web.error.missing_path")}, 400)
+            return
+        try:
+            body, canonical = _vault_store(self.settings).read_raw(raw_path)
+        except FileNotFoundError:
+            self._send_json(
+                {"error": _t("web.error.no_vault_file", path=raw_path)}, 404
+            )
+            return
+        except VaultPathError as exc:
+            self._send_json({"error": str(exc)}, 400)
+            return
+        content_type = mimetypes.guess_type(canonical)[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        # 素材可能被导入/替换；不缓存，避免界面看到旧图。
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
@@ -1373,6 +1498,8 @@ class HarnessHandler(BaseHTTPRequestHandler):
                     "language": language_store(settings).language(),
                     # 时区（`time` 工具用的偏移，小时）：前端「设置 → 常规」要显示当前值
                     "timezone": language_store(settings).timezone(),
+                    # 单轮最大输出（token；-1 = 不限）：前端「设置 → 常规」要显示当前值
+                    "max_output_tokens": language_store(settings).max_output_tokens(),
                     # 版本号（读 `docs/version.txt`，**不是代码里的常量**）：
                     # 侧栏那一行显示它，于是"你跑的是哪个版本"永远答得出来。
                     "version": version(),
@@ -1454,6 +1581,10 @@ class HarnessHandler(BaseHTTPRequestHandler):
                 )
             except VaultPathError as exc:
                 self._send_json({"error": str(exc)}, 400)
+            return
+
+        if path == "/api/vault/raw":
+            self._serve_vault_raw(query)
             return
 
         if path == "/api/dreams":
@@ -1884,6 +2015,19 @@ class HarnessHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": result.get("error")}, 400)
                 return
             self._send_json({"ok": True, "timezone": result.get("timezone")})
+            return
+
+        if path == "/api/settings/output-limit":
+            # 改单轮最大输出（ADR-101）。`-1` = 不限；也接受 `5k` / `1M` 写法。
+            # 与语言不同，它是**下一轮对话**装配 Runtime 时才读的，所以生成中也能改。
+            store = language_store(settings)
+            result = store.set_max_output_tokens(payload.get("max_output_tokens"))
+            if not result.get("ok"):
+                self._send_json({"error": result.get("error")}, 400)
+                return
+            self._send_json(
+                {"ok": True, "max_output_tokens": result.get("max_output_tokens")}
+            )
             return
 
         if path == "/api/prompts/update":
@@ -2349,6 +2493,75 @@ class HarnessHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "default": default})
                 return
 
+            if path == "/api/providers/dream":
+                # 整理（dream）专用的模型选择（ADR-103）。空 provider + 空 model
+                # = **清掉它、跟随全局默认**（界面上那一项叫「跟随默认」）。
+                #
+                # 校验放在这里而不是 store 里：store 与 `set_defaults` 一样"只存不判"。
+                # 但这条路的输入来自界面下拉框，**存进去的东西必须是能用的** ——
+                # 存一个不存在的接口，下次整理会在离原因很远的地方报错。
+                provider_id = str(payload.get("provider") or "").strip()
+                model = str(payload.get("model") or "").strip()
+                if not provider_id and not model:
+                    dream = store.set_dream_defaults(
+                        provider="", model="", effort=""
+                    )
+                    self._send_json({"ok": True, "dream": dream})
+                    return
+                if not provider_id:
+                    self._send_json(
+                        {"error": _t("web.error.dream_provider_required")}, 400
+                    )
+                    return
+                profile = store.get(provider_id)
+                if profile is None:
+                    self._send_json(
+                        {
+                            "error": _t(
+                                "web.error.no_provider_profile", profile_id=provider_id
+                            )
+                        },
+                        404,
+                    )
+                    return
+                if not profile.configured:
+                    # 没有 key 的接口不会出现在下拉框里，但手写请求可以送到这里。
+                    # 存下去只会让下次整理失败，所以现在就拒。
+                    self._send_json(
+                        {
+                            "error": _t(
+                                "web.error.provider_not_configured",
+                                label=profile.label,
+                            )
+                        },
+                        400,
+                    )
+                    return
+                if not model:
+                    self._send_json(
+                        {"error": _t("web.error.dream_model_required")}, 400
+                    )
+                    return
+                if profile.models and model not in profile.models:
+                    # 列表里的模型才是界面能选到的；不在列表里说明请求是手写的
+                    # （或者接口档案刚被改过）。不认它，别到真实请求时才炸。
+                    self._send_json(
+                        {
+                            "error": _t(
+                                "web.error.dream_model_unknown",
+                                model=model,
+                                label=profile.label,
+                            )
+                        },
+                        400,
+                    )
+                    return
+                dream = store.set_dream_defaults(
+                    provider=profile.id, model=model, effort=""
+                )
+                self._send_json({"ok": True, "dream": dream})
+                return
+
             if path == "/api/providers/fetch-models":
                 profile_id = str(payload.get("id") or "").strip()
                 profile = store.get(profile_id)
@@ -2489,13 +2702,22 @@ class HarnessHandler(BaseHTTPRequestHandler):
                 "usage": {},
             }
 
+        # 整理用哪个模型（ADR-103）：**默认由 Dream 页的设置决定**，CLI 与 Web
+        # 共用同一份。payload 里仍接受 provider/model 作为**一次性覆盖** ——
+        # 旧页面（缓存着旧 app.js 的那种）会带上来；把这两个字段悄悄丢掉等于
+        # 在用户不知情的情况下换了个整理模型。新前端已经不再发它们。
+        override_provider = str(payload.get("provider") or "").strip()
+        override_model = str(payload.get("model") or "").strip()
         try:
-            resolved = resolve_provider(
-                settings,
-                provider_id=str(payload.get("provider") or ""),
-                model=str(payload.get("model") or ""),
-                effort=str(payload.get("effort") or ""),
-            )
+            if override_provider or override_model:
+                resolved = resolve_provider(
+                    settings,
+                    provider_id=override_provider,
+                    model=override_model,
+                    effort=str(payload.get("effort") or ""),
+                )
+            else:
+                resolved = resolve_dream_provider(settings)
         except ProviderError as exc:
             self._send_json({"error": str(exc)}, 400)
             return None
@@ -2504,7 +2726,9 @@ class HarnessHandler(BaseHTTPRequestHandler):
         try:
             runner = DreamRunner(
                 provider=resolved.provider,
-                settings=settings,
+                # 用**折算过的** settings：context_window 已按本轮选中的模型解析，
+                # 否则 dream 的窗口保证会拿兜底的 200k 去算（ADR-100）。
+                settings=resolved.settings,
                 memory=memory,
                 vault=VaultStore(
                     settings.vault_dir,
@@ -2516,6 +2740,7 @@ class HarnessHandler(BaseHTTPRequestHandler):
                 ),
                 emit=None,  # 下面替换成 SSE
                 max_sessions=limit,
+                generation=resolved.choice.to_dict(),
             )
             self._start_sse()
             self._sse(
@@ -2545,6 +2770,9 @@ class HarnessHandler(BaseHTTPRequestHandler):
                 "check": outcome.check,
                 "stop_reason": outcome.stop_reason,
                 "usage": outcome.usage.to_dict(),
+                # 这一轮用的是哪个模型（ADR-103）：运行记录里已经有一份，
+                # 终帧也带上，界面要在"整理完成"那一刻说清是谁做的。
+                "generation": outcome.generation,
             }
         except ClientGone:
             # 客户端没了：这一轮的结果已经写在磁盘上，但**没有人在听**，

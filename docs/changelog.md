@@ -4,9 +4,47 @@
 > 界面侧栏与 `run.cmd --version` 都从那里取）。发布前先改它，再在这里补一节 ——
 > `tests/test_release.py` 会检查这一节里有没有出现那个版本号。
 
+## 1.0.1-rc1（2026-11-07）
+
+对齐 Kimi 原生 Dream vault（ADR-104，先做 A 读/导入 + B 输出格式；C 仍留到下一步）。
+
+### 新增
+
+* **原生模式**：有 `sections.yaml` 的 vault 以 sections/entities 为 canonical，
+  README / `index.md` / `sections/earlier_months.md` 由 harness 按清单生成；
+  旧 vault（没有清单）保持模型写 README、token 预算与两层路径，**不自动迁移**。
+* **原生路径**：`sections/archived_month/<YYYY-MM>/this_month.md`、
+  `raw/source_<n>/<图片>`（含 `.meta.json`）、根级 `index/log/observations/
+  memory_instruction` 可读/可显示。
+* **安全导入**：`--vault-import <zip>` 逐条校验路径、符号链接、大小写撞名、
+  大小/总量/条目数、图片内容嗅探；目标必须是空 vault（`--yes` 覆盖），
+  全过才从一次性暂存目录搬入。新增 `--vault-rebuild`。
+* **原生 frontmatter**：`name/tags/created/last_updated/relation/date/place`，
+  列表套映射与嵌套映射原样 round-trip；`created`/`last_updated` 由 harness 盖章。
+* **界面**：`![[raw/...]]` 图片（`/api/vault/raw`，后端二次校验）、
+  `[[path|别名]]`、递归树、嵌套 frontmatter 可读显示、生成物只读并说明原因。
+* **结构校验**：清单 section 缺失、README/index/earlier_months 过期、
+  raw 引用缺失、孤儿实体（原生按链接图）；`--vault-rebuild` 后应清零。
+
+### 修复 / 加固
+
+* `--vault-init` **不再把已有内容的旧 vault 转成原生**（模式开关不会被顺手加文件）。
+* `has_content()` 不再把生成的 `earlier_months.md` 当作真实档案，避免空 vault
+  被注入一段只有占位文本的 README。
+* 原生 README 的 `sections` 元信息也纳入过期检查；字符 cap 截断提示也算进上限。
+* 非 zip / 坏 zip 导入会给明确错误，不再把异常直接抛给命令行。
+
+### 测试 / 文档
+
+* 新增原生 vault、zip 导入、Web raw/生成物、前端原生渲染的离线测试；
+  全量 Python 与前端自检、绝对路径/发布守卫全绿（条数见 README）。
+* ADR-104、`docs/10-dream-vault.md`、README 与 `docs/00-scope.md` 更新；
+  C 明确未做：observations 生命周期、完整 log、`[^N]`/`source_ref`、
+  raw 入库、归档轮转。
+
 ## 1.0.0-dev1（2026-10-18）
 
-下一个开发版。功能：`time` 工具、分叉（分支）对话、时区可配置 + 「设置 → 常规」。
+1.0.0-rc1基础上的开发版。功能：`time` 工具、分叉（分支）对话、时区可配置 + 「设置 → 常规」。
 
 ### 新增
 
@@ -21,9 +59,44 @@
   运行期可改（`data/settings.json`，整数小时 -12 ~ +14，默认 8）。「设置」侧栏把
   主题 / 语言并进一个新的「常规」页，主题 / 语言 / 时区三段一起；旧深链
   `#settings/theme` / `#settings/language` 自动折到「常规」。
+* **单轮最大输出可调**（ADR-101）：「设置 → 常规」新增「单轮最大输出」，默认 **5000**；
+  接受 `5k` / `1M` 写法；**`-1` = 不限**（OpenAI 兼容请求不发送 `max_tokens`，
+  Anthropic 兼容协议用窗口感知的输出预留兜底）。值存 `data/settings.json`，
+  `HARNESS_MAX_OUTPUT_TOKENS` 退化成种子；改完下一轮对话生效。
+* **整理模型可调**（ADR-103）：Dream 页工具栏右侧新增「整理模型」选择器，
+  默认「跟随默认」（= 全局默认接口 / 模型，与之前的行为完全一致），也可以显式指定。
+  设置存在 `data/providers.json` 的 `dream` 里，**CLI 与 Web 共用**同一份；
+  命令行上的 `--provider` / `--model` 是单次覆盖、不改设置。
+  运行记录多一个 `generation` 字段，事后能回答"这次档案是哪个模型整理的"。
+* **对齐 Kimi 原生 Dream vault（ADR-104，只做 A 读/导入 + B 输出格式）**：
+  * `sections.yaml` 存在即原生模式：README / `index.md` / `sections/earlier_months.md`
+    由 harness 从 sections 生成，模型只写 `sections/` 与 `entities/`；旧 vault 保持原样；
+  * 路径放宽到 `sections/archived_month/<YYYY-MM>/this_month.md` 与
+    `raw/source_<n>/<图片>`（+ `.meta.json`），并新增安全导入 `--vault-import`；
+  * frontmatter 支持原生 `name/tags/created/last_updated/relation/date/place`，
+    嵌套映射与未知键原样 round-trip；`created`/`last_updated` 由 harness 盖章；
+  * README 的 `chars` 用 UTF-8 字节、注入上限用 `inject_char_cap` 字符；
+  * 界面：`![[raw/...]]` 图片、`[[path|别名]]`、嵌套树、生成物只读；
+  * **C 未做**：observations 生命周期、完整 log、`[^N]`/`source_ref`、raw 入库、归档轮转。
 
 ### 修复
 
+* **上下文预算改成"整条请求"**（ADR-100）：以前只数历史，工具定义 / system /
+  记忆 / README / 摘要 / 思维链 / 输出预留都在窗外；32k 窗口下"看起来没超"的请求
+  会被 API 直接 400。现在 `history_budget` 先扣掉真实固定开销，发请求前再核一次
+  "输入 + 输出"：装不下先压低本次输出上限，连最小输出都留不出就**本地中止**
+  （`stop_reason=context_limit`，不花钱、也不让 API 报 `context window exceed`）。
+  摘要调用同样按窗口检查；新增 `HARNESS_CONTEXT_SAFETY_TOKENS`（默认 1024）。
+* **`context_limit` 那条提示的数字算错了**：`-1`（不限输出）时旧写法把 `-1` 当成
+  数字加进 `needed`，得出 `estimated - 1` —— 看起来正常，实际少报了一整块输出预留。
+  现在统一用 `output_reserve()`（`-1` 时是窗口感知的那块预留）。
+  同时把"最小输出 64 token"从 `loop.py` 的常量挪进 `config.py`：
+  `Settings.min_output_tokens`（`HARNESS_MIN_OUTPUT_TOKENS`，默认 64，写坏夹到 >=1）。
+* **Anthropic 用量少算缓存**（ADR-102）：`input_tokens` 只是未命中的输入，
+  `cache_read/cache_creation` 是另外两列。以前 `prompt_tokens` / `total_tokens`
+  都把缓存漏掉（实测 12k 窗口下每轮少 896~3712 token），用量页与单轮 token 熔断
+  都偏松。现在与 OpenAI 同口径：`prompt_tokens` 含缓存，`cached_tokens` 是其中的
+  命中部分。
 * **只调工具、没有正文/思考的那一步，工具卡片横跨整个页面**：会话视图会把这种
   assistant 消息省略掉（`build_session_view` 只看 content / reasoning），卡片因此没有
   assistant 锚点、被直接挂在 `.messages` 上（`.msg` 的 820px 居中约束不生效）。
@@ -31,7 +104,9 @@
 
 ### 文档
 
-* ADR 补到 **099**（ADR-097 `time` 工具、ADR-098 分叉对话、ADR-099 时区可配置 + 常规分组）。
+* ADR 补到 **104**（ADR-097 `time` 工具、ADR-098 分叉对话、ADR-099 时区可配置 + 常规分组、
+  ADR-100 整条请求的上下文预算、ADR-101 单轮最大输出可调、ADR-102 Anthropic 缓存用量、
+  ADR-103 整理模型可调、ADR-104 对齐 Kimi 原生 Dream vault）。
 
 ## 1.0.0-rc1（2026-10-17）
 

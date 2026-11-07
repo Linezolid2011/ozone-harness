@@ -32,7 +32,7 @@ import urllib.request
 from typing import Any, Iterator, Sequence
 
 from ..attachments import EXT_MIME, read_bytes
-from ..config import Settings
+from ..config import Settings, UNLIMITED_OUTPUT
 from ..i18n import t
 from ..llm_types import (
     Finished,
@@ -232,9 +232,15 @@ class AnthropicCompatProvider:
         max_tokens: int | None = None,
     ) -> dict[str, Any]:
         system, converted = self._convert(messages)
+        # `max_tokens` 在 Anthropic 协议里是**必填**，不能像 OpenAI 那样省略。
+        # -1（不限，ADR-101）时退到预算里的"输出预留"：它随窗口变化、
+        # 不会超过模型窗口；服务端自己的输出上限仍然会先生效。
+        wanted = self._settings.max_output_tokens if max_tokens is None else max_tokens
+        if int(wanted) == UNLIMITED_OUTPUT:
+            wanted = self._settings.output_reserve()
         payload: dict[str, Any] = {
             "model": self._settings.model,
-            "max_tokens": max_tokens or self._settings.max_output_tokens,
+            "max_tokens": int(wanted),
             "messages": converted,
             "stream": True,
         }
@@ -353,11 +359,16 @@ class AnthropicCompatProvider:
 
             if kind == "message_start":
                 usage = ((chunk.get("message") or {}).get("usage")) or {}
-                prompt_tokens = int(usage.get("input_tokens") or 0)
-                cached_tokens = int(usage.get("cache_read_input_tokens") or 0)
-                cache_miss_tokens = prompt_tokens + int(
-                    usage.get("cache_creation_input_tokens") or 0
-                )
+                # Anthropic 把"缓存命中/写入"**单列**：`input_tokens` 只是未命中的那部分。
+                # 我们的 Usage 与 OpenAI 对齐（prompt_tokens = 全部输入，cached 是其中的
+                # 命中部分），否则用量页与单轮 token 熔断都会少算缓存 —— 实测（ADR-102）
+                # 12k 窗口、6 轮对话里每轮少算 896~3712 token。
+                input_tokens = int(usage.get("input_tokens") or 0)
+                cache_read = int(usage.get("cache_read_input_tokens") or 0)
+                cache_creation = int(usage.get("cache_creation_input_tokens") or 0)
+                prompt_tokens = input_tokens + cache_read + cache_creation
+                cached_tokens = cache_read
+                cache_miss_tokens = input_tokens + cache_creation
                 continue
 
             if kind == "content_block_start":

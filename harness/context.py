@@ -25,9 +25,16 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any, Sequence
 
 from .config import Settings
-from .llm_types import Message, estimate_messages_tokens, split_into_groups
+from .llm_types import (
+    Message,
+    estimate_messages_tokens,
+    estimate_tokens,
+    estimate_tools_tokens,
+    split_into_groups,
+)
 from .prompts import bundle
 
 # 提示词的**文本**已经搬到 `harness/prompts/{zh,en}.py`（ADR-085）：
@@ -189,6 +196,43 @@ def render_for_summary(messages: list[Message], *, max_chars: int | None = 40000
     return text
 
 
+def request_overhead_tokens(
+    settings: Settings,
+    memory_text: str,
+    *,
+    summary_text: str = "",
+    web_tools: str = "",
+    vault_text: str = "",
+    tools: Sequence[dict[str, Any]] = (),
+    now: datetime | None = None,
+) -> int:
+    """一条请求里**不属于历史**的那部分有多少 token。
+
+    包括：工具定义 + 主 system（含记忆与 README）+ 摘要块 + 末尾时间块。
+    这个数与 `Settings.input_room()` 配套：
+
+        history_budget = 窗口 - 输出上限 - 安全余量 - 这个数
+
+    **只数历史是不够的**（ADR-100）：工具定义、记忆与 README 每一轮都在请求里，
+    窗口小的时候它们合起来能有一万 token —— 旧算法等于把这部分当成了免费的。
+
+    末尾那条按"最多被省略 999 段"的形态估：它只是几十 token，
+    但宁可高估一点，也不要在边界上少算。
+    """
+    system = build_system_message(
+        settings, memory_text, web_tools=web_tools, vault_text=vault_text
+    )
+    total = estimate_tokens(system.content)
+    if summary_text:
+        total += estimate_tokens(bundle().SUMMARY_HEADER + summary_text)
+    tail = build_tail_message(
+        now=now or datetime.now().astimezone(), omitted_groups=999
+    )
+    total += estimate_tokens(tail.content)
+    total += estimate_tools_tokens(tools)
+    return total
+
+
 def build_messages(
     settings: Settings,
     history: list[Message],
@@ -198,8 +242,20 @@ def build_messages(
     web_tools: str = "",
     vault_text: str = "",
     now: datetime | None = None,
+    history_budget: int | None = None,
 ) -> tuple[list[Message], int]:
-    trimmed, omitted = trim_history(history, settings.history_budget())
+    """拼出这一条请求。
+
+    `history_budget` 是**调用方算好的**历史预算（窗口 - 输出 - 余量 - 固定开销，
+    见 `Settings.input_room()`）。不传时退回旧的"只看成本上限与窗口"的粗算法 ——
+    那条路径没有工具/system/记忆的位置，只适合测试或没有 provider 的离线场景。
+    """
+    budget = (
+        settings.history_budget()
+        if history_budget is None
+        else max(0, int(history_budget))
+    )
+    trimmed, omitted = trim_history(history, budget)
     system = build_system_message(
         settings, memory_text, web_tools=web_tools, vault_text=vault_text
     )

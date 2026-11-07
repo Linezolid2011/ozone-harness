@@ -26,6 +26,10 @@ MESSAGES: dict[str, str] = {
     "ui.language.need_value": "要指定一个语言。",
     "ui.language.unknown": "不认识的语言：{value}（可选：{choices}）",
     "ui.timezone.bad_value": "不认识的时区：{value}（应是一个整数小时，范围 -12 到 +14，例如 8 = UTC+8）",
+    "ui.output.bad_value": (
+        "看不懂这个单轮最大输出：{value}（要填 -1 表示不限，或 ≥1 的整数；"
+        "也可以写 5k / 1M，k = 1000、M = 1000000）"
+    ),
     "ui.language.saved": "已切换到 {name}。",
     "ui.language.note_content": (
         "你自己写的记忆与背景档案**不会被翻译**；提示词里会告诉模型"
@@ -155,7 +159,18 @@ MESSAGES: dict[str, str] = {
     "ui.vault.path_too_deep": (
         "vault 只有两层（{top_dirs}/<名字>.md），不支持更深的目录（收到 {raw}）"
     ),
-    "ui.vault.path_bad_top": "第一层只能是 {top_dirs}，且必须小写（收到 {dir}）",
+    "ui.vault.path_bad_top": (
+        "第一层只能是 {top_dirs}，且必须小写（vault 只有两层，月份归档是例外；收到 {dir}）"
+    ),
+    "ui.vault.path_bad_archive": (
+        "sections/ 下只允许 sections/<名字>.md 或 "
+        "sections/archived_month/<YYYY-MM>/this_month.md（收到 {raw}）"
+    ),
+    "ui.vault.raw_bad_path": (
+        "raw 素材路径必须是 raw/source_<编号>/<图片名>"
+        "（可带同名 .meta.json，收到 {raw}）"
+    ),
+    "ui.vault.manifest_bad": "sections.yaml 的这一行无法解析：{line}",
     "ui.vault.name_dot": "文件名不能是 {name}",
     "ui.vault.name_whitespace": "文件名首尾不能有空白（收到 {name}）",
     "ui.vault.name_illegal_chars": "文件名里有不允许的字符（<>:\"|?* 与控制字符）：{name}",
@@ -193,6 +208,17 @@ MESSAGES: dict[str, str] = {
         "带上它 README 会被永久判为占位、不再注入给对话模型"
     ),
     "ui.vault.readme_no_delete": "README 是索引，不能删 —— 要清空它就重写内容",
+    "ui.vault.generated_readonly": (
+        "{path} 是 harness 生成/维护的文件，不能直接改。"
+        "改 sections / entities，README、index、earlier_months 会自动重建。"
+    ),
+    "ui.vault.section_no_delete": (
+        "{path} 是 sections.yaml 里的固定 section，不能删；要清空就把正文改成空字符串"
+    ),
+    "ui.vault.manifest_read_failed": "sections.yaml 读取失败：{error}",
+    "ui.vault.manifest_not_a_note": "sections.yaml 是清单配置，不是可读的档案",
+    "ui.vault.raw_read_failed": "读取 raw 素材 {path} 失败：{error}",
+    "ui.vault.raw_too_large": "raw 素材 {path} 太大（{size} 字节，上限 {limit}）",
     "ui.vault.no_vault_dir": "vault 目录还不存在（dream 还没有整理过任何对话）",
     "ui.vault.read_failed": "{path} 读取失败（不是 UTF-8 文本？）",
     "ui.vault.over_display_limit": (
@@ -209,6 +235,40 @@ MESSAGES: dict[str, str] = {
         "请让整理流程重写它；如果它本来就是正常内容，删掉 frontmatter 里那行 status"
     ),
     "ui.vault.readme_missing": "有档案文件但没有 README：模型将看不到任何索引",
+    "ui.vault.section_missing": "{path} 在 sections.yaml 里，但文件还不存在",
+    "ui.vault.readme_stale": (
+        "README 与 sections 不一致（或 metadata 过期）—— 跑一次整理或重建生成物"
+    ),
+    "ui.vault.readme_over_char_budget": (
+        "README 超过注入上限（{budget} 字符），注入时会被截断"
+    ),
+    "ui.vault.index_missing": "有档案但没有 index.md（原生 vault 的索引）",
+    "ui.vault.index_stale": "index.md 与 sections/entities 不一致 —— 重建一次",
+    "ui.vault.earlier_months_stale": (
+        "sections/earlier_months.md 与归档月份不一致 —— 重建一次"
+    ),
+    "ui.vault.raw_missing": "{path} 引用的 raw 素材 {raw} 不可用（{error}）",
+    "ui.vault.import_bad_path": "导入包里这个路径不在允许范围内：{path}",
+    "ui.vault.import_missing_zip": "找不到要导入的 zip：{path}",
+    "ui.vault.import_bad_zip": "这个文件不是有效的 zip：{path}（{error}）",
+    "ui.vault.import_not_empty": (
+        "目标 vault 不是空的（{path}）。导入只写空 vault；确认要覆盖请加 --yes"
+    ),
+    "ui.vault.import_too_many": "导入包条目太多（{count} > {limit}）",
+    "ui.vault.import_too_large": "导入包总大小超过上限（{limit} 字节）",
+    "ui.vault.import_file_too_large": (
+        "导入包里 {path} 太大（{size} 字节，上限 {limit}）"
+    ),
+    "ui.vault.import_skipped": "跳过系统文件：{path}",
+    "ui.vault.import_case_clash": "导入包里有两个只差大小写的路径：{a} / {b}",
+    "ui.vault.import_empty": "导入包里没有任何可识别的档案：{path}",
+    "ui.vault.import_bad_image": "raw 素材不是可识别的图片：{path}",
+    "ui.vault.import_image_mismatch": (
+        "raw 素材 {path} 的扩展名与内容不符（内容看起来是 {sniffed}）"
+    ),
+    "ui.vault.import_done": (
+        "已导入 {files} 个文件（档案 {notes} / raw {raw}）：{path}"
+    ),
     "ui.vault.read_truncated": "\n…（本文件更长，已按单次读取上限截断）",
     "ui.vault.readme_truncated": (
         "\n\n…（README 超出注入预算，已截断。需要细节请用 dream_read / "
@@ -243,6 +303,7 @@ MESSAGES: dict[str, str] = {
     "ui.dream.diff_chars": "  ~ {path}  {before} → {after} 字符",
     "ui.dream.check_no_vault": "（vault 还不存在）",
     "ui.dream.check_files": "档案 {files} 份 · README {tokens} token",
+    "ui.dream.check_files_chars": "档案 {files} 份 · README {used}/{cap} 字符",
     "ui.dream.check_ok": " · 结构校验通过",
     "ui.dream.check_problems": "\n结构校验发现的问题：\n",
     "ui.dream.format_not_in_data_dir": "{path} 不在数据目录 {data_dir} 里面，拒绝格式化",
@@ -358,11 +419,28 @@ MESSAGES: dict[str, str] = {
     "ui.loop.compact_failed": (
         "压缩失败（模型没有返回摘要），本轮改用丢弃最旧对话的方式。"
     ),
+    "ui.loop.summary_too_long": (
+        "摘要请求本身就超过模型上下文窗口，本轮跳过压缩（改用按组丢弃的兜底方式）。"
+    ),
+    "ui.loop.context_limit": (
+        "这一轮装不进模型上下文窗口（{window} token）："
+        "工具定义、记忆、历史与这条消息合计约 {needed} token（含输出预留）。"
+        "为避免 API 直接报错，本轮没有发送。可以："
+        "① 到「设置 → 接口」把这个模型的「上下文上限」调到真实值；"
+        "② 换一个窗口更大的模型；③ 缩短这条消息，或先分叉/删掉较早的对话。"
+    ),
+    "ui.loop.output_capped": (
+        "为避免超出模型上下文窗口，本次输出上限临时降到 {max_tokens} token。"
+    ),
     "ui.loop.summarize_failed": "压缩失败：{error}",
     "ui.loop.wall_clock": "本轮已用时 {seconds:.0f} 秒，超过上限，已中止。",
     "ui.loop.token_budget": "本轮累计 {tokens} token，超过单轮上限，已中止。",
     "ui.loop.output_truncated": (
         "模型输出被 max_tokens（{max_tokens}）截断，本次结果可能不完整。"
+    ),
+    "ui.loop.output_truncated_unlimited": (
+        "本轮没有设置单轮输出上限（-1），模型输出是被服务端（或该协议要求的上限）"
+        "截断的；本次结果可能不完整。"
     ),
     "ui.loop.repeated_calls": (
         "检测到连续 {limit} 次完全相同的工具调用，已中止以避免死循环。"
@@ -480,6 +558,18 @@ MESSAGES: dict[str, str] = {
     "web.error.client_gone_turn": "客户端已断开，本轮中止。",
     "web.error.client_gone_dream": "客户端已断开。",
     "web.error.no_provider_profile": "没有这个接口：{profile_id}",
+    "web.error.dream_provider_required": (
+        "要指定整理模型，就得同时给出接口和模型（只给其中一个无法保存）"
+    ),
+    "web.error.provider_not_configured": (
+        "接口「{label}」还没有填 API key，不能用来整理"
+    ),
+    "web.error.dream_model_required": (
+        "请选择一个模型；想清掉这个设置就选「跟随默认」"
+    ),
+    "web.error.dream_model_unknown": (
+        "接口「{label}」里没有模型「{model}」—— 先在「设置 → 接口」里把它加进模型列表"
+    ),
     "web.error.dream_dry_run": (
         "预演已经取消了（ADR-072）。这次没有改动任何东西 —— "
         "请刷新页面（旧页面上的「预演一次」已经不存在了）。"

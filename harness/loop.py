@@ -23,10 +23,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Protocol, Sequence
 
-from .config import Settings
+from .config import Settings, UNLIMITED_OUTPUT
 from .context import (
     build_messages,
     render_for_summary,
+    request_overhead_tokens,
     split_into_groups,
 )
 from .i18n import t
@@ -39,6 +40,7 @@ from .llm_types import (
     TextDelta,
     Usage,
     estimate_messages_tokens,
+    estimate_tools_tokens,
 )
 from .memory import MemoryStore
 from .providers.base import LLMProvider, ProviderError
@@ -47,6 +49,10 @@ from .tools.registry import ToolRegistry
 Emit = Callable[..., None]
 
 _REPEAT_LIMIT = 3
+
+# 装进窗口之后"输出"至少还剩多少 token 才值得发这一次请求：见
+# `Settings.min_output_tokens`（config.py，默认 64，可用 HARNESS_MIN_OUTPUT_TOKENS 调）。
+# 以前它是这个模块里的一个常量 —— 阈值属于配置层，不留在循环里。
 
 # 服务端**明确拒绝这次请求**的状态码（契约 §13.5）。只有这些才动历史：
 # 400 参数/格式不对、404 模型不存在、415 不支持的媒体类型、422 语义上不接受。
@@ -79,6 +85,9 @@ class TurnOutcome:
     elapsed: float = 0.0
     stop_reason: str = "completed"
     error: str | None = None
+    #: 本轮那条 `user_message` 的 seq —— 前端「分叉」按钮靠它定位分叉点。
+    #: 历史回放时由 `build_session_view` 从事件里补；这里是**实时流**那一侧。
+    user_seq: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -107,6 +116,9 @@ class AgentLoop:
         self.session_id = log.session_id
         self.emit: Emit = emit or _silent_emit
         self._planner: Planner = planner or self.plan_chat_turn
+        # 是不是对话那条路？dream 注入自己的 planner，它有自己的 system 与预算口径，
+        # 不能替它渲染聊天记忆、也不能拿聊天的固定开销去算它的窗口（ADR-100）。
+        self._chat_planner = planner is None
         # 系统提示里关于联网工具的那一段（由 Runtime 按配置生成）
         self.web_tools_text = web_tools_text
         # 背景档案（dream memory）那一整段：README 的正文已经拼在里面。
@@ -119,6 +131,12 @@ class AgentLoop:
         self._turn_summary: str = ""
         # 本轮固定的时间戳（run() 开头设置，见 build_tail_message）
         self._turn_now: datetime = datetime.now().astimezone()
+        # 本轮的工具定义：估算与真正发出去的必须是同一份（ADR-100）
+        self._turn_tools: list[dict[str, Any]] = []
+        # 本轮的历史预算（窗口 - 输出 - 余量 - 固定开销），由 run() 算好
+        self._turn_history_budget: int | None = None
+        # "输出上限被临时压低"这条提示一轮只说一次
+        self._output_capped_noted = False
         # 本轮为压缩花掉的 token，计入回合用量
         self._compact_usage = Usage()
 
@@ -136,24 +154,8 @@ class AgentLoop:
 
         记忆是**全量注入**的（ADR-058）—— 条数上限就是那道闸，不再按相关性挑选。
         """
-        turn_index = sum(1 for message in history if message.role == "user")
-        # 工具写入需要知道"哪轮对话写了什么记忆"
-        self.memory.set_context(self.session_id, turn_index)
-
-        if self._turn_memory_text is None:
-            budget = self.settings.memory_token_budget
-            # 先问一次"实际会注入哪些、有几条因预算看不到"，再渲染 ——
-            # 这两件事必须来自同一次判断，否则界面上的数字会和实际注入不符。
-            _items, omitted = self.memory.injection_plan(max_tokens=budget)
-            self._turn_memory_text = self.memory.render_for_prompt(max_tokens=budget)
-            self.emit(
-                "memory",
-                count=len(self.memory.active_items()),
-                limit=self.memory.max_items,
-                omitted=omitted,
-            )
-
-        memory_text = self._turn_memory_text
+        self._ensure_turn_memory(history)
+        memory_text = self._turn_memory_text or ""
         messages, omitted_groups = build_messages(
             self.settings,
             history,
@@ -162,6 +164,9 @@ class AgentLoop:
             web_tools=self.web_tools_text,
             vault_text=self.vault_text,
             now=self._turn_now,
+            # 整条请求的预算（窗口 - 输出 - 余量 - 工具/系统/记忆/摘要），
+            # 不是只有历史那一份（ADR-100）。run() 会先把它算好。
+            history_budget=self._turn_history_budget,
         )
         return messages, {
             "omitted_groups": omitted_groups,
@@ -169,30 +174,114 @@ class AgentLoop:
             "memory_count": len(self.memory.active_items()),
             "memory_limit": self.memory.max_items,
             "summary_chars": len(self._turn_summary),
+            # 这一轮实际用的历史预算：重放时要能看出"为什么这里没有更早的对话了"
+            "history_budget": self._turn_history_budget,
             # README 的全文也写进轨迹：`--replay` 要能看到"当时到底注入了什么"
             "vault_text": self.vault_text,
         }
+
+    def _ensure_turn_memory(self, history: list[Message]) -> None:
+        """按当前历史算出"这一轮用哪一份记忆块"，整轮只渲染一次。
+
+        从 `plan_chat_turn` 里提出来，是因为压缩必须在第一步之前就知道
+        记忆块有多大 —— 它是整条请求固定开销的一部分（ADR-100）。
+        `set_context` 每步都要更新（它记录"这条记忆是第几轮写的"），
+        而渲染只做一次。
+        """
+        turn_index = sum(1 for message in history if message.role == "user")
+        # 工具写入需要知道"哪轮对话写了什么记忆"
+        self.memory.set_context(self.session_id, turn_index)
+        if self._turn_memory_text is not None:
+            return
+        budget = self.settings.memory_token_budget
+        # 先问一次"实际会注入哪些、有几条因预算看不到"，再渲染 ——
+        # 这两件事必须来自同一次判断，否则界面上的数字会和实际注入不符。
+        _items, omitted = self.memory.injection_plan(max_tokens=budget)
+        self._turn_memory_text = self.memory.render_for_prompt(max_tokens=budget)
+        self.emit(
+            "memory",
+            count=len(self.memory.active_items()),
+            limit=self.memory.max_items,
+            omitted=omitted,
+        )
+
+    def _request_overhead(self, summary_text: str) -> int:
+        """这一轮"不属于历史"的固定开销（工具 + system + 摘要 + 尾巴）。"""
+        return request_overhead_tokens(
+            self.settings,
+            self._turn_memory_text or "",
+            summary_text=summary_text,
+            web_tools=self.web_tools_text,
+            vault_text=self.vault_text,
+            tools=self._turn_tools,
+            now=self._turn_now,
+        )
+
+    def _prepare_budget(self, history: list[Message], summary_text: str) -> int:
+        """算这一轮历史能占多少 token。
+
+        只有对话 planner 才有"记忆块 / 摘要 / README"这些固定开销；
+        dream 用自己的 system 与 planner，这里不替它渲染聊天记忆（那是白查库），
+        它的窗口约束由 `_fit_request` 在真正发请求之前兜住。
+        """
+        if not self._chat_planner:
+            return self.settings.history_budget()
+        self._ensure_turn_memory(history)
+        overhead = self._request_overhead(summary_text)
+        return self.settings.history_budget(overhead_tokens=overhead)
+
+    def _fit_request(
+        self, estimated_input: int, output_tokens: int
+    ) -> tuple[int, bool] | None:
+        """把这一条请求收进模型窗口。返回 (真正要发的 max_tokens, 是否压低过)。
+
+        窗口管的是"**输入 + 输出**"（ADR-100）。历史已被 `build_messages` 按预算
+        裁过，所以这里通常只是复核一次。真正需要动手的只有一种情形：
+        本轮最新一组（工具结果 / 一条超大提问）自己就把窗口占满了 ——
+        这时先压低输出上限；压到底也装不下就返回 None，由调用方**本地中止**。
+
+        返回 None 表示"这条请求不该发出去"。它是一条**本地**失败，
+        不是 API 的 context length exceeded —— 后者才是这个改动要消灭的东西。
+        """
+        limit = int(self.settings.context_window) - self.settings.context_margin()
+        room = limit - max(0, int(estimated_input))
+        if int(output_tokens) == UNLIMITED_OUTPUT:
+            # 不限输出（ADR-101）：发给 provider 的仍是 -1（OpenAI 兼容那边
+            # 会**不发送** max_tokens）；这里只要求输入给输出留出预算里的那块
+            # 预留，否则输入会把窗口占满、模型没有生成空间。
+            if room < self.settings.output_reserve():
+                return None
+            return UNLIMITED_OUTPUT, False
+        if room <= 0 or room < self.settings.min_output_tokens:
+            return None
+        if room >= output_tokens:
+            return output_tokens, False
+        return room, True
 
     # ------------------------------------------------------------------
     # 自动 compact
     # ------------------------------------------------------------------
 
     def _maybe_compact(
-        self, history: list[Message], summary_text: str, mark: CoveredMark
+        self,
+        history: list[Message],
+        summary_text: str,
+        mark: CoveredMark,
+        budget: int,
     ) -> bool:
         """历史接近预算上限时，把较早的那部分压成摘要。
 
-        触发点取 `settings.history_budget()` —— 它是 **成本上限** 与
-        **本轮这个模型的上下文窗口** 两者中的较小值。所以"在哪里 compact"
-        确实取决于用户这轮选了什么模型：换个 32K 窗口的模型会明显更早触发。
+        `budget` 是**整条请求**留给历史的那一份（窗口 - 输出 - 余量 - 工具/
+        system/记忆/摘要，见 `_prepare_budget`），不是"只看窗口"的粗数字。
+        所以"在哪里 compact"确实取决于用户这轮选了什么模型：换个 32K 窗口的
+        模型会明显更早触发（ADR-100）。
 
         无法压缩时（只剩一组、模型调用失败）返回 False，
         由 `trim_history` 兜底按组丢弃，行为与 M5 之前一致。
         """
-        if not self.settings.compact_enabled:
+        if not self.settings.compact_enabled or budget <= 0:
             return False
 
-        budget = self.settings.history_budget()
         threshold = int(budget * self.settings.compact_threshold)
         if estimate_messages_tokens(history) <= threshold:
             return False
@@ -239,6 +328,29 @@ class AgentLoop:
         if not folded:
             return False
 
+        # 摘要调用**本身也是一次 API 请求**：它同样不能超过窗口（ADR-100）。
+        # 放不下就从最新的待折叠组往回丢（水位线因此更保守），而不是硬发一条
+        # 注定 400 的请求。`fold_groups` 始终是原列表的前缀，所以水位线仍然连续。
+        summary_limit = (
+            int(self.settings.context_window)
+            - self.settings.compact_max_output_tokens
+            - self.settings.context_margin()
+        )
+        while fold_groups:
+            folded = [message for group in fold_groups for message in group]
+            if (
+                estimate_messages_tokens(self._summary_prompt(folded, summary_text))
+                <= summary_limit
+            ):
+                break
+            fold_groups = fold_groups[:-1]
+        if not fold_groups:
+            self._notice(t("ui.loop.summary_too_long"), "warn")
+            return False
+        folded = [message for group in fold_groups for message in group]
+        if not folded:
+            return False
+
         self._notice(
             t(
                 "ui.loop.compacting",
@@ -274,10 +386,14 @@ class AgentLoop:
         )
         return True
 
-    def _summarize(
+    def _summary_prompt(
         self, folded: list[Message], previous_summary: str
-    ) -> tuple[str, Usage]:
-        """让模型把这段历史压成摘要。返回 (摘要文本, 用量)。"""
+    ) -> list[Message]:
+        """摘要调用真正发出去的消息。
+
+        **估算与发送共用这一处**：否则"检查时算的"与"发出去的"会慢慢分家，
+        而这件事刚好是窗口保证的依据（ADR-100）。
+        """
         parts: list[str] = []
         if previous_summary:
             parts.append(bundle().COMPACT_PREVIOUS.format(summary=previous_summary))
@@ -288,10 +404,16 @@ class AgentLoop:
                 )
             )
         )
-        prompt = [
+        return [
             Message(role="system", content=bundle().COMPACT_SYSTEM_PROMPT),
             Message(role="user", content="\n\n".join(parts)),
         ]
+
+    def _summarize(
+        self, folded: list[Message], previous_summary: str
+    ) -> tuple[str, Usage]:
+        """让模型把这段历史压成摘要。返回 (摘要文本, 用量)。"""
+        prompt = self._summary_prompt(folded, previous_summary)
         assembler = StreamAssembler()
         try:
             for event in self.provider.stream(
@@ -353,19 +475,34 @@ class AgentLoop:
         # 时间在**整轮开始时固定一次**：每步各算一次的话，轮内跨分钟会让第 2 步的
         # prompt 不再是第 1 步的前缀，缓存白白失效（ADR-009 的实测命中率就是这么掉的）。
         self._turn_now = datetime.now().astimezone()
+        # 工具定义在整轮内不变：**估算与真正发出去的必须是同一份**（ADR-100）。
+        self._turn_tools = self.registry.specs()
+        # "输出上限被临时压低"这条提示一轮只说一次
+        self._output_capped_noted = False
+        self._turn_history_budget: int | None = None
 
         # 压缩是优化，**绝不能因为它让这一轮失败**：任何异常都降级为"不压缩"，
         # 由 trim_history 按组丢弃兜底，并且照常走到 turn_end。
         self._turn_summary = ""
         try:
             summary_text, history, mark = self.log.compacted_context()
-            if self._maybe_compact(history, summary_text, mark):
+            budget = self._prepare_budget(history, summary_text)
+            if self._maybe_compact(history, summary_text, mark, budget):
                 # 压缩改变了上下文，重新读一次
                 summary_text, history, mark = self.log.compacted_context()
+                # 摘要变了，固定开销也跟着变：预算必须重算（ADR-100）
+                budget = self._prepare_budget(history, summary_text)
             self._turn_summary = summary_text
+            self._turn_history_budget = budget
         except Exception as exc:  # noqa: BLE001 - 压缩不该有能力弄坏一轮对话
             self._turn_summary = ""
             history = self.log.conversation()
+            # 压缩阶段出错也要有一条**安全的预算**：退回"按窗口硬约束"的算法，
+            # 否则这一轮会拿 None 去拼 prompt —— 那等于没有窗口保证（ADR-100）。
+            try:
+                self._turn_history_budget = self._prepare_budget(history, "")
+            except Exception:  # noqa: BLE001 - 连预算都算不出来时用最保守的那条
+                self._turn_history_budget = self.settings.history_budget()
             self._notice(
                 f"压缩阶段出错，本轮跳过压缩：{type(exc).__name__}: {exc}", "warn"
             )
@@ -412,7 +549,34 @@ class AgentLoop:
                     break
 
                 messages, extra = self._planner(history, step, user_text)
-                estimated = estimate_messages_tokens(messages)
+                # **整条请求（输入 + 输出）必须装进模型窗口**（ADR-100）。
+                # 历史已经按预算裁过；这里兜住"本轮最新一组自己就超了"的情形：
+                # 先压低输出上限，实在装不下就本地中止 —— 绝不把一条注定 400 的
+                # 请求交给 API（那正是这个改动要消灭的报错）。
+                estimated = estimate_messages_tokens(messages) + estimate_tools_tokens(
+                    self._turn_tools
+                )
+                fit = self._fit_request(estimated, int(self.settings.max_output_tokens))
+                if fit is None:
+                    stop_reason = "context_limit"
+                    self._notice(
+                        t(
+                            "ui.loop.context_limit",
+                            window=int(self.settings.context_window),
+                            # 要报**真实要留出的输出量**：`-1`（不限）时它不是 -1，
+                            # 而是窗口感知的那块预留（`output_reserve()`）——
+                            # 直接把 max_output_tokens 加进去会少报一整块。
+                            needed=estimated + self.settings.output_reserve(),
+                        ),
+                        "warn",
+                    )
+                    break
+                output_tokens, output_capped = fit
+                if output_capped and not self._output_capped_noted:
+                    self._output_capped_noted = True
+                    self._notice(
+                        t("ui.loop.output_capped", max_tokens=output_tokens), "warn"
+                    )
                 self.log.append(
                     "prompt_built",
                     step=step,
@@ -433,8 +597,8 @@ class AgentLoop:
                     # 结果是"想到一半被截断"（实测踩过）。
                     for event in self.provider.stream(
                         messages,
-                        self.registry.specs(),
-                        max_tokens=self.settings.max_output_tokens,
+                        self._turn_tools,
+                        max_tokens=output_tokens,
                     ):
                         assembler.feed(event)
                         self._relay(event)
@@ -458,13 +622,20 @@ class AgentLoop:
                 # dream 整理 80 条记忆时 reasoning 用满 2048、零工具调用，却报告 completed。
                 if assembler.finish_reason == "length":
                     truncated = True
-                    self._notice(
-                        t(
-                            "ui.loop.output_truncated",
-                            max_tokens=self.settings.max_output_tokens,
-                        ),
-                        "warn",
-                    )
+                    if output_tokens == UNLIMITED_OUTPUT:
+                        # 没设上限时被截断，只可能是**服务端自己**的上限/窗口。
+                        # 不能报一句 "max_tokens (-1)" 让人以为是我们设的（ADR-101）。
+                        self._notice(t("ui.loop.output_truncated_unlimited"), "warn")
+                    else:
+                        self._notice(
+                            t(
+                                "ui.loop.output_truncated",
+                                # 报**这次真正发出去的**上限：它可能因为窗口被临时压低，
+                                # 报配置值会让用户以为还有余量（ADR-100）。
+                                max_tokens=output_tokens,
+                            ),
+                            "warn",
+                        )
 
                 self.log.append(
                     "assistant_message",
@@ -597,6 +768,7 @@ class AgentLoop:
                     aborted_by=f"{type(exc).__name__}: {exc}",
                     elapsed=round(elapsed, 2),
                     usage=total_usage.to_dict(),
+                    user_seq=user_seq,
                 )
             except Exception:  # noqa: BLE001 - 连日志都写不进去时不能再抛
                 pass
@@ -611,6 +783,7 @@ class AgentLoop:
             stop_reason=stop_reason,
             elapsed=round(elapsed, 2),
             usage=total_usage.to_dict(),
+            user_seq=user_seq,
         )
         outcome = TurnOutcome(
             text=final_text,
@@ -619,6 +792,7 @@ class AgentLoop:
             elapsed=elapsed,
             stop_reason=stop_reason,
             error=error,
+            user_seq=user_seq,
         )
         self.emit("turn_end", outcome=outcome)
         return outcome

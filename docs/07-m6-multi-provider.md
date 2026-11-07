@@ -51,7 +51,10 @@ DeepSeek 预设打开，其余预设关闭。CLI `--providers` 能一眼看到�
 
 ```
 data/providers.json      ← 每家一份：id / label / base_url / key / 模型 / 档位 / 开关
-data/app_settings 放在同一个文件的 default 字段里：新会话默认用哪家哪个模型
+                           同一个文件里还有两个选择：
+                             default —— 新会话默认用哪家哪个模型
+                             dream   —— 整理（dream）用哪家哪个模型（ADR-103）
+                                        空 = 跟随 default；不影响对话的那个选择
 ```
 
 - `data/` 已被 `.gitignore` 忽略，**key 不会进仓库**。

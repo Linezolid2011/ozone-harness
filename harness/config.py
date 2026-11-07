@@ -10,10 +10,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .i18n import DEFAULT_LANGUAGE as LANGUAGE_DEFAULT
+from .i18n import DEFAULT_MAX_OUTPUT_TOKENS
 from .i18n import normalize as normalize_language
 from .memory_limit import DEFAULT_LIMIT, MAX_LIMIT, MIN_LIMIT
+from .token_limit import UNLIMITED as UNLIMITED_OUTPUT
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: 一次请求装进窗口之后，"输出"至少还能剩这么多 token 才值得发出去。
+#: 比这更小就**本地中止**（`stop_reason="context_limit"`）：一次只剩几十 token 的
+#: 回答既没有用，也是在拿 400 赌命。默认 64；可调（`HARNESS_MIN_OUTPUT_TOKENS`）。
+DEFAULT_MIN_OUTPUT_TOKENS = 64
 
 
 def resolve_data_dir(env: dict[str, str]) -> Path:
@@ -99,6 +106,15 @@ def _float(env: dict[str, str], key: str, default: float) -> float:
         return float(_text(env, key, str(default)))
     except ValueError:
         return default
+
+
+def _output_seed(value: int) -> int:
+    """`.env` 里的单轮最大输出**种子**：只认 -1（不限）或 ≥1；写坏了退回 5000。
+
+    0 与 <-1 不是有意义的上限（见 `token_limit.py`），但环境变量是种子，
+    不该让程序起不来 —— 与 `_int_range` 同一条口径（种子坏 → 用默认值）。
+    """
+    return value if value == UNLIMITED_OUTPUT or value > 0 else DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def _bool(env: dict[str, str], key: str, default: bool) -> bool:
@@ -193,6 +209,14 @@ class Settings:
     # 界面语言（ADR-085）：这里只是**种子**，真正的值在 `data/settings.json`
     # （设置里可改、立刻生效，同 ADR-057 的记忆上限那套）。取值容错在 i18n.normalize。
     language: str = LANGUAGE_DEFAULT
+    # 整条请求（输入 + 输出）装进模型窗口时留的安全余量（ADR-100）。
+    # `estimate_tokens` 是按字符保守估的，但各家分词器并不完全一样；
+    # 没有余量就等于"把窗口正好用满"，那是最容易擦边 400 的位置。
+    # 给默认值（而不是必填字段）是因为 Settings 被大量测试直接构造。
+    context_safety_tokens: int = 1024
+    # 窗口装不下时，"输出"至少还能剩这么多 token 才值得发这一次请求；
+    # 比它更小就本地中止（ADR-100）。同样给默认值（测试会直接构造 Settings）。
+    min_output_tokens: int = DEFAULT_MIN_OUTPUT_TOKENS
 
     @property
     def sessions_dir(self) -> Path:
@@ -233,7 +257,9 @@ class Settings:
             model="",
             reasoning_effort=None,
             request_timeout=_float(env, "HARNESS_REQUEST_TIMEOUT", 120.0),
-            max_output_tokens=_int(env, "HARNESS_MAX_OUTPUT_TOKENS", 2048),
+            max_output_tokens=_output_seed(
+                _int(env, "HARNESS_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)
+            ),
             max_steps=_int(env, "HARNESS_MAX_STEPS", 8),
             max_tokens_per_turn=_int(env, "HARNESS_MAX_TOKENS_PER_TURN", 60000),
             max_wall_seconds=_float(env, "HARNESS_MAX_WALL_SECONDS", 180.0),
@@ -304,26 +330,90 @@ class Settings:
             # 界面语言的**种子**：运行期可改（data/settings.json），这里只是默认值。
             # 写坏了退回 zh，不让程序起不来（同上面那些 _int_range 的口径）。
             language=normalize_language(_opt_text(env, "HARNESS_LANGUAGE") or ""),
+            # 整条请求的安全余量（ADR-100）。负值没有意义，夹到 0。
+            context_safety_tokens=max(
+                0, _int(env, "HARNESS_CONTEXT_SAFETY_TOKENS", 1024)
+            ),
+            # 装进窗口之后输出至少要剩多少 token（ADR-100）。0/负值没有意义，
+            # 夹到 1（种子写坏了不该让程序起不来，同 `context_safety_tokens`）。
+            min_output_tokens=max(
+                1, _int(env, "HARNESS_MIN_OUTPUT_TOKENS", DEFAULT_MIN_OUTPUT_TOKENS)
+            ),
         )
 
     # ------------------------------------------------------------------
     # 上下文预算
     # ------------------------------------------------------------------
 
-    def history_budget(self) -> int:
+    def context_margin(self) -> int:
+        """估算误差的安全余量（token）。
+
+        估算器按字符保守估（中文 1 字 1 token、其余 4 字符 1 token），
+        但不同厂商的分词器并不完全一样，所以整条请求**不能把窗口正好用满**。
+        窗口很小时按窗口的 5% 收紧，免得一个 8k 的模型被 1024 的余量吃掉八分之一。
+        `HARNESS_CONTEXT_SAFETY_TOKENS=0` 表示不留余量（不推荐）。
+        """
+        configured = max(0, int(self.context_safety_tokens))
+        if configured <= 0:
+            return 0
+        by_window = max(128, int(self.context_window) // 20)
+        return min(configured, by_window)
+
+    def output_reserve(self) -> int:
+        """预算里给"输出"留多少 token。
+
+        - 正常情况：就是配置的单轮最大输出；
+        - `-1`（不限，ADR-101）：**仍然留一块**。窗口是"输入 + 输出"的硬边界，
+          一点不留就等于让输入把窗口占满、模型一个字也写不出来。这里按窗口的
+          1/4 取，夹在 1k ~ 8k 之间 —— 它只是**预算里的预留**，不是发给模型的
+          `max_tokens`（那一路是"不发送该字段"）。
+        """
+        value = int(self.max_output_tokens)
+        if value == UNLIMITED_OUTPUT:
+            return max(1024, min(8192, int(self.context_window) // 4))
+        return max(0, value)
+
+    def input_room(self, *, overhead_tokens: int, output_tokens: int | None = None) -> int:
+        """整条请求里还能放多少"输入"token。
+
+        **模型的窗口管的是"输入 + 输出"，不是只有历史**（ADR-100）：
+
+            estimate(输入) + max_tokens <= context_window
+
+        这里先把输出预留、安全余量与固定开销（工具定义 / system / 记忆 /
+        README / 摘要 / 时间块）扣掉，剩下的才是历史能用的部分。
+        返回值可能是负数（窗口比固定开销还小），调用方必须当成 0 处理。
+        """
+        if output_tokens is None or int(output_tokens) == UNLIMITED_OUTPUT:
+            output = self.output_reserve()
+        else:
+            output = int(output_tokens)
+        return (
+            int(self.context_window)
+            - output
+            - self.context_margin()
+            - max(0, int(overhead_tokens))
+        )
+
+    def history_budget(self, *, overhead_tokens: int = 0) -> int:
         """历史最多占多少 token。
 
         取两者的**较小值**：
           * `context_token_budget` —— 我们自己的成本上限（默认 24000）；
-          * `context_window` 留出系统提示与输出的余量 —— 模型能力上限。
+          * `input_room(...)` —— 窗口扣掉输出、余量与固定开销之后的余量。
 
         这个区分很重要：**模型的上下文窗口讲的是能力，不是花钱许可**。
         一个 1M 窗口的模型如果把历史塞到 75 万 token，每轮输入就要 0.75 元，
-        所以成本上限是独立的一根闸。
+        所以成本上限是独立的一根闸。反过来，成本上限再宽也**不能超过窗口** ——
+        那是 API 会直接 400 的地方（ADR-100）。
         """
-        reserve = max(2048, int(self.max_output_tokens) + 4096)
-        by_window = max(4096, int(self.context_window) - reserve)
-        return min(int(self.context_token_budget), by_window)
+        return max(
+            0,
+            min(
+                int(self.context_token_budget),
+                self.input_room(overhead_tokens=overhead_tokens),
+            ),
+        )
 
     def describe(self) -> str:
         effort = self.reasoning_effort or "(未设置)"

@@ -83,7 +83,13 @@ class VaultListTool:
 
     def run(self, args: dict[str, Any]) -> ToolResult:
         prefix = str(args.get("prefix") or "")
-        entries = self._store.list_files(prefix)
+        # 只列 canonical 档案（sections/ 含归档月份 + entities/）。
+        # README / observations / index / log 不是"档案"，而且 README 本来就在上下文里。
+        entries = [
+            entry
+            for entry in self._store.list_files(prefix)
+            if entry.path.startswith(("sections/", "entities/"))
+        ]
         payload: dict[str, Any] = {"count": len(entries), "files": []}
         for entry in entries:
             payload["files"].append(

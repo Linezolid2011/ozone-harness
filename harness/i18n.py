@@ -42,9 +42,15 @@ from types import ModuleType
 from typing import Any
 
 from .atomic_io import write_text_atomic
+from .token_limit import parse_token_limit
 
 LANGUAGES: tuple[str, ...] = ("zh", "en")
 DEFAULT_LANGUAGE = "zh"
+
+# 单轮最大输出（token）的**种子默认值**。真正的值在 `data/settings.json`
+# （「设置 → 常规」里可改，ADR-101）；这里是全新机器/没有 store 时的兜底。
+# `-1` = 不限，见 token_limit.UNLIMITED。
+DEFAULT_MAX_OUTPUT_TOKENS = 5000
 
 # 时区（`time` 工具用的偏移，单位：小时）。运行期可改，存在 `data/settings.json`。
 # 现在只收**整数小时**（-12 ~ +14）：半时区（如 +5:30）以后需要再加。
@@ -273,7 +279,7 @@ def _coerce_timezone(value: Any) -> float | None:
 
 
 class SettingsStore:
-    """`data/settings.json` 的读写：界面语言 + 时区（`time` 工具用的偏移）。
+    """`data/settings.json` 的读写：界面语言 + 时区 + 单轮最大输出。
 
     文件不存在时用种子值，**不主动创建文件**。读操作不创建文件这条与
     `MemoryLimitStore`、`preview_reset()`、`VaultStore` 一致：界面上"看一眼"
@@ -286,10 +292,12 @@ class SettingsStore:
         *,
         default: str = DEFAULT_LANGUAGE,
         timezone_default: float = DEFAULT_TIMEZONE,
+        output_default: int = DEFAULT_MAX_OUTPUT_TOKENS,
     ) -> None:
         self.path = Path(path)
         self._default = normalize(default)
         self._timezone_default = float(timezone_default)
+        self._output_default = int(output_default)
         self._data: dict[str, Any] = self._load()
 
     def _load(self) -> dict[str, Any]:
@@ -314,6 +322,14 @@ class SettingsStore:
         """当前生效的时区偏移（**只读**）。坏值退回默认值，不报错。"""
         value = _coerce_timezone(self._data.get("timezone", self._timezone_default))
         return self._timezone_default if value is None else value
+
+    def max_output_tokens(self) -> int:
+        """当前生效的单轮最大输出（**只读**）。`-1` = 不限；坏值退回默认。"""
+        value = parse_token_limit(
+            self._data.get("max_output_tokens", self._output_default),
+            allow_unlimited=True,
+        )
+        return self._output_default if value is None else value
 
     def set(self, value: Any) -> LanguageChange:
         """改成新语言。取值不认识时**明确报错**（这条是设置界面那条路，要严格）。"""
@@ -342,6 +358,22 @@ class SettingsStore:
         self.save()
         return {"ok": True, "timezone": number}
 
+    def set_max_output_tokens(self, value: Any) -> dict[str, Any]:
+        """改单轮最大输出。`-1` = 不限；`>=1`；也接受 `5k` / `1M`。
+
+        取值不合法时**明确报错**（设置界面那条路，要严格）：静默退回默认值
+        会让用户以为已经存上了 —— 那是这个项目最讨厌的"看起来成功了"。
+        """
+        parsed = parse_token_limit(value, allow_unlimited=True)
+        if parsed is None:
+            return {
+                "ok": False,
+                "error": t("ui.output.bad_value", value=str(value)[:40]),
+            }
+        self._data["max_output_tokens"] = parsed
+        self.save()
+        return {"ok": True, "max_output_tokens": parsed}
+
     def save(self) -> None:
         # 原子写：半截文件读不出来时，读端会把它当成"没有配置"（见 atomic_io 的说明）。
         write_text_atomic(
@@ -349,7 +381,7 @@ class SettingsStore:
         )
 
     def public_state(self) -> dict[str, Any]:
-        """给前端的一份：语言与时区的当前值、可选清单、以及**默认**是哪个。"""
+        """给前端的一份：语言/时区/单轮最大输出的当前值与**默认值**。"""
         return {
             "language": self.language(),
             "languages": list(LANGUAGES),
@@ -358,6 +390,8 @@ class SettingsStore:
             "timezone_default": self._timezone_default,
             "timezone_min": TIMEZONE_MIN,
             "timezone_max": TIMEZONE_MAX,
+            "max_output_tokens": self.max_output_tokens(),
+            "max_output_tokens_default": self._output_default,
         }
 
 
@@ -386,3 +420,16 @@ def timezone_for(data_dir: Path, default: float = DEFAULT_TIMEZONE) -> float:
     return SettingsStore(
         Path(data_dir) / SETTINGS_FILE, timezone_default=default
     ).timezone()
+
+
+def max_output_tokens_for(
+    data_dir: Path, default: int = DEFAULT_MAX_OUTPUT_TOKENS
+) -> int:
+    """当前生效的单轮最大输出（`-1` = 不限）。
+
+    Runtime 在**装配时**读一次（ADR-101）：所以改完下一轮对话生效，
+    与语言（进程级、立刻生效）不同，与 `time` 工具的时区同一种生命周期。
+    """
+    return SettingsStore(
+        Path(data_dir) / SETTINGS_FILE, output_default=default
+    ).max_output_tokens()

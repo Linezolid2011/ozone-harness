@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Sequence, Union
 
 # --------------------------------------------------------------------------
 # 工具调用与消息
@@ -397,12 +397,35 @@ def estimate_image_tokens(width: int, height: int) -> int:
 
 def estimate_message_tokens(message: Message) -> int:
     total = estimate_tokens(message.content) + 4  # 4 为每条消息的结构开销
+    # 思维链**也会真的发出去**（assistant 的 reasoning_content 要回传，见 Message.to_api）。
+    # 以前不数它，工具循环里越长的思考越会让真实 prompt 比估算大 —— 而窗口是硬上限（ADR-100）。
+    if message.reasoning:
+        total += estimate_tokens(message.reasoning)
     for call in message.tool_calls:
         total += estimate_tokens(call.name) + estimate_tokens(call.arguments) + 8
+    # tool 消息的 id/name 也在请求里；少算它们会低估，方向虽然不危险，但没必要留这个偏差。
+    if message.tool_call_id:
+        total += estimate_tokens(message.tool_call_id) + 4
+    if message.name:
+        total += estimate_tokens(message.name) + 2
     # 图片必须算进来：不算的话 auto-compact 永远不会触发，上下文会被图片顶爆。
     for image in message.images:
         total += estimate_image_tokens(image.width, image.height)
     return total
+
+
+def estimate_tools_tokens(tools: Sequence[dict[str, Any]]) -> int:
+    """工具定义本身占多少 token（它们每一轮都随请求发出去）。
+
+    以前所有预算都只看"历史"，工具定义（本机实测 6 个约 1300 token、9 个约
+    2000 token）完全在窗外。窗口小的时候这一块足以把请求顶出去 —— 而那时
+    API 只会回一句 context length exceeded（ADR-100）。
+    """
+    items = list(tools or ())
+    if not items:
+        return 0
+    # 按 JSON 文本估 + 每个工具一点结构开销：与真正发出去的形状一致。
+    return estimate_tokens(json.dumps(items, ensure_ascii=False)) + 8 * len(items)
 
 
 def estimate_messages_tokens(messages: list[Message]) -> int:

@@ -247,6 +247,13 @@ html, body {
 .settings-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .pane-meta { margin-left: auto; font-size: 11.5px; color: var(--muted); }
 
+/* Dream 页的整理模型选择器（ADR-103）：靠右、紧挨着「N 次运行 · M 个待整理」。
+   它把整排的剩余空间吃掉，于是后面那行 meta 紧跟着它 —— 与顶栏模型选择器
+   是同一个视觉语言（.picker），但**只影响整理**，所以放在这一页自己的工具栏里。 */
+.dream-model { margin-left: auto; }
+.dream-model + .pane-meta { margin-left: 0; }
+.dream-model select { flex: none; max-width: 280px; }
+
 /* 设置页里的一句说明（例如"有 N 条记忆因为太长没进上下文"）。
    空着时不占地方：只在真有话要说的时候由 JS 填内容。 */
 .pane-note { font-size: 12px; color: var(--muted); padding: 4px 2px; }
@@ -324,11 +331,10 @@ html, body {
   padding: 10px 14px; max-width: 76%;
   white-space: pre-wrap; word-break: break-word;
 }
-/* 分叉按钮：挂在用户气泡左侧，hover 才露出来，别抢正文的注意力 */
+/* 分叉按钮：挂在每轮结尾那行统计（.meta）的右侧，和"步数 / 缓存命中"对齐。
+   平时淡淡的、hover 变亮 —— 每轮都有一个，但别抢正文的注意力。 */
 .fork-btn {
-  order: -1;
-  align-self: center;
-  margin-right: 8px;
+  flex: none;
   padding: 2px 8px;
   font-size: 11.5px;
   font-family: inherit;
@@ -338,11 +344,10 @@ html, body {
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity .12s;
+  opacity: .7;
+  transition: opacity .12s, color .12s, border-color .12s;
 }
-.msg.user:hover .fork-btn { opacity: 1; }
-.fork-btn:hover { color: var(--accent); border-color: var(--accent); }
+.fork-btn:hover { opacity: 1; color: var(--accent); border-color: var(--accent); }
 .msg.assistant .bubble {
   border-radius: 4px var(--radius) var(--radius) var(--radius);
   white-space: pre-wrap; word-break: break-word;
@@ -421,9 +426,11 @@ html, body {
 }
 
 .meta {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
   max-width: 820px; margin: 0 auto 18px; padding: 0 22px;
   font-size: 11.5px; color: var(--muted);
 }
+.meta-text { min-width: 0; }
 
 /* 会话级「联网搜索」开关：默认关，状态要一眼看得出来 */.web-toggle {
   display: inline-flex; align-items: center; gap: 6px;
@@ -873,6 +880,12 @@ h3.vault-h { font-size: 14px; color: var(--text-soft); }
 }
 .vault-body .vault-hr { border: 0; border-top: 1px solid var(--border); margin: 11px 0; }
 .vault-body .codeblock { margin: 0 0 9px; }
+/* 原生 vault 的图片嵌入 `![[raw/source_<n>/x.jpg]]`（ADR-104） */
+.vault-body .vault-raw-image {
+  display: block; max-width: 100%; height: auto;
+  margin: 8px 0; border-radius: 8px; border: 1px solid var(--border);
+  cursor: zoom-in;
+}
 
 /* `[[双链]]` 点开就是"用这个名字去读一份档案"；没读到就是"还没写" */
 .vault-link {
