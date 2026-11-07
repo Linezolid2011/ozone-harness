@@ -197,9 +197,12 @@ class HttpServerTests(unittest.TestCase):
 
     # -- 基础 --------------------------------------------------------
 
-    def _get(self, path: str) -> tuple[int, bytes, str]:
+    def _get(
+        self, path: str, headers: dict[str, str] | None = None
+    ) -> tuple[int, bytes, str]:
+        request = urllib.request.Request(self.base + path, headers=headers or {})
         try:
-            with urllib.request.urlopen(self.base + path, timeout=10) as resp:
+            with urllib.request.urlopen(request, timeout=10) as resp:
                 return resp.status, resp.read(), resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read(), exc.headers.get("Content-Type", "")
@@ -2160,6 +2163,64 @@ class HttpServerTests(unittest.TestCase):
         log.close()
         return path
 
+    def _post_during_check_to_act_race(
+        self, session_id: str, action: str, payload: dict[str, Any]
+    ) -> tuple[int, dict]:
+        """在"看过锁"与"真正操作"之间确定性插入一次 chat 拿锁。
+
+        旧实现的 `locked()` 会先记下 False，再被屏障卡住；测试线程这时拿住真锁，
+        模拟 chat 恰好开跑。新实现不走这个快照，而是在同一屏障之后非阻塞 acquire，
+        因而必须得到 409。两种实现都由同一组事件驱动，不靠 sleep 或运气。
+        """
+        real_lock = threading.Lock()
+        entered = threading.Event()
+        resume = threading.Event()
+
+        class RaceLock:
+            def _pause(self) -> None:
+                entered.set()
+                if not resume.wait(5):
+                    raise AssertionError("锁竞态屏障超时")
+
+            def locked(self) -> bool:
+                result = real_lock.locked()
+                self._pause()
+                return result
+
+            def acquire(self, blocking: bool = True) -> bool:
+                self._pause()
+                return real_lock.acquire(blocking=blocking)
+
+            def release(self) -> None:
+                real_lock.release()
+
+        self.server._locks[session_id] = RaceLock()
+        responses: list[tuple[int, dict]] = []
+        errors: list[BaseException] = []
+
+        def request() -> None:
+            try:
+                responses.append(self._post(f"/api/sessions/{session_id}/{action}", payload))
+            except BaseException as exc:  # 把线程里的失败带回断言线程
+                errors.append(exc)
+
+        worker = threading.Thread(target=request, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(5), "请求没有到达会话锁")
+            self.assertTrue(real_lock.acquire(blocking=False), "测试没能模拟 chat 拿锁")
+            resume.set()
+            worker.join(10)
+        finally:
+            resume.set()
+            worker.join(10)
+            if real_lock.locked():
+                real_lock.release()
+        self.assertFalse(worker.is_alive(), "HTTP 请求没有在屏障之后结束")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(responses), 1)
+        return responses[0]
+
     def test_rename_session(self) -> None:
         path = self._make_session("s-rename", "原来第一句话")
         status, result = self._post("/api/sessions/s-rename/title", {"title": "新名字"})
@@ -2261,6 +2322,62 @@ class HttpServerTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertIn("生成中", result["error"])
         self.assertTrue((self.settings.sessions_dir / "s-busy.jsonl").exists())
+
+    def test_delete_cannot_race_chat_between_lock_check_and_delete(self) -> None:
+        path = self._make_session("s-delete-race")
+        status, result = self._post_during_check_to_act_race(
+            "s-delete-race", "delete", {}
+        )
+        self.assertEqual(status, 409, result)
+        self.assertIn("生成中", result["error"])
+        self.assertTrue(path.is_file(), "chat 已在检查之后拿到锁，就绝不能再删")
+
+    def test_fork_cannot_race_chat_between_lock_check_and_copy(self) -> None:
+        path = self._make_session("s-fork-race")
+        before = set(self.settings.sessions_dir.glob("*.jsonl"))
+        status, result = self._post_during_check_to_act_race(
+            "s-fork-race", "fork", {"seq": 1}
+        )
+        self.assertEqual(status, 409, result)
+        self.assertIn("生成中", result["error"])
+        self.assertTrue(path.is_file())
+        self.assertEqual(set(self.settings.sessions_dir.glob("*.jsonl")), before)
+
+    def test_delete_and_fork_release_the_lock_before_every_response(self) -> None:
+        """ADR-077：连 400 也不能在握着锁时回包，否则下一次操作会吃到假 409。"""
+        self._make_session("s-delete-response")
+        self._make_session("s-fork-response")
+        delete_lock = self.server.session_lock("s-delete-response")
+        fork_lock = self.server.session_lock("s-fork-response")
+        observed: list[tuple[str, bool]] = []
+        original = HarnessHandler._send_json
+
+        def send_json(handler, payload, status=200):
+            if handler.path == "/api/sessions/s-delete-response/delete":
+                observed.append((handler.path, delete_lock.locked()))
+            elif handler.path == "/api/sessions/s-fork-response/fork":
+                observed.append((handler.path, fork_lock.locked()))
+            return original(handler, payload, status)
+
+        with mock.patch.object(HarnessHandler, "_send_json", new=send_json):
+            delete_status, delete_result = self._post(
+                "/api/sessions/s-delete-response/delete", {}
+            )
+            bad_status, _bad_result = self._post(
+                "/api/sessions/s-fork-response/fork", {"seq": 0}
+            )
+            fork_status, fork_result = self._post(
+                "/api/sessions/s-fork-response/fork", {"seq": 1}
+            )
+
+        self.assertEqual(delete_status, 200, delete_result)
+        self.assertEqual(bad_status, 400)
+        self.assertEqual(fork_status, 200, fork_result)
+        self.assertTrue(fork_result["ok"])
+        self.assertEqual(len(observed), 3)
+        self.assertTrue(all(not locked for _path, locked in observed), observed)
+        self.assertFalse(delete_lock.locked())
+        self.assertFalse(fork_lock.locked())
 
     def test_chat_without_any_configured_provider_is_rejected(self) -> None:
         self.server.settings = test_settings(Path(self._tmp.name), api_key="")
@@ -2411,6 +2528,82 @@ class HttpServerTests(unittest.TestCase):
             body = resp.read().decode("utf-8")
         self.assertIn("event: session", body)
         self.assertIn("event: done", body)
+
+    # -- Host / DNS 重绑定 --------------------------------------------
+
+    def test_loopback_host_gate_rejects_dns_rebinding_before_get_api(self) -> None:
+        """恶意域名即使已经重绑定到 127.0.0.1，也不能读到本机 GET API。"""
+        port = self.server.server_address[1]
+        with mock.patch("harness.web.provider_store") as store:
+            for host in (
+                "evil.example",
+                f"evil.example:{port}",
+                f"127.0.0.1.evil.example:{port}",
+            ):
+                with self.subTest(host=host):
+                    status, body, _ct = self._get("/api/config", {"Host": host})
+                    self.assertEqual(status, 403)
+                    self.assertIn("Host", json.loads(body)["error"])
+            store.assert_not_called()
+
+    def test_matching_malicious_host_and_origin_cannot_delete_a_session(self) -> None:
+        """只比较 Origin == Host 不够：DNS 重绑定页能让这两个头一起叫 evil。"""
+        path = self._make_session("s-rebinding")
+        port = self.server.server_address[1]
+        status, result = self._post_raw(
+            "/api/sessions/s-rebinding/delete",
+            b"{}",
+            {
+                "Content-Type": "application/json",
+                "Host": f"evil.example:{port}",
+                "Origin": f"http://evil.example:{port}",
+            },
+        )
+        self.assertEqual(status, 403, result)
+        self.assertIn("Host", result["error"])
+        self.assertTrue(path.is_file(), "Host 闸必须在删除动作之前拒绝")
+
+    def test_loopback_host_gate_accepts_ipv4_localhost_and_ipv6(self) -> None:
+        port = self.server.server_address[1]
+        for host in (
+            f"127.0.0.1:{port}",
+            f"127.0.0.2:{port}",
+            f"localhost:{port}",
+            f"LOCALHOST:{port}",
+            f"localhost.:{port}",
+            f"[::1]:{port}",
+            f"[0:0:0:0:0:0:0:1]:{port}",
+        ):
+            with self.subTest(host=host):
+                status, _body, _ct = self._get("/api/config", {"Host": host})
+                self.assertEqual(status, 200)
+
+    def test_loopback_host_gate_is_deterministic_about_ports_and_binding(self) -> None:
+        from harness.web import _host_allowed_for_bind
+
+        # 省略端口就是 HTTP 的 80；其它端口必须与实际监听端口完全一致。
+        self.assertTrue(_host_allowed_for_bind("localhost", "127.0.0.1", 80))
+        self.assertTrue(_host_allowed_for_bind("[::1]", "::1", 80))
+        self.assertFalse(_host_allowed_for_bind("localhost", "127.0.0.1", 8787))
+        self.assertFalse(_host_allowed_for_bind("localhost:8788", "127.0.0.1", 8787))
+        for bad in (
+            "",
+            "evil.example:8787",
+            "127.1:8787",          # 不做 inet_aton / DNS 的宽松解释
+            "2130706433:8787",    # 十进制整数 IP 也不是合法 Host 字面量
+            "::1:8787",           # IPv6 必须带方括号
+            "[::1:8787",
+            "[::1]:",
+            "localhost:+8787",
+            "localhost:0",
+            "localhost:65536",
+        ):
+            with self.subTest(host=bad):
+                self.assertFalse(_host_allowed_for_bind(bad, "127.0.0.1", 8787))
+
+        # 既有 `--host 0.0.0.0` / 局域网托管不能被回环白名单顺手禁掉。
+        self.assertTrue(_host_allowed_for_bind("evil.example", "0.0.0.0", 8787))
+        self.assertTrue(_host_allowed_for_bind("host.example", "192.0.2.10", 8787))
 
     # -- 跨站 / CSRF（安全缺陷 2）-------------------------------------
 

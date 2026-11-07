@@ -438,10 +438,15 @@ function renameSession(session) {
     onConfirm: async () => {
       const value = ($('rename-input').value || '').trim();
       try {
-        await postJSON(`/api/sessions/${encodeURIComponent(session.id)}/title`,
+        const saved = await postJSON(`/api/sessions/${encodeURIComponent(session.id)}/title`,
           { title: value });
         await loadSessions();
-        if (session.id === state.sessionId) $('chat-title').textContent = value || session.title;
+        if (session.id === state.sessionId) {
+          // 清空自定义标题时，顶栏必须显示服务端重新算出的自动标题；
+          // 闭包里的 session.title 仍是保存前那份旧值，不能拿来兜底。
+          const refreshed = state.sessions.find((item) => item.id === session.id) || {};
+          $('chat-title').textContent = (saved && saved.title) || refreshed.title || value || session.id;
+        }
         toast(value ? t("toast.renamed") : t("toast.rename_restored"));
       } catch (err) { toast(t("toast.rename_failed", { msg: err.message || err })); }
     },
@@ -641,7 +646,7 @@ function renderPickers() {
     for (const entry of list) {
       const option = document.createElement('option');
       option.value = `${entry.provider}|${entry.model}`;
-      option.textContent = entry.model;
+      option.textContent = entry.model_label || entry.model;
       group.appendChild(option);
     }
     modelSelect.appendChild(group);
@@ -1528,7 +1533,7 @@ function setBusy(busy) {
      所以「设置 → 语言」那两个选项在 busy 时是禁用的（见 renderLanguagePane），
      这里负责"这一轮结束之后**自动恢复可用**"。别的设置项没有这个问题（它们要么只
      影响下一轮，要么本来就是会话级的开关），所以只在这一处动手。 */
-  if (state.pane === 'language') renderLanguagePane();
+  if (state.pane === 'general') renderGeneralPane();
 }
 
 async function send() {
@@ -3129,9 +3134,10 @@ function renderVaultEditor(viewer) {
         edit.autoTitle = edit.draft.name;
         titleField.value = edit.draft.name;
       }
-      // 重画一次：那行"名字 → 路径"与预填的 title 立刻就跟着变
-      // （只重画这一小块，不动 state.vaultEdit —— 否则 runDream 之类会把它清掉）
-      renderVaultViewer();
+      // 只更新依赖名字的那一行：重建整个编辑器会把焦点从名字框挪到正文，
+      // 用户每敲一个字就丢一次焦点。title 已经在上面原地更新，无需重画。
+      const pathLine = findElIn(host, 'vault-edit-path');
+      if (pathLine) pathLine.textContent = vaultDraftPath(edit.draft) || t("vault.no_path_yet");
     };
   }
   const pathField = findElIn(host, 'vault-path');
@@ -4035,10 +4041,7 @@ function renderFinalNote(run) {
    所以前端这边必须一个字都不发；这条也有断言盯着（脚本里会检查请求体的键）。 */
 async function runDream() {
   if (state.busy) { toast(t("toast.busy_running")); return; }
-  // 刚改完模型就点「整理一次」：等那次保存落盘再用 —— 否则后端会用上一个
-  // 模型跑这一轮，而界面上显示的是新选的那个（ADR-103）。
-  if (state.dreamModelSaving) await state.dreamModelSaving;
-  const limit = Number($('dream-limit').value) || 3;
+  // 必须在任何 await 之前锁住：模型保存还没完成时，连点两次不能发出两轮整理。
   setBusy(true);
   $('dream-run').disabled = true;
   const progress = $('dream-progress');
@@ -4050,6 +4053,12 @@ async function runDream() {
   };
 
   try {
+    // 刚改完模型就点「整理一次」：等那次保存落盘再用 —— 否则后端会用上一个
+    // 模型跑这一轮，而界面上显示的是新选的那个（ADR-103）。
+    if (state.dreamModelSaving) await state.dreamModelSaving;
+    // 等待期间若外部已经取消这次占用，就不要再发起不可逆的整理。
+    if (!state.busy) return;
+    const limit = Number($('dream-limit').value) || 3;
     await streamPost('/api/dream', {
       // 整理模型**不再随请求发**：它存在 providers.json 的 `dream` 里，
       // 由后端 / CLI 共用（ADR-103）。请求体只带这一轮的业务参数。
@@ -4714,18 +4723,21 @@ async function rerenderForLanguage() {
    没有会话时画回"空对话"那一屏 —— 它也是一段文案。 */
 async function rerenderMessages() {
   const host = messagesEl();
-  if (!state.sessionId) {
+  const sessionId = state.sessionId;
+  if (!sessionId) {
     host.innerHTML = emptyChatHtml();
     $('chat-title').textContent = t('chat.new_title');
     return;
   }
   let data;
   try {
-    data = await getJSON(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
+    data = await getJSON(`/api/sessions/${encodeURIComponent(sessionId)}`);
   } catch {
     // 拉不到就保持原样：这时候把消息流清空只会让人以为对话丢了
     return;
   }
+  // 等待期间用户可能已经切到 B：A 的慢响应不能清空或覆盖 B 的消息流。
+  if (state.sessionId !== sessionId) return;
   host.innerHTML = '';
   const messages = (data && data.messages) || [];
   if (!messages.length) { host.innerHTML = emptyChatHtml(); return; }
@@ -4805,7 +4817,8 @@ async function saveToolsPane({ silent = false } = {}) {
   const payload = readToolsForm(state.tools || {});
   const keyField = $('tools-tavily-key');
   const typedKey = keyField ? (keyField.value || '').trim() : '';
-  if (typedKey) payload.tavily_api_key = typedKey;
+  // 自动保存 / 试搜前的静默保存绝不捎带 key；只有 Enter 或「保存」走非 silent 路径。
+  if (!silent && typedKey) payload.tavily_api_key = typedKey;
   const saved = await postJSON('/api/tools/save', payload);
   state.tools = (saved && saved.web) || state.tools;
   if (silent) {
@@ -5208,7 +5221,9 @@ async function savePromptEdit(id, area) {
   const language = promptsLanguageOf(state.prompts);
   try {
     const result = await postJSON('/api/prompts/update', { language, id, text });
-    state.promptEdit = null;
+    // 只关闭发起这次保存的编辑器。等待期间新开的 B（即使 id 相同）有自己的
+    // 未保存草稿，不能被 A 的完成响应清掉；后面的整页刷新会照常保留它。
+    if (state.promptEdit === edit) state.promptEdit = null;
     // `stored: false` = 这段文本与内置一模一样，所以没存成自定义（契约 §4.2）：
     // 那不是失败，但**必须说出来** —— 否则用户会一直找不到那条「已修改」标记。
     state.promptNote = (result && result.stored === false)
@@ -5217,7 +5232,7 @@ async function savePromptEdit(id, area) {
     await loadPrompts();
   } catch (err) {
     const message = String((err && err.message) || err);
-    if (state.promptEdit && state.promptEdit.id === id) state.promptEdit.error = message;
+    if (state.promptEdit === edit) state.promptEdit.error = message;
     const card = promptCardById(id);
     if (card) updatePromptCard(card, id);
     else renderPrompts();
@@ -5642,10 +5657,15 @@ function openDialog({
   };
 }
 
+function formatByteSize(bytes) {
+  const value = bytes || 0;
+  return value < 1024 * 1024
+    ? `${(value / 1024).toFixed(1)} KB`
+    : `${(value / 1024 / 1024).toFixed(2)} MB`;
+}
+
 function resetSummaryRows(data) {
-  const size = (data.bytes || 0) < 1024 * 1024
-    ? `${((data.bytes || 0) / 1024).toFixed(1)} KB`
-    : `${((data.bytes || 0) / 1024 / 1024).toFixed(2)} MB`;
+  const size = formatByteSize(data.bytes);
   return [
     [t("reset.row_chats"), t("usage.chat_count", { n: data.sessions || 0 })],
     [t("reset.row_memories"), t("reset.unit_active", { n: data.memories || 0 })
@@ -5653,6 +5673,9 @@ function resetSummaryRows(data) {
       + (data.memory_ops ? t("reset.unit_ops", { n: data.memory_ops }) : '')],
     ['Dream', t("reset.unit_dream_runs", { n: data.dream_runs || 0 })],
     [t("vault.browser_title"), t("reset.unit_files", { n: data.vault_files || 0 })],
+    [t("reset.row_attachments"), t("reset.unit_files", { n: data.attachment_files || 0 })
+      + ` · ${formatByteSize(data.attachment_bytes)}`],
+    [t("reset.row_prompt_overrides"), `${fmtInt(data.prompt_overrides || 0)} ${t("reset.unit_items")}`],
     [t("reset.row_providers_short"), t("reset.unit_providers_with_keys", { n: data.providers || 0 })],
     [t("reset.row_disk"), size],
   ];
@@ -5743,7 +5766,8 @@ async function loadResetPane() {
   const data = await getJSON('/api/reset');
   const rows = resetSummaryRows(data);
   const empty = !data.sessions && !data.memories && !data.dream_runs && !data.providers
-    && !data.vault_files;
+    && !data.vault_files && !data.attachment_files && !data.attachment_bytes
+    && !data.prompt_overrides;
   $('reset-body').innerHTML = t("reset.pane_html", { rows: rows.map(([k, v]) => `<tr><td>${k}</td><td>${escapeHtml(String(v))}</td></tr>`).join(''), dataDir: escapeHtml(data.data_dir || ''), disabled: empty ? 'disabled' : '', label: empty ? t("reset.nothing_to_clear") : t("reset.factory_reset") });
 
   const start = $('reset-start');

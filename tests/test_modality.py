@@ -385,6 +385,24 @@ class LoopModalityTests(ModalityCase):
         self.assertEqual(len(undelivered), 1)
         self.assertEqual(undelivered[0]["for_seq"], 1)
 
+    def test_historical_image_rejection_never_marks_a_text_only_turn(self) -> None:
+        """旧图随请求重发时被拒，要修旧图，不能给当前纯文字消息补零图片标记。"""
+        provider = ScriptedThenFail([text_reply("看到了")], status=400)
+        harness = Harness(self.settings, provider)  # type: ignore[arg-type]
+        self.addCleanup(harness.close)
+        harness.loop.run("旧图", attachments=[self.record()])
+        harness.loop.run("这一轮只有文字")
+
+        events = harness.log.read_events()
+        users = [record for record in events if record["kind"] == "user_message"]
+        undelivered = [record for record in events if record["kind"] == "images_undelivered"]
+        self.assertEqual([record["for_seq"] for record in undelivered], [users[0]["seq"]])
+
+        replayed = EventsReplay(harness.log.path, self.tmp).messages()
+        self.assertEqual(replayed[0].images, [], "真正被拒的旧图不该再次进入请求")
+        self.assertEqual(replayed[-1].content, "这一轮只有文字")
+        self.assertNotIn("没有发出去", replayed[-1].content)
+
 
 class EventsReplay:
     """按路径重新打开日志再重放（模拟"下一轮请求"）。"""

@@ -31,6 +31,8 @@ import io
 import os
 import re
 import shutil
+import time
+import uuid
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Sequence
@@ -452,17 +454,26 @@ def _prepare(settings: Settings, data: bytes, ext: str) -> dict[str, Any]:
 def _atomic_write(path: Path, payload: bytes) -> None:
     """先写同目录临时文件，再 os.replace 原子替换。
 
-    同目录是必须的（跨盘 replace 不是原子的，会退化成复制）；临时文件名带 pid，
-    两个进程同时上传同一张图时不会互相踩。写坏了顶多留下一个 `.tmp`，
-    **绝不会留下半张能读到的图片**。
+    同目录是必须的（跨盘 replace 不是原子的，会退化成复制）；临时文件名必须每次
+    唯一：Web 的多个线程与多个进程都可能同时写同一目标，只有 pid 会让同进程线程
+    共享并截断同一个临时文件。写坏了顶多留下一个 `.tmp`，不会留下半张可读图片。
     """
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         with open(tmp, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        # Windows 上两个独立临时文件同时 replace 到同一目标，也可能让其中一个
+        # 短暂拿到 PermissionError；只在占用窗口内重试，持续占用仍如实失败。
+        for attempt in range(4):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.02)
     except OSError as exc:
         raise AttachmentError(t("ui.attachment.write_failed", error=exc)) from exc
     finally:
@@ -866,6 +877,11 @@ def gc_apply(settings: Settings) -> dict[str, Any]:
             failed.append(
                 {"file": relative, "error": t("ui.attachment.orphan_path_escaped")}
             )
+            continue
+        # gc_report 只是快照：扫描之后、真正 unlink 之前，某次聊天可能已经写入了
+        # 引用这个文件的 user_message。逐个候选重查当前日志，宁可重复扫描一次，
+        # 也不能拿过期快照删掉已经属于会话的图片。
+        if relative in _referenced_files(settings):
             continue
         try:
             size = target.stat().st_size

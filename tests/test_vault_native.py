@@ -105,6 +105,16 @@ class NativeFrontmatterTests(unittest.TestCase):
         )
         self.assertEqual(front.extra["custom"], {"a": "b"})
 
+    def test_list_of_multi_key_mappings_round_trips(self) -> None:
+        front = Frontmatter(
+            extra={"relation": [{"classmate_of": "user", "since": "2026"}]}
+        )
+        dumped = dump_frontmatter(front)
+        back, _, warnings = parse_frontmatter(dumped + "\nbody\n")
+        self.assertEqual(warnings, [])
+        self.assertEqual(back.to_dict(), front.to_dict())
+        self.assertEqual(dump_frontmatter(back), dumped)
+
 
 class ManifestTests(unittest.TestCase):
     def test_parse_and_dump_native_manifest(self) -> None:

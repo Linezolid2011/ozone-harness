@@ -88,6 +88,37 @@ def _checked_rel(raw_name: str, store: VaultStore) -> tuple[str, str]:
         ) from exc
 
 
+def _commit_staging(staging: Path, root: Path) -> None:
+    """在同级临时目录里合并新旧 vault，再换名提交；复制失败绝不碰目标。"""
+    root.parent.mkdir(parents=True, exist_ok=True)
+    transaction = Path(tempfile.mkdtemp(prefix=".vault-import-", dir=root.parent))
+    candidate = transaction / "new"
+    backup = transaction / "old"
+    committed = False
+    try:
+        # 旧 copytree(..., dirs_exist_ok=True) 是覆盖同名文件、保留其余文件；
+        # 先复制旧库到新候选目录，既保留这个语义，也让所有写入都远离真目标。
+        if root.exists():
+            shutil.copytree(root, candidate)
+        else:
+            candidate.mkdir()
+        shutil.copytree(staging, candidate, dirs_exist_ok=True)
+        try:
+            if root.exists():
+                root.replace(backup)
+            # candidate 与 root 同在 root.parent 下，换名不会退化成跨盘复制。
+            candidate.replace(root)
+            committed = True
+        except BaseException:
+            if backup.exists():
+                backup.replace(root)
+            raise
+    finally:
+        # 若回滚自己也失败，备份就是唯一完整的旧库，必须留在磁盘上供恢复。
+        if committed or not backup.exists():
+            shutil.rmtree(transaction, ignore_errors=True)
+
+
 def import_vault_zip(
     zip_path: Path,
     store: VaultStore,
@@ -131,9 +162,13 @@ def import_vault_zip(
                 )
             canonical, kind = _checked_rel(raw_name, store)
             key = canonical.casefold()
-            if key in seen and seen[key] != canonical:
+            if key in seen:
+                if seen[key] != canonical:
+                    raise VaultImportError(
+                        t("ui.vault.import_case_clash", a=seen[key], b=canonical)
+                    )
                 raise VaultImportError(
-                    t("ui.vault.import_case_clash", a=seen[key], b=canonical)
+                    t("ui.vault.import_bad_path", path=f"{raw_name} (duplicate)")
                 )
             seen[key] = canonical
             if info.file_size > MAX_FILE_BYTES:
@@ -197,7 +232,7 @@ def import_vault_zip(
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(data)
                 counts["raw" if kind == "raw" else "notes"] += 1
-            shutil.copytree(staging, store.root, dirs_exist_ok=True)
+            _commit_staging(staging, store.root)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 

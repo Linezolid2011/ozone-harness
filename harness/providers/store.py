@@ -13,18 +13,21 @@ key 只存在这个文件里。这样"抹掉 data/ 就等于抹掉所有 key"，
 from __future__ import annotations
 
 import json
+import os
+import threading
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 from urllib.parse import urlsplit
 
 from ..atomic_io import write_text_atomic
 from ..config import Settings
 from ..i18n import t
 from ..token_limit import parse_token_limit
-from .base import ProviderError
+from .base import ProviderError, open_provider_request
 
 # --------------------------------------------------------------------------
 # 预设：给"添加接口"一个起点，用户只需要填自己的 key
@@ -214,7 +217,8 @@ class ProviderProfile:
         key = self.api_key.strip()
         if not key:
             return ""
-        if len(key) <= 8:
+        # 前 5 + 后 4 会完整暴露 9 字符 key；10 字符起才一定有中间字符被遮住。
+        if len(key) <= 9:
             return "••••••"
         return f"{key[:5]}{t('provider.store.key_mask')}{key[-4:]}"
 
@@ -425,6 +429,26 @@ _LEGACY_BASE_URLS = {
 # --------------------------------------------------------------------------
 
 
+# 同一进程里可能同时存在多个指向同一文件的 store（例如不同请求各自装配了一份）。
+# 文件锁会留下额外文件，而这里需要协调的是这些内存实例；按规范化路径共用一把锁即可。
+_PATH_LOCKS: dict[str, Any] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _path_lock(path: Path) -> Any:
+    try:
+        key = os.path.normcase(str(path.resolve()))
+    except (OSError, RuntimeError):
+        # 路径解析失败不该让原本可用的写入凭空多一种故障；绝对路径仍能统一常见别名。
+        key = os.path.normcase(str(path.absolute()))
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[key] = lock
+        return lock
+
+
 class ProviderStore:
     """接口档案 + 默认选择。单文件 JSON，读写都很小，直接整体重写。
 
@@ -460,6 +484,19 @@ class ProviderStore:
         write_text_atomic(
             self.path, json.dumps(self._data, ensure_ascii=False, indent=2)
         )
+
+    @contextmanager
+    def _write_transaction(self) -> Iterator[None]:
+        """串行化同一文件的修改，并在修改前重读最新状态。
+
+        只在拿锁之前重读仍有竞态：等锁期间另一个实例可能已经保存。因而 Reload 必须
+        在锁内；随后整个读—改—写都持有同一把锁。这样 stale 实例既不能复活别人
+        刚删掉的档案，也不会用自己的旧 `_data` 抹掉别人刚加的档案或 key。
+        """
+        with _path_lock(self.path):
+            self._data = self._load()
+            yield
+            self.save()
 
     # -- 查询 --------------------------------------------------------
 
@@ -555,6 +592,11 @@ class ProviderStore:
         # 与其在三个调用点各兜一次，不如在**写入口**就拒绝，并说清怎么写。
         if urlsplit(profile.base_url).scheme.lower() not in ("http", "https"):
             raise ProviderError(t("provider.store.base_url_scheme"))
+        with self._write_transaction():
+            return self._upsert_loaded(profile)
+
+    def _upsert_loaded(self, profile: ProviderProfile) -> ProviderProfile:
+        """在 `_write_transaction()` 已重读的数据上 upsert；调用方负责落盘。"""
         profiles = [p for p in self.providers() if p.id != profile.id]
         profiles.append(profile)
         profiles.sort(key=lambda p: p.label.casefold())
@@ -565,55 +607,57 @@ class ProviderStore:
         if not default["model"] and profile.models:
             default["model"] = profile.models[0]
         self._data["default"] = default
-        self.save()
         return profile
 
     def update_key(self, provider_id: str, api_key: str) -> ProviderProfile:
-        profile = self.get(provider_id)
-        if profile is None:
-            raise ProviderError(t("provider.store.unknown", provider_id=provider_id))
-        profile.api_key = api_key.strip()
-        return self.upsert(profile)
+        with self._write_transaction():
+            # 必须在锁内取最新档案：否则只改 key 也会把另一个实例刚存的模型列表改旧。
+            profile = self.get(provider_id)
+            if profile is None:
+                raise ProviderError(t("provider.store.unknown", provider_id=provider_id))
+            profile.api_key = api_key.strip()
+            return self._upsert_loaded(profile)
 
     def update_models(self, provider_id: str, models: Iterable[str]) -> ProviderProfile:
-        profile = self.get(provider_id)
-        if profile is None:
-            raise ProviderError(t("provider.store.unknown", provider_id=provider_id))
-        profile.models = [str(m) for m in models if str(m).strip()]
-        return self.upsert(profile)
+        with self._write_transaction():
+            profile = self.get(provider_id)
+            if profile is None:
+                raise ProviderError(t("provider.store.unknown", provider_id=provider_id))
+            profile.models = [str(m) for m in models if str(m).strip()]
+            return self._upsert_loaded(profile)
 
     def remove(self, provider_id: str) -> None:
-        profiles = [p for p in self.providers() if p.id != provider_id]
-        self._data["providers"] = [p.to_storage() for p in profiles]
-        default = self.defaults()
-        if default["provider"] == provider_id:
-            default = {"provider": "", "model": "", "effort": ""}
-            if profiles:
-                default["provider"] = profiles[0].id
-                if profiles[0].models:
-                    default["model"] = profiles[0].models[0]
-        self._data["default"] = default
-        # 整理的那份选择也要跟着清：否则它会继续指着一个已经不存在的接口，
-        # 而界面上那个下拉框会显示成「跟随默认」（模型不在列表里）——
-        # 存储与界面各说一套。清空之后语义与"没设过"一致：跟随 default。
-        dream = self.dream_defaults()
-        if dream["provider"] == provider_id:
-            self._data["dream"] = {"provider": "", "model": "", "effort": ""}
-        self.save()
+        with self._write_transaction():
+            profiles = [p for p in self.providers() if p.id != provider_id]
+            self._data["providers"] = [p.to_storage() for p in profiles]
+            default = self.defaults()
+            if default["provider"] == provider_id:
+                default = {"provider": "", "model": "", "effort": ""}
+                if profiles:
+                    default["provider"] = profiles[0].id
+                    if profiles[0].models:
+                        default["model"] = profiles[0].models[0]
+            self._data["default"] = default
+            # 整理的那份选择也要跟着清：否则它会继续指着一个已经不存在的接口，
+            # 而界面上那个下拉框会显示成「跟随默认」（模型不在列表里）——
+            # 存储与界面各说一套。清空之后语义与"没设过"一致：跟随 default。
+            dream = self.dream_defaults()
+            if dream["provider"] == provider_id:
+                self._data["dream"] = {"provider": "", "model": "", "effort": ""}
 
     def set_defaults(
         self, provider: str | None = None, model: str | None = None, effort: str | None = None
     ) -> dict[str, str]:
-        default = self.defaults()
-        if provider is not None:
-            default["provider"] = _clean_id(provider)
-        if model is not None:
-            default["model"] = model.strip()
-        if effort is not None:
-            default["effort"] = effort.strip()
-        self._data["default"] = default
-        self.save()
-        return default
+        with self._write_transaction():
+            default = self.defaults()
+            if provider is not None:
+                default["provider"] = _clean_id(provider)
+            if model is not None:
+                default["model"] = model.strip()
+            if effort is not None:
+                default["effort"] = effort.strip()
+            self._data["default"] = default
+            return default
 
     def set_dream_defaults(
         self, provider: str | None = None, model: str | None = None, effort: str | None = None
@@ -623,16 +667,16 @@ class ProviderStore:
         与 `set_defaults` 一样只负责存；"这家接口还在不在、这个模型列没列出来"
         由调用方（Web 接口）校验 —— store 层保持"只存不判"的一致性。
         """
-        dream = self.dream_defaults()
-        if provider is not None:
-            dream["provider"] = _clean_id(provider)
-        if model is not None:
-            dream["model"] = model.strip()
-        if effort is not None:
-            dream["effort"] = effort.strip()
-        self._data["dream"] = dream
-        self.save()
-        return dream
+        with self._write_transaction():
+            dream = self.dream_defaults()
+            if provider is not None:
+                dream["provider"] = _clean_id(provider)
+            if model is not None:
+                dream["model"] = model.strip()
+            if effort is not None:
+                dream["effort"] = effort.strip()
+            self._data["dream"] = dream
+            return dream
 
 
 # --------------------------------------------------------------------------
@@ -691,6 +735,8 @@ def build_provider(
         settings,
         label=profile.label,
         send_reasoning_content=profile.send_reasoning_content,
+        # 只有官方 OpenAI 约定流式 usage；兼容供应商可能拒绝 stream_options。
+        include_usage=profile.id == "openai",
     )
 
 
@@ -726,7 +772,7 @@ def fetch_models(base_url: str, api_key: str, *, timeout: float = 20.0) -> list[
         # 翻译成 400 —— 用户只会看到 500 加一句 Python 原文。
         raise ProviderError(t("provider.store.base_url_scheme")) from exc
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with open_provider_request(request, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:200]

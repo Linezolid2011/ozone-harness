@@ -212,8 +212,13 @@ class El {
   click() { this.clickCount += 1; }
   /* 自检里没有真的浏览器焦点与选区，只能如实记下"谁被 focus 过、光标被放到哪"。
      这两样正是「插入链接之后焦点/光标回到正文」那条断言要看的。 */
-  focus() { this.focusCount = (this.focusCount || 0) + 1; }
+  focus() {
+    this.focusCount = (this.focusCount || 0) + 1;
+    // 焦点竞态必须可验：重画后若正文调用 focus()，activeElement 就不能还停在名字框。
+    doc.activeElement = this;
+  }
   setSelectionRange(start, end) { this.selectionSet = [start, end]; }
+  select() { this.setSelectionRange(0, String(this.value || '').length); }
   querySelector(selector) { return queryAll(this, selector)[0] || null; }
   querySelectorAll(selector) { return queryAll(this, selector); }
   /* 真 DOM 里 `<select>.options` 是它底下所有 `<option>`（含 optgroup 里的）。
@@ -337,6 +342,7 @@ function makeDocument() {
   const doc = {
     documentElement: new El('html'),
     body: new El('body'),
+    activeElement: null,
     _listeners: {},
     createElement: (tag) => new El(tag),
     createTextNode: (text) => new TextNode(text),
@@ -583,7 +589,7 @@ vm.createContext(context);
 const EXPORTS = `
 ;globalThis.__app = {
   state, renderVaultPane, renderVaultTree, renderVaultViewer, openVaultFile,
-  loadVaultFile, loadVault, mdBlocks, inlineTokens, escapeHtml,
+  loadVaultFile, loadVault, mdBlocks, inlineTokens, escapeHtml, renameSession,
   startVaultEdit, startVaultCreate, saveVaultEdit, cancelVaultEdit,
   askDeleteVaultFile, takeFreshVaultContent, forceOverwriteVaultFile,
   vaultEditPayload, vaultDraftPath, splitVaultList, vaultNameFor,
@@ -599,6 +605,7 @@ const EXPORTS = `
   onComposerDragOver, onComposerDragLeave, onComposerDrop, onComposerPaste,
   // 「多模态」开关与 OCR 降级（docs/11-attachments.md §13）
   renderMultimodalToggle, setMultimodal, toggleMultimodal, applyToolsFrame,
+  loadToolsPane, saveToolsPane,
   syncMultimodalHint, multimodalTextOnly, boolDefaultOn,
   ocrBlock, userBubbleNode, refreshLastUserMessage, attachmentSignature,
   multimodalOffText, multimodalBadgeText,
@@ -1879,6 +1886,20 @@ await scenario('新建：默认 entities、名字 → 路径实时算、保存�
   });
 
   const name = field('vault-name');
+  name.focus();
+  name.value = '新';
+  name.setSelectionRange(1, 1);
+  const bodyBefore = field('vault-body');
+  const bodyFocusCount = bodyBefore.focusCount || 0;
+  name.oninput();
+  check('名字每敲一个字都只更新依赖节点：焦点、光标与输入框本体不丢', () => {
+    assert.equal(doc.activeElement, name, '输入后焦点必须仍在名字框，不能被正文抢走');
+    assert.equal(field('vault-name'), name, '不应重建名字输入框');
+    assert.equal(field('vault-body'), bodyBefore, '不应重建正文输入框');
+    assert.deepEqual(name.selectionSet, [1, 1]);
+    assert.equal(bodyBefore.focusCount || 0, bodyFocusCount, '名字输入不该再次聚焦正文');
+    assert.equal(field('vault-edit-path').textContent, 'entities/新.md');
+  });
   name.value = '新人甲';
   name.oninput();
   check('打了名字之后，标题那行算出了 entities/新人甲.md', () => {
@@ -2739,6 +2760,34 @@ await scenario('整理：请求体里没有 dry_run（旧页面才会带它，�
   });
 });
 
+await scenario('整理：等待模型保存时连点两次，也只发一轮 POST', async () => {
+  const world = { formatted: false };
+  setupVault();
+  fixture = dreamFixture(world);
+  posts = { '/api/dream': () => ({ status: 200, stream: sseBody(RUN_FRAMES) }) };
+  sends.length = 0;
+  app.state.busy = false;
+  let releaseSave;
+  const saving = new Promise((resolve) => { releaseSave = resolve; });
+  app.state.dreamModelSaving = saving;
+
+  const first = app.runDream();
+  const second = app.runDream();
+  await tick();
+  const postsWhileWaiting = sends.filter((item) => item.url === '/api/dream').length;
+  releaseSave();
+  await Promise.all([first, second]);
+  app.state.dreamModelSaving = null;
+
+  check('等待期间就锁住，尚未提前发请求', () => {
+    assert.equal(postsWhileWaiting, 0);
+  });
+  check('保存完成后只有第一次继续，第二次被 busy 挡住', () => {
+    assert.equal(sends.filter((item) => item.url === '/api/dream').length, 1);
+    assert.equal(app.state.busy, false, '结束后必须释放 busy');
+  });
+});
+
 /* ── Dream 页的整理模型（ADR-103）────────────────────────────
    以前整理用的是**聊天页当时选中的那个模型**（不可见、不可调），CLI 又走
    全局默认 —— 两边还不是同一个答案。现在它是一份**持久设置**：
@@ -2789,6 +2838,17 @@ await scenario('整理模型：跟随默认 / 显式选择，改动存到 /api/p
       groups[0].children.map((node) => node.value),
       ['deepseek|deepseek-flash', 'deepseek|deepseek-v4-pro'],
     );
+  });
+
+  check('聊天页顶栏也显示模型显示名，而不是把配置好的 label 忽略掉', () => {
+    app.state.selection = { provider: 'deepseek', model: 'deepseek-flash', effort: '' };
+    app.renderPickers();
+    const chat = shell('pick-model');
+    assert.deepEqual(
+      Array.from(chat.options).map((node) => node.textContent),
+      ['DeepSeek V4.1 Flash', 'DeepSeek V4 Pro'],
+    );
+    assert.equal(chat.value, 'deepseek|deepseek-flash', '显示名不影响真正提交的模型 id');
   });
 
   sends.length = 0;
@@ -4598,6 +4658,35 @@ const CONFIG_BEFORE = {
 };
 const CONFIG_AFTER = { model: '', memory_mode: '', web_enabled: false, web_search_available: false, version: '1.0.0-dev1' };
 
+await scenario('重置预览：只有附件或提示词覆盖时也要列出损失并允许重置', async () => {
+  const preview = {
+    sessions: 0, memories: 0, dream_runs: 0, providers: 0, vault_files: 0,
+    attachment_files: 2, attachment_bytes: 1536, prompt_overrides: 4,
+    bytes: 1536, data_dir: 'data',
+  };
+  fixture = (url) => (url === '/api/reset'
+    ? { status: 200, body: preview }
+    : { status: 404, body: { error: `没有这个夹具：${url}` } });
+  await app.loadResetPane();
+
+  check('附件文件数、附件字节数与提示词覆盖数都出现在预览里', () => {
+    const text = shell('reset-body').textContent;
+    assert.match(text, /附件文件/);
+    assert.match(text, /2 个文件 · 1\.5 KB/);
+    assert.match(text, /提示词覆盖/);
+    assert.match(text, /4 个/);
+  });
+  check('空判定不再漏掉这三类数据：按钮有可执行的确认路径', async () => {
+    const visibleStart = findEl(shell('reset-body'), (node) => node._ownId === 'reset-start');
+    assert.equal(visibleStart.textContent.trim(), '恢复出厂设置');
+    const start = byId.get('reset-start');
+    assert.equal(typeof start.onclick, 'function', '只有附件/覆盖时也必须有重置入口');
+    await start.onclick();
+    assert.match(shell('dialog-body').textContent, /附件文件/);
+    assert.match(shell('dialog-body').textContent, /提示词覆盖/);
+  });
+});
+
 await scenario('恢复出厂设置：指向已删数据的界面缓存必须重来（选择器不能还列着旧接口）', async () => {
   primeShell();
   shell('messages').innerHTML = '';
@@ -4750,6 +4839,37 @@ await scenario('恢复出厂设置失败：确认路径必须当场说一句（4
   });
 });
 
+await scenario('工具保存：silent 自动保存绝不捎带 Tavily key，显式保存才提交', async () => {
+  const web = {
+    enabled: true, search_backend: 'tavily', search_count: 5, max_fetch_chars: 8000,
+    allow_private_hosts: false, has_tavily_key: false, masked_tavily_key: '',
+    backends: [{ id: 'tavily', label: 'Tavily', notes: 'fixture' }],
+  };
+  fixture = (url) => {
+    if (url === '/api/tools') return { status: 200, body: { web } };
+    if (url === '/api/config') return { status: 200, body: CONFIG_BEFORE };
+    return { status: 404, body: { error: `没有这个夹具：${url}` } };
+  };
+  posts = { '/api/tools/save': () => ({ status: 200, body: { web } }) };
+  sends.length = 0;
+  await app.loadToolsPane();
+  shell('tools-enabled').value = '1';
+  shell('tools-private').value = '0';
+  shell('tools-tavily-key').value = 'typed-but-not-explicitly-saved';
+
+  await app.saveToolsPane({ silent: true });
+  await byId.get('tools-save').onclick();
+
+  const payloads = sends.filter((item) => item.url === '/api/tools/save').map((item) => item.payload);
+  check('静默保存的请求体没有 tavily_api_key 字段', () => {
+    assert.equal(Object.prototype.hasOwnProperty.call(payloads[0], 'tavily_api_key'), false);
+  });
+  check('点击「保存」才包含用户明确提交的 key', () => {
+    assert.equal(payloads.length, 2);
+    assert.equal(payloads[1].tavily_api_key, 'typed-but-not-explicitly-saved');
+  });
+});
+
 await scenario('会话加载失败：openSession 不抛异常，页面仍可用并就地报错', async () => {
   resetAttachments();
   fixture = () => ({ status: 500, body: { error: '后端读不了这个会话' } });
@@ -4795,6 +4915,55 @@ await scenario('会话切换竞态：慢回来的旧响应必须丢掉（不污�
   check('旧会话的消息没有追加进新会话（A 的响应被丢弃）', () => {
     assert.match(shell('messages').textContent, /来自-sid-b/);
     assert.equal(shell('messages').textContent.includes('来自-sid-a'), false);
+  });
+});
+
+await scenario('语言重渲染竞态：慢回来的 A 不能覆盖已经画好的 B', async () => {
+  resetAttachments();
+  const waiters = new Map();
+  fixture = (url) => {
+    const id = decodeURIComponent(url.split('/').pop());
+    let release;
+    const wait = new Promise((resolve) => { release = resolve; });
+    waiters.set(id, () => release(sessionMessages([{ role: 'user', text: `重画-${id}` }]).body));
+    return { status: 200, body: wait };
+  };
+  app.state.sessionId = 'sid-rerender-a';
+  const first = app.rerenderMessages();
+  await tick();
+  app.state.sessionId = 'sid-rerender-b';
+  const second = app.rerenderMessages();
+  await tick();
+  waiters.get('sid-rerender-b')();
+  await second;
+  waiters.get('sid-rerender-a')();
+  await first;
+
+  check('消息流停在 B，A 的晚响应连一次清空覆盖都不能做', () => {
+    assert.match(shell('messages').textContent, /重画-sid-rerender-b/);
+    assert.equal(shell('messages').textContent.includes('重画-sid-rerender-a'), false);
+    assert.equal(app.state.sessionId, 'sid-rerender-b');
+  });
+});
+
+await scenario('清空当前会话的自定义标题：顶栏改用服务端返回的自动标题', async () => {
+  const session = { id: 'sid-rename', title: '旧自定义标题', turns: 1, updated_at: 1 };
+  app.state.sessionId = session.id;
+  app.state.sessions = [session];
+  posts = {
+    [`/api/sessions/${session.id}/title`]: () => ({
+      status: 200, body: { ok: true, title: '自动恢复的第一句标题' },
+    }),
+  };
+  fixture = (url) => (url === '/api/sessions'
+    ? { status: 200, body: { sessions: [{ ...session, title: '自动恢复的第一句标题' }] } }
+    : { status: 404, body: { error: `没有这个夹具：${url}` } });
+  app.renameSession(session);
+  byId.get('rename-input').value = '';
+  await byId.get('dialog-confirm').onclick();
+
+  check('顶栏不是空串，也不是闭包里那份旧自定义标题', () => {
+    assert.equal(shell('chat-title').textContent, '自动恢复的第一句标题');
   });
 });
 
@@ -5392,11 +5561,11 @@ await scenario('正在生成回答时「语言」两个选项禁用（并说明�
   byId.clear();
   primeShell();
   primeStaticTexts();
-  app.state.pane = 'language';
-  app.state.view = 'settings';
   app.state.busy = false;
+  app.state.timezone = 8;
+  app.state.maxOutputTokens = 5000;
   app.setLanguageNow('zh');    // 这一组用中文断言那句说明
-  app.renderLanguagePane();
+  app.showSettings('general'); // 走真实路由：语言设置已经并入常规页
 
   check('不忙时：两个选项可点，也没有那句"正在生成"', () => {
     const options = hasClass(shell('language-body'), 'lang-option');
@@ -5555,14 +5724,14 @@ await scenario('设置 → 常规 → 单轮最大输出：5000 / 5k / 1M / -1�
    注意：这一页的负载是**跟着语言取的**，所以 /api/prompts 在用例之间会互相干扰 ——
    路由那条路径（showSettings）不 await，一个在飞的旧请求回来时会把 state.prompts
    覆盖成旧的那一份。下面每一组都在组内把这个请求等干净（见各组末尾的 `await app.loadPrompts()`）。
-   契约 §6 要求的那几条：侧栏项存在、渲染出 22 条提示词与 15 个工具、
+   契约 §6 要求的那几条：侧栏项存在、渲染出 22 条提示词与 16 个工具、
    状态徽标三种文案正确、`data-prompt-id` / `data-tool-id` 钩子在、
    切到 en 后这一页也是英文，外加"缺字段 / 空数组不崩"。
 
    夹具照**真响应**的字段手写（字段名与嵌套照抄 `/api/prompts`）：
    22 = system 7 + tail 2 + compact 3 + render 8 + dream 2；
-   15 = 对话侧 8 + 整理侧 7。契约 §2.3 的"一个不少"在 Python 那边有测试钉着，
-   这里钉的是"前端把这 22 + 15 全画出来、一条不漏"。 */
+   16 = 对话侧 9 + 整理侧 7。契约 §2.3 的"一个不少"在 Python 那边有测试钉着，
+   这里钉的是"前端把这 22 + 16 全画出来、一条不漏"。 */
 
 const PG = (id, title, note, items) => ({ id, title, note, items });
 const P = (id, state, condition, when, text, placeholders = []) => ({
@@ -5748,12 +5917,12 @@ const PROMPT_IDS = ['SYSTEM_PROMPT', 'VAULT_PROMPT', 'VAULT_EMPTY_PROMPT',
   'COMPACT_INPUT', 'SUMMARY_HEADER', 'RENDER_USER', 'RENDER_ASSISTANT', 'RENDER_CALL',
   'RENDER_TOOL_RESULT', 'RENDER_IMAGE', 'RENDER_TRUNCATED_SUFFIX', 'WEB_SAFETY',
   'DREAM_SYSTEM_PROMPT', 'DREAM_INSTRUCTION'];
-const TOOL_IDS = ['mem_create', 'mem_edit', 'mem_del', 'dream_list', 'dream_read',
+const TOOL_IDS = ['mem_create', 'mem_edit', 'mem_del', 'time', 'dream_list', 'dream_read',
   'dream_search', 'web_search', 'web_open_url',
   'readme_write', 'records_list', 'records_read', 'vault_delete', 'vault_outline',
   'vault_read', 'vault_write'];
 
-/** 把夹具补齐到契约 §2.3 的 **22 + 15**（`promptsFixture` 只逐条写了有断言的那几条，
+/** 把夹具补齐到契约 §2.3 的 **22 + 16**（`promptsFixture` 只逐条写了有断言的那几条，
  *  剩下的按 id 生成空壳 —— 这一页要验的是"一条不漏地画出来"，不是每条的正文）。
  *  **按 id 判重**：`withChars` 会重建条目对象，靠 `includes` 比引用会认不出来，
  *  于是"补齐"反而变成"插一条重复的"（真的踩过一次：22 提示词那条断言红在 23 上）。
@@ -5858,26 +6027,26 @@ const insideGroup = (node) => {
   return false;
 };
 
-check('夹具自检：22 条提示词与 15 个工具，id 与契约 §2.3 逐个对得上', () => {
+check('夹具自检：22 条提示词与 16 个工具，id 与契约 §2.3 逐个对得上', () => {
   const flat = promptsPayload('zh');
   const promptIds = flat.groups.flatMap((group) => group.items.map((item) => item.id));
   const toolIds = flat.tools.flatMap((group) => group.items.map((item) => item.name));
   assert.equal(promptIds.length, 22);
-  assert.equal(toolIds.length, 15);
+  assert.equal(toolIds.length, 16);
   assert.equal(new Set(promptIds).size, 22, `夹具里提示词 id 重复了：${promptIds.join(',')}`);
-  assert.equal(new Set(toolIds).size, 15, `夹具里工具名重复了：${toolIds.join(',')}`);
+  assert.equal(new Set(toolIds).size, 16, `夹具里工具名重复了：${toolIds.join(',')}`);
   // vm 里造出来的数组与这边的字面量**原型不同**，deepStrictEqual 会因此报
   // "结构相同但不等" —— 先摊平成宿主这边的数组再比（与语言清单那条同一个坑）。
   assert.deepEqual([...promptIds].sort(), [...PROMPT_IDS].sort());
   assert.deepEqual([...toolIds].sort(), [...TOOL_IDS].sort());
   // 22 条提示词**全是** on（契约 §2.2：按情形才出现的那些一律 on）；
-  // 15 个工具里 web_search 是 session、其余 14 个是 on —— 所以 tools_on = 14。
+  // 16 个工具里 web_search 是 session、其余 15 个是 on —— 所以 tools_on = 15。
   // `overridden: 0` 是这一轮加的（契约 §4.1 的增量字段）：没给 store 就是没改过。
   assert.deepEqual(flat.summary,
-    { prompts: 22, prompt_groups: 5, tools: 15, tools_on: 14, overridden: 0 });
+    { prompts: 22, prompt_groups: 5, tools: 16, tools_on: 15, overridden: 0 });
 });
 
-await scenario('提示词页：侧栏项、22 条提示词、15 个工具、两个 data-* 钩子', async () => {
+await scenario('提示词页：侧栏项、22 条提示词、16 个工具、两个 data-* 钩子', async () => {
   primePromptsShell();
   app.setLanguageNow('zh');
   app.state.prompts = promptsPayload('zh');
@@ -5933,11 +6102,11 @@ await scenario('提示词页：侧栏项、22 条提示词、15 个工具、两�
     assert.ok(ids.includes('DREAM_INSTRUCTION'));
   });
 
-  check('渲染出 15 个工具，每个都有 data-tool-id', () => {
+  check('渲染出 16 个工具，每个都有 data-tool-id', () => {
     const cards = hasClass(shell('prompts-body'), 'tool-card');
-    assert.equal(cards.length, 15);
+    assert.equal(cards.length, 16);
     const ids = cards.map((node) => node.dataset.toolId);
-    assert.equal(new Set(ids).size, 15);
+    assert.equal(new Set(ids).size, 16);
     assert.ok(ids.includes('web_search'));
     assert.ok(ids.includes('readme_write'));
     // 钩子挂在**工具卡片**上（不是外面那层分组卡片上）
@@ -6055,14 +6224,14 @@ await scenario('提示词页：分组是原生 <details> 且**默认全折**、�
     }
   });
 
-  check('全折叠时 22 / 15 个钩子元素**仍然在 DOM 里**（折的是可见性，不是元素）', () => {
+  check('全折叠时 22 / 16 个钩子元素**仍然在 DOM 里**（折的是可见性，不是元素）', () => {
     const body = shell('prompts-body');
     assert.ok(groupNodes().every((group) => group.getAttribute('open') === null),
       '前置：七组全折着');
     const prompts = walkAll(body).filter((node) => node.dataset && node.dataset.promptId);
     const tools = walkAll(body).filter((node) => node.dataset && node.dataset.toolId);
     assert.equal(prompts.length, 22);
-    assert.equal(tools.length, 15);
+    assert.equal(tools.length, 16);
     // 而且它们真的在某个分组的**折叠体**里，不是被挪到页面上别处
     assert.ok(prompts.every(insideGroup) && tools.every(insideGroup));
   });
@@ -6108,15 +6277,15 @@ await scenario('提示词页：分组是原生 <details> 且**默认全折**、�
     const tallyOf = (group) => findEl(summaryOf(group), (n) => n.classList.contains('pg-tally')).textContent;
     assert.equal(tallyOf(groups[0]), '生效 3 条 · 未注册 4 条');
     assert.ok(!/会话级/.test(summaryOf(groups[0]).textContent), '这一组没有会话级，不该写"会话级 0 条"');
-    assert.equal(tallyOf(groups[5]), '生效 12 条 · 会话级 1 条');
+    assert.equal(tallyOf(groups[5]), '生效 13 条 · 会话级 1 条');
     assert.ok(!/未注册/.test(summaryOf(groups[5]).textContent), '这一组没有未注册，不该写"未注册 0 条"');
     assert.equal(tallyOf(groups[1]), '生效 2 条');
   });
 
   check('页首那行总统计**保留**（全折叠时它是唯一一眼能看全的东西）', () => {
     const text = shell('prompts-body').textContent;
-    assert.match(text, /共 22 条提示词 · 15 个工具定义/);
-    assert.match(text, /其中 14 个工具的当前状态是「生效」/);
+    assert.match(text, /共 22 条提示词 · 16 个工具定义/);
+    assert.match(text, /其中 15 个工具的当前状态是「生效」/);
   });
 });
 
@@ -6147,8 +6316,8 @@ await scenario('提示词页：状态徽标三种文案都正确（生效 / 未�
   });
   check('摘要行说的是"有多少"：数字用的是服务端 summary，不是界面自己数的', () => {
     const text = shell('prompts-body').textContent;
-    assert.match(text, /共 22 条提示词 · 15 个工具定义/);
-    assert.match(text, /其中 14 个工具的当前状态是「生效」/);
+    assert.match(text, /共 22 条提示词 · 16 个工具定义/);
+    assert.match(text, /其中 15 个工具的当前状态是「生效」/);
   });
   check('第二行按三种状态各数一遍（提示词 + 工具一起数）', () => {
     const tally = app.promptTally([
@@ -6297,7 +6466,7 @@ await scenario('提示词页：切到 en 后这一页原地重渲染成英文（
   });
   check('这一页整页变英文：外壳 + 服务端那几句都换了（原地重渲染，没有刷新页面）', () => {
     const text = shell('prompts-body').textContent;
-    assert.match(text, /22 prompts · 15 tool definitions/);
+    assert.match(text, /22 prompts · 16 tool definitions/);
     assert.match(text, /System prompts/);
     assert.match(text, /Search the web\./);
     assert.ok(!/[\u4e00-\u9fff]/.test(text), `英文页面上不该有汉字：${text.slice(0, 400)}`);
@@ -6312,7 +6481,7 @@ await scenario('提示词页：切到 en 后这一页原地重渲染成英文（
   check('钩子还在（重画之后 data-prompt-id / data-tool-id 一个都没丢）', () => {
     assert.equal(hasClass(shell('prompts-body'), 'prompt-card')
       .filter((node) => node.dataset && node.dataset.promptId).length, 22);
-    assert.equal(hasClass(shell('prompts-body'), 'tool-card').length, 15);
+    assert.equal(hasClass(shell('prompts-body'), 'tool-card').length, 16);
   });
   check('切语言**重新拉了一次** /api/prompts（数据是另一种语言了，不能拿旧的画）', () => {
     assert.ok(calls.filter((url) => url === '/api/prompts').length >= 2,
@@ -6633,6 +6802,45 @@ await scenario('提示词可编辑：保存 → 出现「已修改」+「复原�
 
   check('另一门语言一个字都没被动（假服务端里 en 仍然是空的）', () => {
     assert.deepEqual(Object.keys(store.en), []);
+  });
+});
+
+await scenario('提示词保存竞态：A 的完成响应不能关掉正在编辑的 B', async () => {
+  const store = { zh: {}, en: {} };
+  await openPromptsPage('zh', store);
+  partOf('SYSTEM_PROMPT', 'pc-edit').onclick();
+  const areaA = editorOf('SYSTEM_PROMPT');
+  areaA.value = 'A 已提交的正文';
+  areaA.oninput();
+
+  let releaseA;
+  const waitingA = new Promise((resolve) => { releaseA = resolve; });
+  const normalUpdate = posts['/api/prompts/update'];
+  posts['/api/prompts/update'] = (payload) => {
+    const immediate = normalUpdate(payload);
+    return { status: immediate.status, body: waitingA };
+  };
+  const savingA = partOf('SYSTEM_PROMPT', 'pc-save').onclick();
+  await tick();
+
+  // A 还在网络上时，用户打开 B 并写下尚未保存的内容。
+  partOf('VAULT_PROMPT', 'pc-edit').onclick();
+  const draftB = 'B 还没保存，一个字也不能丢';
+  editorOf('VAULT_PROMPT').value = draftB;
+  editorOf('VAULT_PROMPT').oninput();
+  releaseA({ ok: true, language: 'zh', id: 'SYSTEM_PROMPT', stored: true, overridden: true, warnings: [] });
+  await savingA;
+
+  check('A 保存完成并刷新后，B 的编辑身份与草稿仍原样保留', () => {
+    assert.ok(app.state.promptEdit);
+    assert.equal(app.state.promptEdit.id, 'VAULT_PROMPT');
+    assert.equal(app.state.promptEdit.draft, draftB);
+    assert.equal(editorOf('VAULT_PROMPT').value, draftB);
+    assert.equal(editorOf('SYSTEM_PROMPT'), null);
+  });
+  check('A 本身确实保存成功，只是不能越权清理 B', () => {
+    assert.equal(store.zh.SYSTEM_PROMPT, 'A 已提交的正文');
+    assert.match(noteLine().textContent, /已保存/);
   });
 });
 

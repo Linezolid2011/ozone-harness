@@ -300,8 +300,16 @@ class DreamRunner:
 
         self.cursors = memory.cursor_map()
         limit = settings.dream_max_sessions if max_sessions is None else max_sessions
-        self.pending: list[PendingSession] = pending_sessions(
-            settings.sessions_dir, self.cursors, limit=limit
+        all_pending = pending_sessions(settings.sessions_dir, self.cursors)
+        # 改短/替换过的日志必须从 1 重读。PendingSession 上的 0 只是展示值还不够：
+        # records_read 与 ReadTracker 也必须拿到同一个有效游标，否则默认读取仍从旧
+        # 高水位之后开始，读不到任何内容。数据库里的旧高水位先保留，只有成功整理并
+        # 推进该会话时才显式退回，失败运行不会改变持久化进度。
+        self._stale_sessions = {item.session_id for item in all_pending if item.stale}
+        for session_id in self._stale_sessions:
+            self.cursors[session_id] = 0
+        self.pending: list[PendingSession] = (
+            all_pending[:limit] if limit is not None and limit > 0 else all_pending
         )
         self.tracker = ReadTracker(self.cursors)
         self.vault = vault
@@ -455,8 +463,14 @@ class DreamRunner:
         diff = diff_images(vault_image(self.vault.root), self.before_image)
         check = self.vault.check()
 
-        advanced = self.tracker.advance_map()
+        # 读到记录不等于整理完成：熔断/输出截断/工具失败后，下一轮没有这些记录
+        # 可再读，若仍推进游标就等于把它们从 Dream 的输入里永久划掉。
+        advanced = self.tracker.advance_map() if outcome.ok else {}
         for session_id, last_seq in advanced.items():
+            if session_id in self._stale_sessions:
+                # advance_cursor 故意只增不减；日志已经改短时，旧高水位不再描述
+                # 这份文件，必须先清掉它才能写入这次从 1 重读得到的新进度。
+                self.memory.rewind_cursor(session_id, 0, self.run_id)
             self.memory.advance_cursor(session_id, last_seq, self.run_id)
 
         record.update(
@@ -604,6 +618,7 @@ def format_dream(
             )
 
     before = dream_state(settings)
+    cursors_before = memory.cursor_map()
     staged = data_dir / f".dream-format-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     staged.mkdir(parents=True, exist_ok=True)
     moved: list[str] = []
@@ -629,16 +644,24 @@ def format_dream(
                 readme_token_budget=settings.vault_readme_token_budget,
             ).init_skeleton()
     except BaseException:
-        # **失败时把已经挪走的东西放回去**，绝不删。原来的写法是 `finally: 删暂存目录`，
-        # 于是"移到一半失败"或"清游标失败"会把用户的档案（含手写的那份）直接销毁，
-        # 而 `dream_cursor` 还停在"这些会话已经整理过了" —— 下次整理也不会重建它们，
-        # 一次可恢复的失败变成永久丢失。
+        # **失败时把档案与整理进度都放回去**。clear_cursors 已经提交之后，初始化仍可能
+        # 失败；只搬回目录会让旧档案配上空游标，下一次把全部会话重复整理一遍。
         restored = _restore_staged(staged, data_dir)
+        cursor_errors: list[str] = []
+        for session_id, last_seq in cursors_before.items():
+            try:
+                # 清表后 advance 的 MAX() 不妨碍恢复；若清空本身失败，原有更高值也
+                # 不会被旧快照压低。逐条尝试，一个坏值不能挡住其余会话的恢复。
+                memory.advance_cursor(session_id, last_seq, "dream-format-restore")
+            except Exception as exc:  # noqa: BLE001 - 收尾仍要恢复其余游标并报告
+                cursor_errors.append(f"{session_id}: {exc}")
         try:
             staged.rmdir()
         except OSError:
             pass
         detail = "、".join(moved) if moved else "（没有东西被移动）"
+        if cursor_errors:
+            detail += "；游标恢复失败：" + "；".join(cursor_errors)
         raise RuntimeError(
             t(
                 "ui.dream.format_failed",

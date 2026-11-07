@@ -2,6 +2,7 @@
 #
 # Usage:
 #   .\run.ps1 --setup               create .venv and install deps
+#   .\run.ps1 --test                run the test suite (uses .venv)
 #   .\run.ps1 --web                 open the web UI
 #   .\run.ps1                       interactive chat
 #   .\run.ps1 --once "hello"        run a single turn
@@ -35,8 +36,23 @@ try {
     $env:PYTHONUTF8 = "1"
     $venvPython = Join-Path $repo ".venv\Scripts\python.exe"
 
-    # --setup must be handled before the venv shortcut below, otherwise it
-    # would be forwarded to the CLI as an unknown flag.
+    # --setup and --test must be handled before the venv shortcut below,
+    # otherwise they would be forwarded to the CLI as unknown flags.
+    if ($args.Count -gt 0 -and $args[0] -eq "--test") {
+        if (Test-Path $venvPython) {
+            & $venvPython -X utf8 -m unittest discover -s tests -t .
+            exit $LASTEXITCODE
+        }
+        Write-Host "[warn] .venv not found - web-tool tests will be SKIPPED, not failed." -ForegroundColor Yellow
+        Write-Host "[warn] Run '.\run.ps1 --setup' once for the full suite." -ForegroundColor Yellow
+        $base = Resolve-BasePython
+        if (-not $base) {
+            Write-Host "[ERROR] No usable Python found. Install Python 3.10+ first." -ForegroundColor Red
+            exit 2
+        }
+        & $base -X utf8 -m unittest discover -s tests -t .
+        exit $LASTEXITCODE
+    }
     if ($args.Count -gt 0 -and $args[0] -eq "--setup") {
         Write-Host "[setup] Creating .venv ..."
         $base = Resolve-BasePython

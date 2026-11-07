@@ -115,6 +115,7 @@ MESSAGES: dict[str, str] = {
     "provider.http.error": "{label} returned an error: {message}",
     "provider.http.status": "{label} returned HTTP {status}: {detail}",
     "provider.http.network": "{label} network error: {detail}",
+    "provider.http.incomplete_stream": "SSE stream ended before a terminal event; retry the request",
     "provider.http.unknown_failure": "Unknown request failure",
     "provider.http.not_sse": "{label}'s response is not an SSE stream; raw content: {preview}",
     "provider.http.empty_body": "(empty)",

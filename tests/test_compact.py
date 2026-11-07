@@ -14,7 +14,7 @@ from pathlib import Path
 from harness.config import Settings
 from harness.context import build_messages, render_for_summary, split_into_groups
 from harness.events import last_summary, last_summary_mark
-from harness.llm_types import Message, ToolCall, estimate_messages_tokens
+from harness.llm_types import Finished, Message, TextDelta, ToolCall, estimate_messages_tokens
 
 from .helpers import Harness, make_harness, test_settings, text_reply, tool_reply, usage
 
@@ -213,6 +213,39 @@ class CompactionTests(unittest.TestCase):
         self.assertEqual(second_summary, "第二次摘要")
         self.assertGreater(second_covered, first_covered, "累计覆盖数必须递增")
 
+    def test_legacy_message_watermark_upgrades_to_absolute_group_coverage(self) -> None:
+        """老日志的条数水位线不能让下一轮压缩从第 0 组重新计数。"""
+        harness = self._harness(
+            [text_reply("新摘要"), text_reply("好")], context_token_budget=2000
+        )
+        for index in range(2):
+            harness.log.append("user_message", text=f"G{index}：{LONG}")
+            harness.log.append(
+                "assistant_message",
+                message=Message(role="assistant", content="旧回答").to_record(),
+                usage=usage().to_dict(),
+            )
+        harness.log.append(
+            "session_summary", summary="旧摘要", covered_messages=2
+        )
+        harness.log.append("user_message", text=f"G2：{LONG}")
+        harness.log.append(
+            "assistant_message",
+            message=Message(role="assistant", content="旧回答").to_record(),
+            usage=usage().to_dict(),
+        )
+
+        harness.loop.run("当前问题")
+
+        _summary, mark = last_summary_mark(harness.log.path)
+        self.assertEqual(mark.groups, 3, "G0 旧覆盖 + 本次折叠 G1/G2")
+        _summary, history, _mark = harness.log.compacted_context()
+        self.assertEqual(
+            [message.content for message in history if message.role == "user"],
+            ["当前问题"],
+            "刚折叠的 G2 不能因为水位线少算一组又回到上下文",
+        )
+
     def test_disabled_by_config(self) -> None:
         harness = self._harness([text_reply("好的")], context_token_budget=6000, compact_enabled=False)
         self._fill_history(harness)
@@ -235,6 +268,21 @@ class CompactionTests(unittest.TestCase):
         ]
         self.assertTrue(any("压缩失败" in record["text"] for record in notices))
 
+    def test_truncated_summary_is_never_persisted_as_complete(self) -> None:
+        """`finish_reason=length` 的半份摘要不能推进水位线，否则未摘要的历史会丢失。"""
+        script = [
+            [TextDelta(text="半份摘要"), Finished(reason="length", usage=usage(total=500))],
+            text_reply("正常回答"),
+        ]
+        harness = self._harness(script, context_token_budget=6000)
+        self._fill_history(harness)
+
+        outcome = harness.loop.run("现在呢")
+
+        self.assertEqual(last_summary(harness.log.path), ("", 0))
+        self.assertEqual(outcome.text, "正常回答")
+        self.assertEqual(outcome.usage.total_tokens, 500 + 30, "失败的摘要调用也花了钱")
+
     def test_compact_cost_is_counted_into_the_turn(self) -> None:
         script = [
             text_reply("摘要", use=usage(total=500, prompt=400, completion=100)),
@@ -245,6 +293,25 @@ class CompactionTests(unittest.TestCase):
         outcome = harness.loop.run("现在呢")
         # 530 = 压缩那次 500 + 对话那次 30
         self.assertEqual(outcome.usage.total_tokens, 530)
+
+    def test_compact_cost_participates_in_the_token_breaker(self) -> None:
+        """摘要先烧完单轮预算时，不能再发正常对话请求。"""
+        harness = self._harness(
+            [
+                text_reply("摘要", use=usage(total=500, prompt=400, completion=100)),
+                text_reply("不该发送"),
+            ],
+            context_token_budget=6000,
+            max_tokens_per_turn=25,
+        )
+        self._fill_history(harness)
+
+        outcome = harness.loop.run("现在呢")
+
+        self.assertEqual(outcome.stop_reason, "token_budget")
+        self.assertEqual(outcome.steps, 0)
+        self.assertEqual(len(harness.provider.calls), 1, "只有摘要请求应该发出去")
+        self.assertEqual(outcome.usage.total_tokens, 500)
 
     def test_single_group_is_never_compacted(self) -> None:
         """只剩当前这一组时可压的东西为零，必须安全返回。
@@ -286,6 +353,28 @@ class CompactionTests(unittest.TestCase):
             ),
             "必须留下一条可读的 warn，而不是静默降级",
         )
+
+    def test_abort_during_compaction_still_writes_turn_end(self) -> None:
+        """主步循环尚未开始时停止，也不能留下一条看似永远运行中的回合。"""
+        harness = self._harness(
+            [text_reply("摘要"), text_reply("不该发送")], context_token_budget=6000
+        )
+        self._fill_history(harness)
+
+        def abort_on_compact(kind: str, **_data: object) -> None:
+            if kind == "compact":
+                raise KeyboardInterrupt("模拟停止")
+
+        harness.loop.emit = abort_on_compact
+        with self.assertRaises(KeyboardInterrupt):
+            harness.loop.run("现在呢")
+
+        self.assertEqual(len(harness.provider.calls), 1, "只应发生摘要请求")
+        event = harness.log.read_events()[-1]
+        self.assertEqual(event["kind"], "turn_end")
+        self.assertEqual(event["stop_reason"], "aborted")
+        self.assertEqual(event["steps"], 0)
+        self.assertEqual(event["usage"]["total_tokens"], 30, "摘要开销也要进入中止轮尾")
 
     def test_summary_input_is_never_truncated(self) -> None:
         """送进摘要的文本必须完整，且水位线只前移真正被摘要覆盖的那些组。

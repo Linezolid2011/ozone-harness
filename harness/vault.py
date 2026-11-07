@@ -667,6 +667,11 @@ def _parse_fields(lines: Sequence[str]) -> tuple[dict[str, Any], list[str]]:
     return fields, warnings
 
 
+def _is_list_item(content: str) -> bool:
+    # 多键字典的列表项会写成裸 `-`；即使写 `- `，上面的 strip 也会把它变成这样。
+    return content == "-" or content.startswith("- ")
+
+
 def _parse_mapping(
     entries: Sequence[tuple[int, str]],
     index: int,
@@ -682,7 +687,7 @@ def _parse_mapping(
             warnings.append(t("ui.vault.frontmatter_unparsed", line=content[:40]))
             index += 1
             continue
-        if content.startswith("- "):
+        if _is_list_item(content):
             warnings.append(t("ui.vault.frontmatter_list_without_key", line=content[:40]))
             index += 1
             continue
@@ -702,7 +707,7 @@ def _parse_mapping(
             # 可能是 `key:` 后面跟列表/嵌套映射，也可能真的就是空值。
             if index < len(entries) and entries[index][0] > line_indent:
                 child_indent, child_content = entries[index]
-                if child_content.startswith("- "):
+                if _is_list_item(child_content):
                     child, index = _parse_list(entries, index, child_indent, warnings)
                 else:
                     child, index = _parse_mapping(entries, index, child_indent, warnings)
@@ -728,15 +733,15 @@ def _parse_list(
         line_indent, content = entries[index]
         if line_indent < indent:
             break
-        if line_indent != indent or not content.startswith("- "):
+        if line_indent != indent or not _is_list_item(content):
             # 不是这个列表的项：留给上层（这是"坏缩进"的边界，不吞掉后面的键）
             break
-        item = content[2:].strip()
+        item = content[1:].strip()
         index += 1
         if item == "":
             if index < len(entries) and entries[index][0] > line_indent:
                 child_indent, child_content = entries[index]
-                if child_content.startswith("- "):
+                if _is_list_item(child_content):
                     child, index = _parse_list(entries, index, child_indent, warnings)
                 else:
                     child, index = _parse_mapping(entries, index, child_indent, warnings)
@@ -750,7 +755,7 @@ def _parse_list(
             value = value.strip()
             if key and value == "" and index < len(entries) and entries[index][0] > line_indent:
                 child_indent, child_content = entries[index]
-                if child_content.startswith("- "):
+                if _is_list_item(child_content):
                     child, index = _parse_list(entries, index, child_indent, warnings)
                 else:
                     child, index = _parse_mapping(entries, index, child_indent, warnings)

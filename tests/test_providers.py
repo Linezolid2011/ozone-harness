@@ -12,6 +12,7 @@ import unittest
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 from harness.llm_types import Message
 from harness.providers.base import ProviderError
@@ -209,6 +210,25 @@ class StoreTests(unittest.TestCase):
         profile = ProviderProfile(id="x", label="x", base_url="http://x", api_key="short")
         self.assertEqual(profile.masked_key(), "••••••")
 
+    def test_nine_character_key_is_fully_masked(self) -> None:
+        """前 5 + 后 4 恰好等于完整 key，这个边界不能走普通掩码。"""
+        profile = ProviderProfile(
+            id="x", label="x", base_url="http://x", api_key="123456789"
+        )
+        self.assertEqual(profile.masked_key(), "••••••")
+        self.assertNotIn("123456789", profile.masked_key())
+
+    def test_ten_character_key_keeps_the_normal_partial_mask(self) -> None:
+        """10 字符起保留前 5 / 后 4 的既有形状，中间第 6 位必须隐藏。"""
+        profile = ProviderProfile(
+            id="x", label="x", base_url="http://x", api_key="1234567890"
+        )
+        masked = profile.masked_key()
+        self.assertTrue(masked.startswith("12345"), masked)
+        self.assertTrue(masked.endswith("7890"), masked)
+        self.assertNotIn("6", masked)
+        self.assertNotIn("1234567890", masked)
+
     # -- 增删改 ------------------------------------------------------
 
     def test_upsert_update_remove(self) -> None:
@@ -226,6 +246,78 @@ class StoreTests(unittest.TestCase):
         store.remove("zhipu")
         self.assertIsNone(store.get("zhipu"))
         self.assertEqual(len(store.providers()), 1)
+
+    def test_stale_instance_upsert_preserves_newer_profile_and_key(self) -> None:
+        """A 保存后，早先创建的 B 不能拿自己的旧 `_data` 把 A 整家抹掉。"""
+        first = self.store()
+        stale = self.store()
+        first.upsert(ProviderProfile(
+            id="first", label="First", base_url="https://first.example",
+            api_key="first-secret", models=["first-model"],
+        ))
+        stale.upsert(ProviderProfile(
+            id="second", label="Second", base_url="https://second.example",
+            api_key="second-secret", models=["second-model"],
+        ))
+
+        reopened = self.store()
+        restored_first = reopened.get("first")
+        restored_second = reopened.get("second")
+        assert restored_first is not None
+        assert restored_second is not None
+        self.assertEqual(restored_first.api_key, "first-secret")
+        self.assertEqual(restored_second.api_key, "second-secret")
+
+    def test_stale_remove_preserves_newer_profile_without_resurrecting_delete(self) -> None:
+        store = self.store()
+        store.upsert(ProviderProfile(
+            id="old", label="Old", base_url="https://old.example", api_key="old-key",
+        ))
+        stale = self.store()
+        store.upsert(ProviderProfile(
+            id="new", label="New", base_url="https://new.example", api_key="new-key",
+        ))
+
+        stale.remove("old")
+
+        reopened = self.store()
+        self.assertIsNone(reopened.get("old"), "明确删除的档案不能被 stale 写回复活")
+        restored_new = reopened.get("new")
+        assert restored_new is not None
+        self.assertEqual(restored_new.api_key, "new-key")
+
+    def test_stale_default_setters_preserve_newer_profiles(self) -> None:
+        for setter in ("set_defaults", "set_dream_defaults"):
+            with self.subTest(setter=setter):
+                path = self.tmp / f"{setter}.json"
+                first = ProviderStore(path)
+                stale = ProviderStore(path)
+                first.upsert(ProviderProfile(
+                    id="p", label="P", base_url="https://p.example",
+                    api_key="p-key", models=["m"],
+                ))
+
+                getattr(stale, setter)(provider="p", model="m", effort="high")
+
+                restored = ProviderStore(path).get("p")
+                assert restored is not None
+                self.assertEqual(restored.api_key, "p-key")
+
+    def test_stale_key_update_does_not_revert_newer_models(self) -> None:
+        store = self.store()
+        store.upsert(ProviderProfile(
+            id="p", label="P", base_url="https://p.example",
+            api_key="old-key", models=["old-model"],
+        ))
+        stale = self.store()
+        store.update_models("p", ["new-model"])
+
+        stale.update_key("p", "new-key")
+
+        restored = self.store().get("p")
+        assert restored is not None
+        self.assertEqual(restored.api_key, "new-key")
+        self.assertEqual(restored.models, ["new-model"])
 
     def test_removing_the_default_falls_back(self) -> None:
         store = self.seeded()
@@ -279,6 +371,23 @@ class StoreTests(unittest.TestCase):
         """
         with self.assertRaises(ProviderError):
             fetch_models("api.deepseek.com/v1", "k")
+
+    def test_fetch_models_uses_redirect_safe_opener(self) -> None:
+        """模型发现也必须走共享 opener，跨源重定向才会剥掉两种 key。"""
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"data":[{"id":"m"}]}'
+        with mock.patch(
+            "harness.providers.store.open_provider_request", return_value=response
+        ) as opener:
+            self.assertEqual(
+                fetch_models("https://provider.example/v1", "secret", timeout=7.0),
+                ["m"],
+            )
+
+        request = opener.call_args.args[0]
+        self.assertEqual(request.full_url, "https://provider.example/v1/models")
+        self.assertEqual(opener.call_args.kwargs["timeout"], 7.0)
 
     def test_save_is_atomic_and_leaves_no_partial_file(self) -> None:
         """保存走"临时文件 + os.replace"：不该在 data 里留下半截文件。
@@ -507,6 +616,29 @@ class ResolveDreamProviderTests(unittest.TestCase):
         self.assertEqual(
             ProviderStore(store.path).dream_defaults()["effort"], "low"
         )
+
+
+class ProviderConstructionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.settings = test_settings(Path(self._tmp.name), api_key="k")
+
+    def test_only_official_openai_requests_stream_usage(self) -> None:
+        for profile_id, expected in (("openai", True), ("deepseek", False), ("custom", False)):
+            with self.subTest(profile_id=profile_id):
+                profile = ProviderProfile(
+                    id=profile_id, label=profile_id, base_url="https://x/v1",
+                    api_key="k", models=["m"],
+                )
+                provider = build_provider(
+                    resolve_settings(self.settings, profile, "m", ""), profile
+                )
+                payload = provider.build_payload([Message(role="user", content="hi")])
+                self.assertEqual(
+                    payload.get("stream_options"),
+                    {"include_usage": True} if expected else None,
+                )
 
 
 class ReasoningContentFlagTests(unittest.TestCase):

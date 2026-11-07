@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import unittest
 import unittest.mock
+from dataclasses import replace
 from pathlib import Path
 
 from harness.dream import (
@@ -24,7 +25,7 @@ from harness.dream import (
     render_diff,
 )
 from harness.dream_records import ReadTracker, pending_sessions, read_session
-from harness.events import EventLog
+from harness.events import EventLog, read_events
 from harness.memory import open_memory
 from harness.tools.dream_tools import ReadmeWriteTool, build_dream_tools
 from harness.vault import README_NAME, VaultStore
@@ -403,6 +404,83 @@ class DreamPipelineTests(unittest.TestCase):
             pending_sessions(self.settings.sessions_dir, self.memory.cursor_map())
         )
 
+    def test_stale_session_is_reread_from_one_and_gets_a_new_cursor(self) -> None:
+        """日志变短后，展示层、读取工具、ReadTracker 与数据库必须使用同一个新起点。"""
+        old_last = self._last_seq(self.session_id)
+        self.memory.advance_cursor(self.session_id, old_last, "before-replacement")
+        path = self.settings.sessions_dir / f"{self.session_id}.jsonl"
+        path.write_text(
+            json.dumps(
+                {"seq": 1, "kind": "user_message", "text": "replacement conversation"},
+                ensure_ascii=False,
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "seq": 2,
+                    "kind": "assistant_message",
+                    "message": {"content": "new answer"},
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = self._runner(
+            [
+                tool_reply(
+                    [
+                        (
+                            "c1",
+                            "records_read",
+                            json.dumps({"session_id": self.session_id}),
+                        )
+                    ]
+                ),
+                text_reply("已整理替换后的会话。"),
+            ]
+        )
+        self.assertTrue(runner.pending[0].stale)
+        self.assertEqual(runner.pending[0].cursor, 0)
+
+        outcome = runner.run()
+
+        calls = [
+            record
+            for record in read_events(runner.store.trace_path(runner.run_id))
+            if record.get("kind") == "tool_call" and record.get("name") == "records_read"
+        ]
+        self.assertIn("replacement conversation", calls[0]["result"]["text"])
+        self.assertEqual(outcome.advanced, {self.session_id: 2})
+        self.assertEqual(self.memory.cursor_map()[self.session_id], 2)
+        self.assertEqual(
+            pending_sessions(self.settings.sessions_dir, self.memory.cursor_map()), []
+        )
+
+    def test_unsuccessful_run_does_not_advance_the_cursor(self) -> None:
+        """读完但还没整理就熔断时，记录必须留到下一轮，不能伪装成已处理。"""
+        self.settings = replace(self.settings, dream_max_steps=1)
+        outcome = self._runner(
+            [
+                tool_reply(
+                    [
+                        (
+                            "c1",
+                            "records_read",
+                            json.dumps({"session_id": self.session_id}),
+                        )
+                    ]
+                )
+            ]
+        ).run()
+
+        self.assertEqual(outcome.stop_reason, "max_steps")
+        self.assertEqual(outcome.advanced, {})
+        self.assertNotIn(self.session_id, self.memory.cursor_map())
+        self.assertTrue(
+            pending_sessions(self.settings.sessions_dir, self.memory.cursor_map())
+        )
+
     def test_web_content_in_the_log_never_reaches_the_records(self) -> None:
         """会话里抓过网页时，**正文不能进记录** —— 否则等于给整理者一条
         "把外部内容洗成长期档案"的通道（ADR-039/048）。"""
@@ -550,8 +628,6 @@ class NoRollbackTests(unittest.TestCase):
     def test_no_module_exposes_a_rollback_entry_point(self) -> None:
         """这是一条**守卫**（同 test_pricing.py 的用意）：万一有人把回滚加回来，
         他必须先回答"那要不要重新引入快照、以及快照留多久"。"""
-        import inspect
-
         import harness.dream as dream_module
         import harness.vault as vault_module
 
@@ -559,8 +635,7 @@ class NoRollbackTests(unittest.TestCase):
             self.assertFalse(hasattr(dream_module, name), name)
             self.assertFalse(hasattr(vault_module, name), name)
         self.assertFalse(hasattr(DreamRunStore(self.settings.dreams_dir), "can_undo"))
-        # 游标仍然只增不减：`rewind_cursor` 留着，但**没有任何自动调用点**
-        self.assertNotIn("rewind_cursor", inspect.getsource(dream_module))
+        # 正常整理仍不能退游标；唯一例外是检测到 stale 日志后，成功重读并保存新进度。
 
     def test_interrupted_run_is_cleaned_up_by_the_next_run(self) -> None:
         """进程被杀/断电会让记录永远停在 `running` —— 下一次整理要把它收尾成
@@ -743,6 +818,29 @@ class DreamFormatTests(unittest.TestCase):
             "搬空之后的暂存目录该删掉，不该留在 data 里",
         )
         self.assertEqual(self.memory.cursor_map(), {"s1": 2}, "游标不该被动过")
+
+    def test_init_failure_restores_cursors_cleared_before_it(self) -> None:
+        """骨架初始化在清游标之后：它失败时，档案和整理进度都必须一起回来。"""
+        from harness.dream import format_dream
+
+        self._seed()
+        archive = self.settings.vault_dir / "entities" / "小林.md"
+        archive_before = archive.read_bytes()
+        dream_record = self.settings.dreams_dir / "dream-20261012-000000-aaaa.json"
+        record_before = dream_record.read_bytes()
+
+        with unittest.mock.patch.object(
+            VaultStore, "init_skeleton", side_effect=OSError("模拟：初始化失败")
+        ):
+            with self.assertRaises(RuntimeError):
+                format_dream(self.settings, self.memory)
+
+        self.assertEqual(self.memory.cursor_map(), {"s1": 2}, "已清掉的游标没有恢复")
+        self.assertEqual(archive.read_bytes(), archive_before)
+        self.assertEqual(dream_record.read_bytes(), record_before)
+        self.assertEqual(
+            [p.name for p in self.settings.data_dir.glob(".dream-format-*")], []
+        )
 
     def test_format_does_not_touch_anything_outside_dream(self) -> None:
         """**这个动作最重要的一条**：会话、记忆、接口配置、工具开关都不许动。"""

@@ -488,6 +488,8 @@ class FetchTests(unittest.TestCase):
 
     def test_byte_cap_truncates_and_says_so(self) -> None:
         page = self.fetch("/big", max_bytes=500, max_chars=10_000)
+        self.assertLessEqual(len(page.text), 500, "一个 oversized chunk 也不能越过字节上限")
+        self.assertTrue(page.truncated, "字节截断也必须出现在结构化 truncated 字段里")
         self.assertIn("超过", page.note)
 
     def test_char_cap_truncates_and_flags_it(self) -> None:

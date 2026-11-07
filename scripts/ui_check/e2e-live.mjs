@@ -498,7 +498,7 @@ await check('真响应渲染出标题/路径/属性/extra', () => {
   assert.equal(find(viewerNow(), (x) => x.classList.contains('vault-view-title')).textContent, '小林');
   assert.equal(find(viewerNow(), (x) => x.classList.contains('vault-view-path')).textContent, 'entities/小林.md');
   const labels = byClass(viewerNow(), 'va-k').map((x) => x.textContent);
-  assert.deepEqual(labels.slice(0, 7), ['kind', 'relation', 'status', 'updated', 'tags', 'aliases', 'sources']);
+  assert.deepEqual(labels.slice(0, 7), ['name', 'kind', 'relation', 'status', 'created', 'updated', 'tags']);
   const extras = byClass(viewerNow(), 'vault-attr-extra').map((x) => x.textContent);
   assert.ok(extras.some((t) => t.includes('mood') && t.includes('偏谨慎')));
 });
@@ -741,11 +741,11 @@ const firstHash = app.state.vaultEdit.hash;
 await check('编辑态手里拿的就是载入时那个真 hash', () => assert.equal(firstHash, loaded.hash));
 await app.saveVaultEdit();
 await tick();
-await check('真存下去时请求体里的键名仍然是英文（10 个键，一个不多一个不少）', () => {
+await check('真存下去时请求体里的键名仍然是英文（11 个键，一个不多一个不少）', () => {
   const post = sends.filter((item) => item.url === '/api/vault/file').pop();
   assert.ok(post, '应有一次保存');
   assert.deepEqual(Object.keys(post.payload).sort(),
-    ['aliases', 'body', 'expect_hash', 'kind', 'mode', 'path', 'relation', 'status', 'tags', 'title']);
+    ['aliases', 'body', 'expect_hash', 'kind', 'mode', 'path', 'place', 'relation', 'status', 'tags', 'title']);
   assert.equal(post.payload.title, TMP_NAME, '值也要落在对的键上');
 });
 await check('保存之后接口里是新正文，hash 也变了', async () => {
@@ -1298,23 +1298,23 @@ const liveTools = Array.isArray(promptsBody.tools)
 app.state.pane = 'prompts';
 app.state.view = 'settings';
 
-await check('真 /api/prompts 形状（后面全部断言的前提）：22 条提示词 + 15 个工具，五个分组', () => {
+await check('真 /api/prompts 形状（后面全部断言的前提）：22 条提示词 + 16 个工具，5+2 个分组', () => {
   if (promptsResp.status !== 200 || !livePrompts.length) {
     throw new Error(`/api/prompts 没给出这一页要的形状（status=${promptsResp.status}）`);
   }
   assert.equal(livePrompts.length, 22, '契约 §2.3：全部公开常量，LANG 除外');
-  assert.equal(liveTools.length, 15, '契约 §2.3：对话侧 8 + 整理侧 7');
+  assert.equal(liveTools.length, 16, '契约 §2.3：对话侧 9（含 time）+ 整理侧 7');
   assert.deepEqual([...promptsBody.groups.map((g) => g.id)].sort(),
     ['compact', 'dream', 'render', 'system', 'tail']);
   assert.deepEqual([...promptsBody.tools.map((g) => g.id)].sort(), ['chat', 'dream']);
 });
 
-await check('真响应喂给真 app.js：22 + 15 全部画出来，两条钩子都在', async () => {
+await check('真响应喂给真 app.js：22 + 16 全部画出来，两条钩子都在', async () => {
   await app.loadPrompts();
   const body = byId.get('prompts-body');
   const promptCards = byClass(body, 'prompt-card').filter((n) => n.dataset.promptId);
   assert.equal(promptCards.length, 22);
-  assert.equal(byClass(body, 'tool-card').length, 15);
+  assert.equal(byClass(body, 'tool-card').length, 16);
   assert.deepEqual([...promptCards.map((n) => n.dataset.promptId)].sort(),
     [...livePrompts.map((item) => item.id)].sort());
   assert.deepEqual([...byClass(body, 'tool-card').map((n) => n.dataset.toolId)].sort(),
@@ -1322,7 +1322,7 @@ await check('真响应喂给真 app.js：22 + 15 全部画出来，两条钩子�
 });
 
 /* 分组**默认折叠**（契约 §5 第 2 条）：外壳是原生 `<details>`，真响应来的 5 个
-   提示词组 + 2 个工具组一个都不带 `open`。后面所有"数 22 / 15"的断言都建立在
+   提示词组 + 2 个工具组一个都不带 `open`。后面所有"数 22 / 16"的断言都建立在
    "折的只是可见性、元素还在 DOM 里"这件事上。 */
 await check('7 个分组都是原生 <details class="prompts-group">，默认一个都不带 open（真响应）', () => {
   const groups = byClass(byId.get('prompts-body'), 'prompts-group');
@@ -1339,14 +1339,14 @@ await check('7 个分组都是原生 <details class="prompts-group">，默认一
   }
 });
 
-await check('全折叠时 22 / 15 个钩子元素**仍然在 DOM 里**（折的是可见性，不是元素）', () => {
+await check('全折叠时 22 / 16 个钩子元素**仍然在 DOM 里**（折的是可见性，不是元素）', () => {
   const body = byId.get('prompts-body');
   const groups = byClass(body, 'prompts-group');
   assert.ok(groups.every((group) => group.getAttribute('open') === null), '前置：七组全折着');
   const prompts = walkAll(body).filter((n) => n.dataset && n.dataset.promptId);
   const tools = walkAll(body).filter((n) => n.dataset && n.dataset.toolId);
   assert.equal(prompts.length, 22);
-  assert.equal(tools.length, 15);
+  assert.equal(tools.length, 16);
   const insideGroup = (node) => {
     for (let cur = node.parentNode; cur; cur = cur.parentNode) {
       if (cur.classList && cur.classList.contains('prompts-group')) return true;

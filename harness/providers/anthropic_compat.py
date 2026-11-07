@@ -43,7 +43,7 @@ from ..llm_types import (
     ToolCallDelta,
     Usage,
 )
-from .base import ProviderError
+from .base import ProviderError, open_provider_request
 
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 _MAX_ATTEMPTS = 3
@@ -183,6 +183,17 @@ class AnthropicCompatProvider:
 
         return "\n\n".join(part for part in system_parts if part), converted
 
+    def filter_prompt_records(
+        self, records: Sequence[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """实际转换器不携带 reasoning；审计记录也不能假装它发出去了。"""
+        filtered = []
+        for record in records:
+            item = dict(record)
+            item.pop("reasoning_content", None)
+            filtered.append(item)
+        return filtered
+
     @staticmethod
     def _user_blocks(message: Message) -> list[dict[str, Any]]:
         """把一条**带图**的 user 消息折成 Anthropic 的内容块（契约 §4）。
@@ -283,7 +294,7 @@ class AnthropicCompatProvider:
                     t("provider.store.base_url_scheme")
                 ) from exc
             try:
-                with urllib.request.urlopen(
+                with open_provider_request(
                     request, timeout=self._settings.request_timeout
                 ) as response:
                     for event in self._parse_sse(response):
@@ -421,11 +432,8 @@ class AnthropicCompatProvider:
                 continue
 
             if kind == "message_stop":
-                # 正常情况下 message_delta 先到；万一没到也要补一个 Finished ——
-                # 上层约定"最后一个事件一定是 Finished"，否则这一轮的用量会记成 0。
-                if not finished:
-                    yield Finished(reason="stop", usage=None)
-                return
+                # message_stop 只是协议标记；缺了 message_delta 仍是截断，不能补成完成。
+                break
 
         if not saw_payload:
             preview = " | ".join(raw_preview)[:400]
@@ -434,6 +442,14 @@ class AnthropicCompatProvider:
                     "provider.http.not_sse",
                     label=self.label,
                     preview=preview or t("provider.http.empty_body"),
+                )
+            )
+        if not finished:
+            raise ProviderError(
+                t(
+                    "provider.http.network",
+                    label=self.label,
+                    detail=t("provider.http.incomplete_stream"),
                 )
             )
 

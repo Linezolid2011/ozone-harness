@@ -8,11 +8,12 @@
 这样四道熔断、工具执行、流式拼装、事件日志**只有一份实现**，不会各自漂移 ——
 熔断逻辑尤其不能有两份，那是"钱"的防线。
 
-四道熔断（都是为了防止"半夜自己循环烧钱"）：
+五道熔断（都是为了防止"半夜自己循环烧钱"）：
   1. max_steps           单轮最多几步工具调用
-  2. max_tokens_per_turn 单轮累计 token 上限
+  2. max_tokens_per_turn 单轮累计 token 上限（含压缩调用）
   3. max_wall_seconds    单轮墙钟上限
   4. 重复调用检测         连续 3 次完全相同的工具调用即中止
+  5. max_tool_failures   连续工具失败达到上限即中止
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from .llm_types import (
     estimate_tools_tokens,
 )
 from .memory import MemoryStore
-from .providers.base import LLMProvider, ProviderError
+from .providers.base import LLMProvider, ProviderError, record_prompt
 from .tools.registry import ToolRegistry
 
 Emit = Callable[..., None]
@@ -360,6 +361,8 @@ class AgentLoop:
             )
         )
         summary, usage = self._summarize(folded, summary_text)
+        # 空摘要与被截断的摘要同样已经花了一次 API 调用的钱；不能只在成功时记账。
+        self._compact_usage.add(usage)
         if not summary:
             self._notice(t("ui.loop.compact_failed"), "warn")
             return False
@@ -376,7 +379,6 @@ class AgentLoop:
             model=self.settings.model,
             usage=usage.to_dict(),
         )
-        self._compact_usage.add(usage)
         self.emit(
             "compact",
             summary=summary,
@@ -423,7 +425,11 @@ class AgentLoop:
         except ProviderError as exc:
             self.log.append("error", error=t("ui.loop.summarize_failed", error=exc))
             return "", Usage()
-        return assembler.text.strip(), assembler.usage or Usage()
+        usage = assembler.usage or Usage()
+        if assembler.finish_reason == "length":
+            # 半份摘要不覆盖任何历史：把它当成功会推进水位线，没进摘要的部分就此消失。
+            return "", usage
+        return assembler.text.strip(), usage
 
     # ------------------------------------------------------------------
 
@@ -485,27 +491,47 @@ class AgentLoop:
         # 由 trim_history 按组丢弃兜底，并且照常走到 turn_end。
         self._turn_summary = ""
         try:
-            summary_text, history, mark = self.log.compacted_context()
-            budget = self._prepare_budget(history, summary_text)
-            if self._maybe_compact(history, summary_text, mark, budget):
-                # 压缩改变了上下文，重新读一次
-                summary_text, history, mark = self.log.compacted_context()
-                # 摘要变了，固定开销也跟着变：预算必须重算（ADR-100）
-                budget = self._prepare_budget(history, summary_text)
-            self._turn_summary = summary_text
-            self._turn_history_budget = budget
-        except Exception as exc:  # noqa: BLE001 - 压缩不该有能力弄坏一轮对话
-            self._turn_summary = ""
-            history = self.log.conversation()
-            # 压缩阶段出错也要有一条**安全的预算**：退回"按窗口硬约束"的算法，
-            # 否则这一轮会拿 None 去拼 prompt —— 那等于没有窗口保证（ADR-100）。
             try:
-                self._turn_history_budget = self._prepare_budget(history, "")
-            except Exception:  # noqa: BLE001 - 连预算都算不出来时用最保守的那条
-                self._turn_history_budget = self.settings.history_budget()
-            self._notice(
-                f"压缩阶段出错，本轮跳过压缩：{type(exc).__name__}: {exc}", "warn"
-            )
+                summary_text, history, mark = self.log.compacted_context()
+                budget = self._prepare_budget(history, summary_text)
+                if self._maybe_compact(history, summary_text, mark, budget):
+                    # 压缩改变了上下文，重新读一次
+                    summary_text, history, mark = self.log.compacted_context()
+                    # 摘要变了，固定开销也跟着变：预算必须重算（ADR-100）
+                    budget = self._prepare_budget(history, summary_text)
+                self._turn_summary = summary_text
+                self._turn_history_budget = budget
+            except Exception as exc:  # noqa: BLE001 - 压缩不该有能力弄坏一轮对话
+                self._turn_summary = ""
+                history = self.log.conversation()
+                # 压缩阶段出错也要有一条**安全的预算**：退回"按窗口硬约束"的算法，
+                # 否则这一轮会拿 None 去拼 prompt —— 那等于没有窗口保证（ADR-100）。
+                try:
+                    self._turn_history_budget = self._prepare_budget(history, "")
+                except Exception:  # noqa: BLE001 - 连预算都算不出来时用最保守的那条
+                    self._turn_history_budget = self.settings.history_budget()
+                self._notice(
+                    f"压缩阶段出错，本轮跳过压缩：{type(exc).__name__}: {exc}", "warn"
+                )
+        except BaseException as exc:
+            # 主步循环还没开始时也可能被停止/断开；这里同样要留下已中止的轮尾。
+            # 放在外层还能覆盖降级 notice 再次遇到客户端断开的情况。
+            elapsed = time.monotonic() - started
+            compact_usage = Usage()
+            compact_usage.add(self._compact_usage)
+            try:
+                self.log.append(
+                    "turn_end",
+                    steps=0,
+                    stop_reason="aborted",
+                    aborted_by=f"{type(exc).__name__}: {exc}",
+                    elapsed=round(elapsed, 2),
+                    usage=compact_usage.to_dict(),
+                    user_seq=user_seq,
+                )
+            except Exception:  # noqa: BLE001 - 中止时不能再掩盖原异常
+                pass
+            raise
 
         total_usage = Usage()
         step = 0
@@ -540,10 +566,12 @@ class AgentLoop:
                     stop_reason = "wall_clock"
                     self._notice(t("ui.loop.wall_clock", seconds=elapsed), "warn")
                     break
-                if total_usage.total_tokens > self.settings.max_tokens_per_turn:
+                # 摘要也是本轮开销：不能等正常对话都跑完、收尾记账时才参与熔断。
+                spent_tokens = total_usage.total_tokens + self._compact_usage.total_tokens
+                if spent_tokens >= self.settings.max_tokens_per_turn:
                     stop_reason = "token_budget"
                     self._notice(
-                        t("ui.loop.token_budget", tokens=total_usage.total_tokens),
+                        t("ui.loop.token_budget", tokens=spent_tokens),
                         "warn",
                     )
                     break
@@ -584,7 +612,7 @@ class AgentLoop:
                     # 用 to_prompt_record 而不是 to_api：**带图消息的 base64 绝不能进日志**
                     # （契约 §5）。每步都写一次，一张图就能把 JSONL 撑成几 MB，
                     # 之后 grep、--replay、乃至 data/ 的可搬运性全都会坏掉。
-                    messages=[message.to_prompt_record() for message in messages],
+                    messages=record_prompt(self.provider, messages),
                     **extra,
                 )
                 self.emit("step", step=step, estimated_tokens=estimated)
@@ -695,13 +723,10 @@ class AgentLoop:
                         result=result.payload,
                         result_content=content,
                     )
-                    self.emit("tool_result", call=call, result=result)
-                    # 这一条**已经有结果了**，从"待补桩"里摘掉。
-                    # 不摘的话，中止（点停止 / 关标签页）时 `_stub_unexecuted_calls`
-                    # 会给它补一条"没执行"的假结果 —— 同一个 tool_call_id 出现两条
-                    # 互相矛盾的 tool 消息，而重放层的修补按 id 去重（集合），
-                    # 根本发现不了这种重复。
+                    # 真实结果已经落盘，立刻从"待补桩"里摘掉，再做可能断开连接的 UI emit。
+                    # 否则中止处理会给同一个 tool_call_id 再补一条"没执行"的假结果。
                     pending_calls = [c for c in pending_calls if c.id != call.id]
+                    self.emit("tool_result", call=call, result=result)
                     failed_streak = failed_streak + 1 if not result.ok else 0
 
                     # 联网结果与记忆写入出现在同一轮时留一条审计线索。
@@ -809,8 +834,8 @@ class AgentLoop:
 
         1. 多发一条 notice，内容是**原错误 + 一句明确的指引**。原错误必须一起显示，
            不许用一句泛泛的提示把它盖掉（既有的那条 error notice 也照旧保留）；
-        2. 追加 `images_undelivered`（`for_seq` 指向这一轮的 `user_message`）：
-           那条消息的图片**事实上从未被模型看到**，不记下来的话，这个会话之后
+        2. 给请求里每条带图消息追加 `images_undelivered`（`for_seq` 指向它的来源事件）：
+           那些图片**事实上从未被模型看到**，不记下来的话，这个会话之后
            每一轮重放都会带着图片再发一次、再被拒一次，用户连"重试"都做不到
            （ADR-045：停下来也必须停在自洽的状态上）。
 
@@ -825,11 +850,22 @@ class AgentLoop:
         status = getattr(exc, "status", None)
         if status not in _IMAGE_REJECTION_STATUSES:
             return
-        if not any(message.images for message in messages):
+        image_messages = [message for message in messages if message.images]
+        if not image_messages:
             return
         error = str(exc)
-        if user_seq is not None:
-            self.log.append("images_undelivered", for_seq=user_seq, reason=error)
+        # 历史图片也会随这次请求重发。必须按来源逐条标记，不能把旧图的拒绝
+        # 错记到本轮那条纯文字消息上，否则旧图仍在，下一轮还会继续被拒。
+        rejected_seqs: list[int] = []
+        for message in image_messages:
+            source_seq = message.source_seq
+            # 自定义 planner 可能直接构造 Message；保留旧调用方式的当前轮兜底。
+            if source_seq is None:
+                source_seq = user_seq if isinstance(user_seq, int) else None
+            if source_seq is not None and source_seq not in rejected_seqs:
+                rejected_seqs.append(source_seq)
+        for source_seq in rejected_seqs:
+            self.log.append("images_undelivered", for_seq=source_seq, reason=error)
         self._notice(
             t("ui.loop.images_rejected", error=error),
             "warn",

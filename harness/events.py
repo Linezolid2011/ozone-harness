@@ -107,26 +107,45 @@ class EventLog:
             remembered = _SEQ_BY_PATH.get(self._key, 0)
             self._seq = counted if counted < remembered else max(remembered, counted)
             _SEQ_BY_PATH[self._key] = self._seq
+        self._ensure_append_boundary()
         self._handle = self.path.open("a", encoding="utf-8", newline="\n")
+
+    def _ensure_append_boundary(self) -> None:
+        """给没有换行符的旧末尾补上记录边界，再往日志里追加。
+
+        进程在写完一条 JSON、但还没写换行时退出，会留下半行；完整 JSON 也可能只是
+        缺少最后的换行。两种情况下直接 append 都会把新记录粘到旧末尾上，连新事件
+        也一起变成 `read_events()` 会跳过的坏行。这里用二进制检查最后一个字节，
+        免得半行里的坏 UTF-8 在真正需要它的追加路径上再制造一次解码异常。
+        """
+        if not self.path.is_file() or self.path.stat().st_size == 0:
+            return
+        with self.path.open("rb") as handle:
+            handle.seek(-1, 2)
+            terminated = handle.read(1) in (b"\n", b"\r")
+        if not terminated:
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write("\n")
 
     # ------------------------------------------------------------------
     # 写入
     # ------------------------------------------------------------------
 
     def append(self, kind: str, **data: Any) -> dict[str, Any]:
+        # 序号分配与落盘必须同属一个临界区：先释放锁再写，另一个句柄可能先写入
+        # 更大的 seq，导致文件顺序变成 [2, 1]，违背游标依赖的递增约定。
         with _SEQ_LOCK:
             self._seq = _SEQ_BY_PATH.get(self._key, self._seq) + 1
             _SEQ_BY_PATH[self._key] = self._seq
-            seq = self._seq
-        record: dict[str, Any] = {
-            "seq": seq,
-            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "kind": kind,
-        }
-        record.update(data)
-        self._handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._handle.flush()
-        return record
+            record: dict[str, Any] = {
+                "seq": self._seq,
+                "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "kind": kind,
+            }
+            record.update(data)
+            self._handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._handle.flush()
+            return record
 
     def close(self) -> None:
         try:
@@ -176,7 +195,12 @@ class EventLog:
             )
 
         kept = _safe_slice(messages, mark.messages)
-        return summary, kept, CoveredMark(groups=0, messages=len(messages) - len(kept))
+        # 老日志只有条数水位线；这里按**实际切掉的组数**升级成组水位线。
+        # 否则下一次压缩会从 0 累计 covered_groups，让早已折叠的组重新进入上下文。
+        covered_groups = len(split_into_groups(messages)) - len(split_into_groups(kept))
+        return summary, kept, CoveredMark(
+            groups=covered_groups, messages=len(messages) - len(kept)
+        )
 
     def usage_totals(self) -> Usage:
         total = Usage()
@@ -394,13 +418,17 @@ def _build_messages(
         if kind == "user_message":
             text = str(record.get("text") or "")
             attachments = record.get("attachments") or []
+            seq = _as_seq(record)
             if message_modality(record) == "text":
                 messages.append(
-                    Message(role="user", content=render_ocr_message(text, attachments))
+                    Message(
+                        role="user",
+                        content=render_ocr_message(text, attachments),
+                        source_seq=seq,
+                    )
                 )
                 continue
-            message = Message(role="user", content=text)
-            seq = _as_seq(record)
+            message = Message(role="user", content=text, source_seq=seq)
             if seq is not None and seq in undelivered:
                 marker = render_undelivered_marker(undelivered[seq], attachments)
                 body = text.strip()

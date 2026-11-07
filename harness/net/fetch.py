@@ -541,6 +541,12 @@ def fetch_url(
                 #     而不是无限等待。要压得更紧得在连接层重设超时，代价不小。
                 if time.monotonic() > deadline:
                     raise NetError(t("net.fetch.body_timeout", seconds=f"{timeout:g}"))
+                # `iter_bytes()` 的一块可以比剩余额度大得多；先切到边界再落进列表，
+                # 否则 max_bytes 只是"停止读取的触发点"，并不是返回体的硬上限。
+                remaining_bytes = max(0, max_bytes - total)
+                if len(chunk) > remaining_bytes:
+                    chunk = chunk[:remaining_bytes]
+                    truncated_bytes = True
                 chunks.append(chunk)
                 total += len(chunk)
                 if total >= max_bytes:
@@ -565,6 +571,7 @@ def fetch_url(
 
     page = FetchedPage(url=final_url, status=status, content_type=content_type)
     if truncated_bytes:
+        page.truncated = True
         page.note = t("net.fetch.truncated_bytes", max_bytes=max_bytes)
 
     if any(kind in content_type for kind in HTML_TYPES) or (not content_type and b"<html" in body[:2000].lower()):

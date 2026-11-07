@@ -647,7 +647,7 @@ class ModelDiscoveryErrorTests(unittest.TestCase):
     URL = "https://api.example.com/v1/models"
 
     def _error(self, side_effect: object) -> str:
-        with mock.patch("harness.providers.store.urllib.request.urlopen", side_effect=side_effect):
+        with mock.patch("harness.providers.store.open_provider_request", side_effect=side_effect):
             return _failure(lambda: fetch_models("https://api.example.com/v1", "k"))
 
     def test_unreachable_is_readable_in_both_languages(self) -> None:
@@ -677,7 +677,7 @@ class ModelDiscoveryErrorTests(unittest.TestCase):
     def test_not_json_and_empty_are_readable(self) -> None:
         with i18n.use("zh"):
             with mock.patch(
-                "harness.providers.store.urllib.request.urlopen",
+                "harness.providers.store.open_provider_request",
                 lambda *a, **k: _FakeResponse(b"<html>nope</html>"),
             ):
                 self.assertEqual(
@@ -685,7 +685,7 @@ class ModelDiscoveryErrorTests(unittest.TestCase):
                     f"{self.URL} 返回的不是 JSON",
                 )
             with mock.patch(
-                "harness.providers.store.urllib.request.urlopen",
+                "harness.providers.store.open_provider_request",
                 lambda *a, **k: _FakeResponse(b'{"data": []}'),
             ):
                 self.assertEqual(
@@ -694,7 +694,7 @@ class ModelDiscoveryErrorTests(unittest.TestCase):
                 )
         with i18n.use("en"):
             with mock.patch(
-                "harness.providers.store.urllib.request.urlopen",
+                "harness.providers.store.open_provider_request",
                 lambda *a, **k: _FakeResponse(b'{"data": []}'),
             ):
                 message = _failure(lambda: fetch_models("https://api.example.com/v1", "k"))

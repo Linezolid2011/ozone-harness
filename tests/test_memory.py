@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from harness.memory import _DEAD_COLUMNS, MemoryStore
@@ -105,6 +107,42 @@ class MemoryStoreTests(unittest.TestCase):
         overflow = self.store.create("第六条")
         self.assertFalse(overflow["ok"])
         self.assertIn("上限", overflow["error"])
+
+    def _create_concurrently(
+        self, contents: tuple[str, ...], *, max_items: int
+    ) -> list[dict]:
+        """让旧实现的多个连接都在插入前完成检查；事务实现则直接串行通过。"""
+        barrier = threading.Barrier(len(contents))
+
+        class RacingStore(MemoryStore):
+            def stats(self) -> dict[str, int]:
+                result = super().stats()
+                # 新实现此时已持有写事务，不能再等另一个被 SQLite 挡住的线程。
+                if not self._conn.in_transaction:
+                    barrier.wait(timeout=5)
+                return result
+
+        def create_one(content: str) -> dict:
+            # 连接必须在使用它的请求线程里创建，和 Web 的请求局部连接一致。
+            store = RacingStore(self.tmp / "memory.db", max_items=max_items, max_chars=40)
+            try:
+                return store.create(content)
+            finally:
+                store.close()
+
+        with ThreadPoolExecutor(max_workers=len(contents)) as pool:
+            futures = [pool.submit(create_one, content) for content in contents]
+            return [future.result() for future in futures]
+
+    def test_concurrent_connections_cannot_create_duplicates(self) -> None:
+        results = self._create_concurrently(("同一条记忆", "  同一条记忆  "), max_items=5)
+        self.assertEqual(sum(bool(result["ok"]) for result in results), 1)
+        self.assertEqual(self.store.stats()["active"], 1)
+
+    def test_concurrent_connections_cannot_exceed_max_items(self) -> None:
+        results = self._create_concurrently(("第一条", "第二条"), max_items=1)
+        self.assertEqual(sum(bool(result["ok"]) for result in results), 1)
+        self.assertEqual(self.store.stats()["active"], 1)
 
     def test_full_store_error_points_at_mem_edit(self) -> None:
         """满了要"满得响"：失败信息必须带可操作的下一步（ADR-057）。

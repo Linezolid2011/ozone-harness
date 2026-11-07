@@ -28,6 +28,7 @@ from .providers.store import (
     build_provider,
     resolve_settings,
 )
+from .session_ids import session_log_path, validate_session_id
 from .tools.memory_tools import MemCreateTool, MemDeleteTool, MemEditTool
 from .tools.registry import ToolRegistry
 from .tools.time_tool import TimeTool
@@ -223,6 +224,10 @@ class Runtime:
         web: bool = True,
         web_search: bool = False,
     ) -> None:
+        # 在打开 SQLite / 工具设置之前拒绝坏 id：非法输入不应产生任何磁盘副作用。
+        # open_session() 还会再校验一次，覆盖运行中切换会话的调用。
+        if session_id is not None:
+            validate_session_id(session_id)
         # 单轮最大输出是**运行期可改**的（设置 → 常规，ADR-101）：
         # `.env` 只是种子，`data/settings.json` 里的值优先。在这里统一折算一次，
         # 循环、窗口预算、provider 都从 `self.settings` 读，不会两处读到不同的数。
@@ -322,12 +327,13 @@ class Runtime:
             raise
 
     def open_session(self, session_id: str | None = None) -> None:
+        candidate_id = new_session_id() if session_id is None else session_id
+        # 必须先于关闭旧日志和 EventLog 构造完成校验；坏 id 不能拼路径或碰磁盘。
+        path = session_log_path(self.settings.sessions_dir, candidate_id)
         if self.log is not None:
             self.log.close()
-        self.session_id = session_id or new_session_id()
-        self.log = EventLog(
-            self.settings.sessions_dir / f"{self.session_id}.jsonl", self.session_id
-        )
+        self.session_id = candidate_id
+        self.log = EventLog(path, candidate_id)
         self.log.append(
             "session_start",
             model=self.settings.model,

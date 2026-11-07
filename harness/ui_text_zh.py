@@ -434,7 +434,7 @@ MESSAGES: dict[str, str] = {
     ),
     "ui.loop.summarize_failed": "压缩失败：{error}",
     "ui.loop.wall_clock": "本轮已用时 {seconds:.0f} 秒，超过上限，已中止。",
-    "ui.loop.token_budget": "本轮累计 {tokens} token，超过单轮上限，已中止。",
+    "ui.loop.token_budget": "本轮累计 {tokens} token，达到或超过单轮上限，已中止。",
     "ui.loop.output_truncated": (
         "模型输出被 max_tokens（{max_tokens}）截断，本次结果可能不完整。"
     ),

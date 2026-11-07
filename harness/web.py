@@ -48,6 +48,9 @@ ADR-001 定了"不引入第三方包"，M5 继续遵守：用标准库 `http.ser
   直接拿去拼路径就是路径穿越：id 里只要带 ".." 和路径分隔符（Windows 上把
   分隔符换成反斜杠效果一样），`sessions_dir / f"{id}.jsonl"` 就会落到数据目录
   外面，并且**创建 / 追加 / 删除**那个文件。不合法一律 400，且不碰磁盘。
+* **默认回环服务先验 Host**（`_host_rejection()`）：GET / POST 都只接受
+  回环 IPv4、`localhost`、回环 IPv6 与当前监听端口；不做 DNS，避免重绑定。
+  显式非回环 `--host` 保持既有托管行为。
 * **改状态的 POST 先过同源闸**（`_post_rejection()`）：带了 `Origin`
   就必须和本站 Host 一致，带了 `Sec-Fetch-Site: cross-site` 就拒绝。
   为什么必须做：本服务默认无鉴权，一个网页就能跨站 POST `/api/reset`，
@@ -62,6 +65,7 @@ ADR-001 定了"不引入第三方包"，M5 继续遵守：用标准库 `http.ser
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import mimetypes
 import os
@@ -115,6 +119,7 @@ from .providers.store import (
 )
 from .reset import UnsafeDataDirError, perform_reset, preview_reset
 from .runtime import Runtime, provider_store, resolve_dream_provider, resolve_provider
+from .session_ids import SESSION_ID_PATTERN, session_log_path
 from .vault import (
     GENERATED_RELS,
     INDEX_NAME,
@@ -143,22 +148,8 @@ def _t(key: str, /, **kwargs: Any) -> str:
     return i18n.t(key, **kwargs)
 
 
-# 合法的会话 id 长什么样：字母/数字开头，后面允许字母、数字、下划线、连字符，
-# 总长 64 以内（`new_session_id()` 生成的是 `20261004-210125-a1b2` 这一形状）。
-#
-# 为什么用**白名单**而不是"把 `..` 和分隔符过滤掉"：过滤法永远会漏 ——
-# Windows 上除了 `/` 还有 `\`，还有 `C:` 这种盘符/ADS 冒号、"结尾的点和空格"
-# 会被系统悄悄吃掉、以及 `CON`/`NUL` 这类设备名。反过来，我们自己只生成
-# 这一种形状的 id，所以"合法的长什么样"是可以写死的。
-SESSION_ID_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$")
-
-# Windows 的设备名。`CON.jsonl` 这种名字即使带扩展名也仍然指向设备，
-# 不是普通文件（写进去等于写到控制台），所以顺带挡掉。
-_WINDOWS_DEVICE_NAMES = frozenset(
-    ["CON", "PRN", "AUX", "NUL"]
-    + [f"COM{i}" for i in range(1, 10)]
-    + [f"LPT{i}" for i in range(1, 10)]
-)
+# SESSION_ID_PATTERN 仍从这里 re-export，保留已有调用方；真正的白名单与路径
+# 包含关系只在 session_ids.py 实现，Web 与 Runtime 不会再各写一份。
 
 
 def _short_session_id(session_id: Any, limit: int = 64) -> str:
@@ -167,31 +158,11 @@ def _short_session_id(session_id: Any, limit: int = 64) -> str:
 
 
 def _session_path(settings: Settings, session_id: Any) -> Path | None:
-    """把请求里的 session id 解析成会话文件路径；**不合法返回 None**。
-
-    两道闸（纵深防御，不能只靠一道）：
-      1. 白名单正则 —— 挡住 `..`、路径分隔符、盘符、设备名、超长 id；
-      2. `is_relative_to(sessions_dir)` —— 万一以后有人放宽了正则，
-         最终路径也必须落在会话目录里面。
-
-    返回 None 时调用方必须直接拒绝（400），并且**不能碰磁盘**：
-    这个函数自己也不创建任何目录或文件。
-    """
-    if not isinstance(session_id, str) or not SESSION_ID_PATTERN.fullmatch(session_id):
-        return None
-    if session_id.upper() in _WINDOWS_DEVICE_NAMES:
-        return None
-    sessions_dir = Path(settings.sessions_dir)
-    candidate = sessions_dir / f"{session_id}.jsonl"
+    """Web 的 None-on-error 包装；白名单与路径包含关系由共享实现负责。"""
     try:
-        base = sessions_dir.resolve()
-        resolved = candidate.resolve()
-    except OSError:
-        # 解析不了就当作不合法：宁可 400，也不要拿着一个来路不明的路径去写文件
+        return session_log_path(settings.sessions_dir, session_id)
+    except ValueError:
         return None
-    if not resolved.is_relative_to(base):
-        return None
-    return candidate
 
 
 # --------------------------------------------------------------------------
@@ -1141,6 +1112,104 @@ def forward_event(kind: str, data: dict[str, Any]) -> tuple[str, dict[str, Any]]
 # --------------------------------------------------------------------------
 
 
+def _parse_http_authority(value: str) -> tuple[str, int] | None:
+    """解析 HTTP 的 `host[:port]`；不合法返回 None，全程不做 DNS。
+
+    本服务只有 HTTP，所以省略的端口就是 80。IPv6 必须按 HTTP 语法放在方括号里；
+    不能把带多个冒号的字符串当成 `name:port` 随便切开。端口也必须真的是当前
+    监听端口，否则 `Host: localhost:别的端口` 不能拿来冒充这次请求的目标。
+    """
+    text = value.strip()
+    if not text or any(char.isspace() for char in text):
+        return None
+
+    if text.startswith("["):
+        closing = text.find("]")
+        if closing < 0:
+            return None
+        hostname = text[1:closing]
+        remainder = text[closing + 1 :]
+        if not hostname or "%" in hostname:
+            # 回环地址不需要 zone id；不认得的形式直接拒，避免各平台解释不同。
+            return None
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            return None
+        if not isinstance(address, ipaddress.IPv6Address):
+            return None
+        normalized = address.compressed
+        has_port = bool(remainder)
+        port_text = remainder[1:] if remainder.startswith(":") else ""
+        if remainder and not remainder.startswith(":"):
+            return None
+    else:
+        if "[" in text or "]" in text or text.count(":") > 1:
+            return None
+        hostname, separator, raw_port = text.partition(":")
+        if not hostname:
+            return None
+        has_port = bool(separator)
+        port_text = raw_port if separator else ""
+        normalized = hostname.lower()
+        if normalized == "localhost.":
+            normalized = "localhost"
+        if normalized != "localhost":
+            try:
+                address = ipaddress.ip_address(normalized)
+            except ValueError:
+                return None
+            if not isinstance(address, ipaddress.IPv4Address):
+                return None
+            normalized = address.compressed
+
+    if has_port and not port_text:
+        return None
+    if port_text:
+        if not re.fullmatch(r"[0-9]+", port_text):
+            return None
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            return None
+    else:
+        port = 80
+    return normalized, port
+
+
+def _host_allowed_for_bind(host_header: str, bound_host: str, bound_port: int) -> bool:
+    """默认回环服务只认回环 Host；显式非回环监听保持原来的托管行为。
+
+    DNS 重绑定的关键不是 Origin 有没有和 Host 对上——攻击者可以让两者都叫
+    `evil.example`——而是 Host 本身是不是这个本机服务允许的名字。这里只接受
+    字面量回环 IP 与 `localhost`，绝不解析域名，所以结果不随 DNS 答案变化。
+    """
+    bind_name = bound_host.strip().lower()
+    if bind_name == "localhost.":
+        bind_name = "localhost"
+    if bind_name != "localhost":
+        try:
+            bind_address = ipaddress.ip_address(bind_name.split("%", 1)[0])
+        except ValueError:
+            # `server_address` 正常已经是解析后的 IP。真出现未知形状时宁可拒绝，
+            # 也不能把"不知道绑在哪"当成可以绕过本机 Host 闸的理由。
+            return False
+        if not bind_address.is_loopback:
+            # `--host 0.0.0.0` / 局域网地址是既有显式对外托管契约；这一层不为它
+            # 偷偷加一份回环白名单（原有的 Origin / Sec-Fetch-Site 闸仍然生效）。
+            return True
+
+    parsed = _parse_http_authority(host_header)
+    if parsed is None or parsed[1] != bound_port:
+        return False
+    hostname = parsed[0]
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 class HarnessHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = PRODUCT_SLUG
@@ -1331,6 +1400,10 @@ class HarnessHandler(BaseHTTPRequestHandler):
         self._response_started = False
         parts = urlsplit(self.path)
         try:
+            rejection = self._host_rejection()
+            if rejection is not None:
+                self._send_json({"error": rejection[1]}, rejection[0])
+                return
             if parts.path.startswith("/api/"):
                 self._api_get(parts.path, parse_qs(parts.query))
             else:
@@ -1344,7 +1417,9 @@ class HarnessHandler(BaseHTTPRequestHandler):
         self._response_started = False
         parts = urlsplit(self.path)
         try:
-            rejection = self._post_rejection()
+            # Host 闸与 POST 同源闸都在路由和读 JSON 之前；DNS 重绑定不能再靠
+            # "Origin 与恶意 Host 文字相同"混进来，GET 也一样要先过这一关。
+            rejection = self._host_rejection() or self._post_rejection()
             if rejection is not None:
                 # **先把这个请求的 body 读完再回包**：两道闸在 `_read_json()` 之前，
                 # 所以被拒的请求体还没被读过。直接回包并关连接时，客户端可能还在写 body，
@@ -1389,6 +1464,25 @@ class HarnessHandler(BaseHTTPRequestHandler):
             if not chunk:
                 return
             remaining -= len(chunk)
+
+    def _host_rejection(self) -> tuple[int, str] | None:
+        """回环监听时，在任何路由动作之前拒绝不是本机名字的 Host。"""
+        bound = self.server.server_address  # type: ignore[attr-defined]
+        bound_host, bound_port = str(bound[0]), int(bound[1])
+        hosts = self.headers.get_all("Host") or []
+        # HTTP/1.1 只能有一个 Host。两个头就算第一个是回环，也不能让不同的
+        # 下游各自挑一个解释；非回环托管则由 `_host_allowed_for_bind` 原样放行。
+        host = hosts[0].strip() if len(hosts) == 1 else ""
+        if _host_allowed_for_bind(host, bound_host, bound_port):
+            return None
+        shown_host = host or _t("web.error.host_unknown")
+        expected = f"127.0.0.1:{bound_port} / localhost:{bound_port} / [::1]:{bound_port}"
+        # 复用现有跨站文案，避免只在某一种界面语言里新增一句未经翻译的错误。
+        return 403, _t(
+            "web.error.cross_site_origin",
+            origin=f"Host: {shown_host}",
+            host=expected,
+        )
 
     def _post_rejection(self) -> tuple[int, str] | None:
         """改状态的 POST 先过两道闸；返回 (状态码, 原因) 表示要拒绝。
@@ -1892,31 +1986,36 @@ class HarnessHandler(BaseHTTPRequestHandler):
             session_id, session_path = resolved_session
             # 正在生成的会话不能删：循环还握着那个文件的句柄，
             # 在 Windows 上会变成一句看不懂的 PermissionError。
+            # 必须真的拿锁：`locked()` 与删除之间 chat 可以开跑，检查通过并不能
+            # 保证删除时仍然没人写。拿到后覆盖整个删除操作，并在响应前释放（ADR-077）。
             lock = self.server.session_lock(session_id)  # type: ignore[attr-defined]
-            if lock.locked():
+            if not lock.acquire(blocking=False):
                 self._send_json({"error": _t("web.error.session_busy_delete")}, 409)
                 return
-            deleted = delete_session(session_path)
-            # 删会话 = 连同它的附件目录一起删（契约 §2 / ADR-074）。
-            # 刻意**不碰** `events.delete_session()` 的语义：那个函数的文档写着
-            # "只做这一件事"，那条边界是被 ADR 保护过的 —— 扩展放在调用方这一层。
-            removed = 0
-            warning = ""
             try:
-                removed = attachments.delete_session_attachments(settings, session_id)
-            except attachments.AttachmentError as exc:
-                # 会话已经删了，附件却没删掉：如实说出来，绝不假装干净。
-                # （静默降级会让"删了会话但图还在磁盘上"这件事永远没人发现。）
-                warning = str(exc)
-            response: dict[str, Any] = {
-                "ok": deleted,
-                "session_id": session_id,
-                "attachments": removed,
-            }
-            if warning:
-                response["warning"] = _t(
-                    "web.error.session_attachments_left", error=warning
-                )
+                deleted = delete_session(session_path)
+                # 删会话 = 连同它的附件目录一起删（契约 §2 / ADR-074）。
+                # 刻意**不碰** `events.delete_session()` 的语义：那个函数的文档写着
+                # "只做这一件事"，那条边界是被 ADR 保护过的 —— 扩展放在调用方这一层。
+                removed = 0
+                warning = ""
+                try:
+                    removed = attachments.delete_session_attachments(settings, session_id)
+                except attachments.AttachmentError as exc:
+                    # 会话已经删了，附件却没删掉：如实说出来，绝不假装干净。
+                    # （静默降级会让"删了会话但图还在磁盘上"这件事永远没人发现。）
+                    warning = str(exc)
+                response: dict[str, Any] = {
+                    "ok": deleted,
+                    "session_id": session_id,
+                    "attachments": removed,
+                }
+                if warning:
+                    response["warning"] = _t(
+                        "web.error.session_attachments_left", error=warning
+                    )
+            finally:
+                lock.release()
             self._send_json(response)
             return
 
@@ -1926,32 +2025,39 @@ class HarnessHandler(BaseHTTPRequestHandler):
                 return
             session_id, session_path = resolved_session
             # 正在生成的会话不能分叉：循环还握着那个文件的句柄（同 delete 的理由）。
+            # 与 delete 一样，非阻塞拿锁才足以消除"检查之后、复制之前"的竞态。
             lock = self.server.session_lock(session_id)  # type: ignore[attr-defined]
-            if lock.locked():
+            if not lock.acquire(blocking=False):
                 self._send_json({"error": _t("web.error.session_busy_fork")}, 409)
                 return
-            raw_seq = payload.get("seq")
+            status = 200
             try:
-                before_seq = int(raw_seq)
-            except (TypeError, ValueError):
-                self._send_json({"error": _t("web.error.fork_bad_seq")}, 400)
-                return
-            if before_seq <= 0:
-                self._send_json({"error": _t("web.error.fork_bad_seq")}, 400)
-                return
-            try:
-                new_sid, new_path = fork_session(settings, session_id, before_seq)
-            except ValueError as exc:
-                # fork_session 里的校验失败（seq 不是一条用户消息 / 前面没有上下文）。
-                self._send_json({"error": str(exc)}, 400)
-                return
-            self._send_json(
-                {
-                    "ok": True,
-                    "session_id": new_sid,
-                    "title": session_display_title(new_path),
-                }
-            )
+                raw_seq = payload.get("seq")
+                try:
+                    before_seq = int(raw_seq)
+                except (TypeError, ValueError):
+                    before_seq = 0
+                if before_seq <= 0:
+                    status = 400
+                    response = {"error": _t("web.error.fork_bad_seq")}
+                else:
+                    try:
+                        new_sid, new_path = fork_session(settings, session_id, before_seq)
+                    except ValueError as exc:
+                        # fork_session 里的校验失败（seq 不是一条用户消息 / 前面没有上下文）。
+                        status = 400
+                        response = {"error": str(exc)}
+                    else:
+                        response = {
+                            "ok": True,
+                            "session_id": new_sid,
+                            "title": session_display_title(new_path),
+                        }
+            finally:
+                lock.release()
+            # 所有成功/400 响应都在锁外发：客户端收到后可能立刻发起下一次操作，
+            # 不能让它碰到一把实际上已经结束、却还没来得及释放的锁（ADR-077）。
+            self._send_json(response, status)
             return
 
         if path == "/api/vault/file" or path == "/api/vault/file/delete":

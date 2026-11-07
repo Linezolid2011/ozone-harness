@@ -370,13 +370,10 @@ class MemoryStore:
     def rewind_cursor(self, session_id: str, last_seq: int, run_id: str = "") -> None:
         """把游标**退**到某个值。
 
-        ⚠️ **现在没有任何调用点**（ADR-065 取消了 dream 的回滚能力 ——
-        回滚是唯一需要退游标的场景）。留着它是因为"整理进度"迟早会需要一次
-        **人工**纠正（比如你把某份会话日志换掉了），而那时必须有一个显式的入口，
-        而不是让谁去 UPDATE 数据库。
-
-        它和 `advance_cursor` 一样危险，所以：**只能人工调用，
-        不能出现在任何自动流程里**（这也是为什么没有任何地方调它）。
+        正常整理绝不能退游标（ADR-065 取消了 dream 的回滚能力）。唯一的自动例外是
+        DreamRunner 已机械检测到日志变短：旧高水位指向的已不是这份文件，成功从头
+        重读后必须先清掉旧值，才能保存新日志的真实进度。其余场景只供人工纠正，
+        不能用来撤销一次整理。
         """
         session_id = str(session_id or "").strip()
         if not session_id:
@@ -485,34 +482,37 @@ class MemoryStore:
         if error:
             return {"ok": False, "error": error}
 
-        duplicate = self.find_active_by_content(content)
-        if duplicate is not None:
-            return {
-                "ok": False,
-                "error": t("ui.memory.duplicate"),
-                "existing_id": duplicate.id,
-                "hint": t("ui.memory.duplicate_hint"),
-            }
-
-        active_count = self.stats()["active"]
-        if active_count >= self.max_items:
-            # **满了要满得响**（ADR-057）：不悄悄丢掉最旧的那条，而是直接失败，
-            # 并把"现在几条 / 上限几条 / 你还能做什么"一次说清 ——
-            # 模型看到这句话才知道该去 mem_edit 合并，而不是反复重试。
-            return {
-                "ok": False,
-                "error": t(
-                    "ui.memory.too_many",
-                    count=active_count,
-                    limit=self.max_items,
-                ),
-                "active_count": active_count,
-                "max_items": self.max_items,
-                "hint": t("ui.memory.too_many_hint"),
-            }
-
         now = _now()
         with self._conn:
+            # Web 的每个请求各有连接；`with` 本身只会延迟到第一条写入才开事务，
+            # 查重和计数仍会留出竞态窗口。先抢写锁，让检查与插入落在同一事务里。
+            self._conn.execute("BEGIN IMMEDIATE")
+            duplicate = self.find_active_by_content(content)
+            if duplicate is not None:
+                return {
+                    "ok": False,
+                    "error": t("ui.memory.duplicate"),
+                    "existing_id": duplicate.id,
+                    "hint": t("ui.memory.duplicate_hint"),
+                }
+
+            active_count = self.stats()["active"]
+            if active_count >= self.max_items:
+                # **满了要满得响**（ADR-057）：不悄悄丢掉最旧的那条，而是直接失败，
+                # 并把"现在几条 / 上限几条 / 你还能做什么"一次说清 ——
+                # 模型看到这句话才知道该去 mem_edit 合并，而不是反复重试。
+                return {
+                    "ok": False,
+                    "error": t(
+                        "ui.memory.too_many",
+                        count=active_count,
+                        limit=self.max_items,
+                    ),
+                    "active_count": active_count,
+                    "max_items": self.max_items,
+                    "hint": t("ui.memory.too_many_hint"),
+                }
+
             cursor = self._conn.execute(
                 "INSERT INTO memories (content, category, status, revision, created_at,"
                 " updated_at, session_id, turn)"
@@ -544,57 +544,63 @@ class MemoryStore:
         content: str | None = None,
         category: str | None = None,
     ) -> dict[str, Any]:
-        item = self.get(memory_id)
-        if item is None:
-            return {
-                "ok": False,
-                "error": t("ui.memory.no_such_id", id=memory_id),
-                "hint": t("ui.memory.edit_missing_hint"),
-            }
-        if content is None and category is None:
-            return {"ok": False, "error": t("ui.memory.need_a_field")}
-
-        new_content = item.content if content is None else (content or "").strip()
-        new_category = item.category if category is None else ((category or "").strip() or item.category)
-
-        if content is not None:
-            error = self._validate_content(new_content)
-            if error:
-                return {"ok": False, "error": error}
-            duplicate = self.find_active_by_content(new_content, exclude_id=memory_id)
-            if duplicate is not None:
+        with self._conn:
+            # 编辑也能把另一条内容改成重复值，因此与 create 共用同一条串行化边界。
+            self._conn.execute("BEGIN IMMEDIATE")
+            item = self.get(memory_id)
+            if item is None:
                 return {
                     "ok": False,
-                    "error": t("ui.memory.edit_duplicate"),
-                    "existing_id": duplicate.id,
-                    "hint": t("ui.memory.edit_duplicate_hint"),
+                    "error": t("ui.memory.no_such_id", id=memory_id),
+                    "hint": t("ui.memory.edit_missing_hint"),
+                }
+            if content is None and category is None:
+                return {"ok": False, "error": t("ui.memory.need_a_field")}
+
+            new_content = item.content if content is None else (content or "").strip()
+            new_category = (
+                item.category
+                if category is None
+                else ((category or "").strip() or item.category)
+            )
+
+            if content is not None:
+                error = self._validate_content(new_content)
+                if error:
+                    return {"ok": False, "error": error}
+                duplicate = self.find_active_by_content(new_content, exclude_id=memory_id)
+                if duplicate is not None:
+                    return {
+                        "ok": False,
+                        "error": t("ui.memory.edit_duplicate"),
+                        "existing_id": duplicate.id,
+                        "hint": t("ui.memory.edit_duplicate_hint"),
+                    }
+
+            if new_content == item.content and new_category == item.category:
+                return {
+                    "ok": True,
+                    "id": memory_id,
+                    "content": item.content,
+                    "revision": item.revision,
+                    "note": t("ui.memory.unchanged"),
                 }
 
-        if new_content == item.content and new_category == item.category:
-            return {
-                "ok": True,
-                "id": memory_id,
-                "content": item.content,
-                "revision": item.revision,
-                "note": t("ui.memory.unchanged"),
-            }
-
-        now = _now()
-        with self._conn:
+            now = _now()
             self._conn.execute(
                 "UPDATE memories SET content = ?, category = ?, revision = revision + 1,"
                 " updated_at = ?, session_id = ?, turn = ? WHERE id = ?",
                 (new_content, new_category, now, self._session_id, self._turn, memory_id),
             )
             self._log_op(memory_id, "edit", item.content, new_content)
-        return {
-            "ok": True,
-            "id": memory_id,
-            "content": new_content,
-            "category": new_category,
-            "revision": item.revision + 1,
-            "note": t("ui.memory.updated"),
-        }
+            return {
+                "ok": True,
+                "id": memory_id,
+                "content": new_content,
+                "category": new_category,
+                "revision": item.revision + 1,
+                "note": t("ui.memory.updated"),
+            }
 
     def delete(
         self, memory_id: int, reason: str | None = None, *, op: str = "delete"

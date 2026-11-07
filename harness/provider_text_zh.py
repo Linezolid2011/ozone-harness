@@ -100,6 +100,7 @@ MESSAGES: dict[str, str] = {
     "provider.http.error": "{label} 返回错误：{message}",
     "provider.http.status": "{label} 返回 HTTP {status}：{detail}",
     "provider.http.network": "{label} 网络错误：{detail}",
+    "provider.http.incomplete_stream": "SSE 流在结束事件之前中断；请重试",
     "provider.http.unknown_failure": "未知的请求失败",
     "provider.http.not_sse": "{label} 的响应不是 SSE 流，原始内容：{preview}",
     "provider.http.empty_body": "(空)",

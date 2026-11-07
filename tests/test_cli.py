@@ -16,11 +16,14 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from harness import cli
 from harness.events import EventLog
 from harness.memory import open_memory
+from harness.providers.store import ProviderProfile, ProviderStore
+from harness.session_ids import validate_session_id
 from harness.vault import VaultStore
 
 from .helpers import test_settings
@@ -150,6 +153,68 @@ class CliSmokeTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn(name, source, f"main() 里没引用 {name}")
                 self.assertTrue(callable(getattr(cli, name, None)), f"{name} 不是可调用对象")
+
+
+class SessionIdValidationTests(unittest.TestCase):
+    """CLI 与运行中共用 Runtime 的会话路径闸；这些测试不发送模型请求。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        # data 单独放一层，`../../victim` 的目标就逃出 data、却仍留在测试临时目录里。
+        self.settings = test_settings(self.tmp / "data")
+        store = ProviderStore(self.settings.data_dir / "providers.json")
+        store.upsert(ProviderProfile(
+            id="fake", label="Fake", base_url="http://127.0.0.1:1",
+            api_key="offline-key", models=["fake-model"],
+        ))
+        self.args = SimpleNamespace(provider="fake", model="fake-model", effort="")
+
+    def test_cli_rejects_traversal_before_creating_a_session_file(self) -> None:
+        outside = self.tmp / "victim.jsonl"
+        with self.assertRaises(ValueError):
+            cli.open_runtime(self.settings, self.args, "../../victim")
+        self.assertFalse(outside.is_file(), "非法 id 不能在 data/ 外写事件日志")
+        self.assertFalse(self.settings.sessions_dir.exists(), "非法 id 不应创建会话目录")
+
+    def test_valid_cli_session_id_creates_the_expected_log(self) -> None:
+        runtime = cli.open_runtime(self.settings, self.args, "valid_session-1")
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        try:
+            self.assertEqual(runtime.session_id, "valid_session-1")
+            path = self.settings.sessions_dir / "valid_session-1.jsonl"
+            self.assertTrue(path.is_file())
+            self.assertTrue(path.resolve().is_relative_to(self.settings.data_dir.resolve()))
+        finally:
+            runtime.close()
+
+    def test_runtime_reopen_rejects_traversal_without_replacing_current_log(self) -> None:
+        runtime = cli.open_runtime(self.settings, self.args, "current-session")
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        try:
+            current_log = runtime.log
+            with self.assertRaises(ValueError):
+                runtime.open_session("../../victim")
+            self.assertIs(runtime.log, current_log, "坏 id 不该关掉或替换当前日志")
+            self.assertEqual(runtime.session_id, "current-session")
+            self.assertFalse((self.tmp / "victim.jsonl").exists())
+        finally:
+            runtime.close()
+
+    def test_session_id_allowlist_boundaries(self) -> None:
+        for valid in ("a", "A_-", "20261004-210125-a1b2", "a" * 64):
+            with self.subTest(valid=valid):
+                self.assertEqual(validate_session_id(valid), valid)
+        for invalid in (
+            "", ".", "..", "../victim", "..\\victim", "C:victim", "has space",
+            "é", "a" * 65, "CON", "nul", "COM1", "LPT9",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    validate_session_id(invalid)
 
 
 class AttachmentGcCliTests(unittest.TestCase):

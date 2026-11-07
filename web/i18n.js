@@ -670,6 +670,8 @@ const I18N = {
   "reset.unit_ops": ` · {n} 条操作记录`,   // app.js:4309
   "reset.unit_dream_runs": `{n} 次整理运行`,   // app.js:4310
   "reset.unit_files": `{n} 个文件`,   // app.js:4311
+  "reset.row_attachments": '附件文件',
+  "reset.row_prompt_overrides": '提示词覆盖',
   "reset.row_providers_short": '接口配置',   // app.js:4312
   "reset.unit_providers_with_keys": `{n} 个（含 API key）`,   // app.js:4312
   "reset.row_disk": '占用空间',   // app.js:4313
@@ -1527,6 +1529,8 @@ Done: {n} created · `,   // app.js:3721
   "reset.unit_ops": " · {n} operations",   // app.js:4309
   "reset.unit_dream_runs": "{n} dream runs",   // app.js:4310
   "reset.unit_files": "{n} files",   // app.js:4311
+  "reset.row_attachments": "Attachment files",
+  "reset.row_prompt_overrides": "Prompt overrides",
   "reset.row_providers_short": "Provider settings",   // app.js:4312
   "reset.unit_providers_with_keys": "{n} (API keys included)",   // app.js:4312
   "reset.row_disk": "Disk usage",   // app.js:4313

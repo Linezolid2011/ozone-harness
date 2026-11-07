@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from typing import Any, Iterator, Sequence
@@ -209,6 +210,19 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(outcome.steps, 1, "预算熔断时不应把未执行的迭代算进步数")
         self.assertEqual(len(harness.provider.calls), 1)
 
+    def test_token_budget_breaker_stops_at_the_exact_cap(self) -> None:
+        """达到上限就已经没有下一次调用的预算，不是必须超过才停。"""
+        script = [
+            tool_reply([("c1", "mem_create", '{"content":"x"}')], use=usage(total=30)),
+            text_reply("不该走到这里"),
+        ]
+        harness = self.harness(script, max_tokens_per_turn=30)
+
+        outcome = harness.loop.run("刚好到上限")
+
+        self.assertEqual(outcome.stop_reason, "token_budget")
+        self.assertEqual(len(harness.provider.calls), 1)
+
     def test_wall_clock_breaker(self) -> None:
         script = [tool_reply([("c1", "mem_create", '{"content":"x"}')]) for _ in range(4)]
         harness = self.harness(script, max_wall_seconds=0.0)
@@ -253,6 +267,85 @@ class LoopTests(unittest.TestCase):
         # 重放出的 assistant 消息里必须带着 tool_calls，重建上下文才不会断链
         self.assertEqual(replayed[1].tool_calls[0].name, "mem_create")
         self.assertEqual(replayed[2].tool_call_id, "c1")
+
+    def test_append_after_an_unterminated_line_preserves_the_new_event(self) -> None:
+        """半行或完整的无换行末尾，都不能把下一条正常事件粘成坏 JSON。"""
+        for name, tail, expected in (
+            ("partial", '{"seq": 2, "kind": "user_mess', ["已有", "新事件"]),
+            (
+                "complete",
+                '{"seq": 2, "kind": "user_message", "text": "完整但没换行"}',
+                ["已有", "完整但没换行", "新事件"],
+            ),
+        ):
+            with self.subTest(name=name):
+                path = self.tmp / "sessions" / f"{name}.jsonl"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    '{"seq": 1, "kind": "user_message", "text": "已有"}\n' + tail,
+                    encoding="utf-8",
+                )
+
+                log = EventLog(path, name)
+                try:
+                    appended = log.append("user_message", text="新事件")
+                finally:
+                    log.close()
+
+                self.assertEqual(appended["seq"], 3, "末尾一行也占过序号，不能复用")
+                events = log.read_events()
+                self.assertEqual([event["text"] for event in events], expected)
+
+    def test_concurrent_handles_preserve_seq_order_in_the_file(self) -> None:
+        """序号 1 已分配但尚未落盘时，序号 2 不能抢先写入。"""
+        path = self.tmp / "sessions" / "ordered.jsonl"
+        first = EventLog(path, "ordered")
+        second = EventLog(path, "ordered")
+        entered = threading.Event()
+        release = threading.Event()
+        second_attempt = threading.Event()
+        second_finished = threading.Event()
+
+        class BlockingWriter:
+            def __init__(self, inner: Any) -> None:
+                self.inner = inner
+
+            def write(self, text: str) -> int:
+                entered.set()
+                release.wait(5)
+                return self.inner.write(text)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+        first._handle = BlockingWriter(first._handle)  # type: ignore[assignment]
+
+        def append_second() -> None:
+            second_attempt.set()
+            second.append("session_title", title="后分配")
+            second_finished.set()
+
+        first_thread = threading.Thread(target=first.append, args=("user_message",), kwargs={"text": "先分配"})
+        second_thread = threading.Thread(target=append_second)
+        try:
+            first_thread.start()
+            self.assertTrue(entered.wait(5))
+            second_thread.start()
+            self.assertTrue(second_attempt.wait(5))
+            self.assertFalse(
+                second_finished.wait(0.1),
+                "第二个句柄越过了尚未落盘的较小 seq",
+            )
+        finally:
+            release.set()
+            first_thread.join(5)
+            second_thread.join(5)
+            first.close()
+            second.close()
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertEqual([event["seq"] for event in first.read_events()], [1, 2])
 
     def test_memory_is_fully_injected_at_any_size(self) -> None:
         """**任何规模都全量注入**（ADR-058）：条数上限就是那道闸。
@@ -451,6 +544,40 @@ class ToolCallIntegrityTests(unittest.TestCase):
             ),
             [],
         )
+
+    def test_disconnect_after_a_real_tool_result_does_not_duplicate_it(self) -> None:
+        """结果已经落盘、仅 UI 发送失败时，不能再给同一个调用补一条失败结果。"""
+        harness = self.harness(
+            [
+                tool_reply(
+                    [
+                        ("c1", "mem_create", '{"content":"一"}'),
+                        ("c2", "mem_create", '{"content":"二"}'),
+                    ]
+                )
+            ]
+        )
+
+        def disconnect(kind: str, **data: Any) -> None:
+            if kind == "tool_result":
+                raise KeyboardInterrupt("模拟客户端在结果帧断开")
+
+        harness.loop.emit = disconnect
+        with self.assertRaises(KeyboardInterrupt):
+            harness.loop.run("记两条")
+
+        results = [
+            record
+            for record in harness.log.read_events()
+            if record.get("kind") == "tool_call"
+        ]
+        by_id: dict[str, list[dict[str, Any]]] = {}
+        for record in results:
+            by_id.setdefault(str(record["tool_call_id"]), []).append(record)
+        self.assertEqual(len(by_id["c1"]), 1, "真实结果已经落盘，不许再补桩")
+        self.assertTrue(by_id["c1"][0]["ok"])
+        self.assertEqual(len(by_id["c2"]), 1, "未执行的第二条仍要补桩")
+        self.assertTrue(by_id["c2"][0]["skipped"])
 
     def test_replay_repairs_a_log_that_was_already_broken(self) -> None:
         """历史里已经写坏的日志（旧版本留下的悬空 tool_calls）在重放时被补桩。"""

@@ -31,7 +31,7 @@ from ..llm_types import (
     ToolCallDelta,
     Usage,
 )
-from .base import ProviderError
+from .base import ProviderError, open_provider_request
 
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 _MAX_ATTEMPTS = 3
@@ -41,16 +41,26 @@ def _usage_from_api(raw: dict[str, Any] | None) -> Usage | None:
     if not raw:
         return None
     details = raw.get("completion_tokens_details") or {}
+    prompt_details = raw.get("prompt_tokens_details") or {}
     prompt_tokens = int(raw.get("prompt_tokens") or 0)
     completion_tokens = int(raw.get("completion_tokens") or 0)
     total = int(raw.get("total_tokens") or 0) or (prompt_tokens + completion_tokens)
+    cached = raw.get("prompt_cache_hit_tokens")
+    if cached is None:
+        cached = prompt_details.get("cached_tokens")
+    cached_tokens = int(cached or 0)
+    cache_miss = raw.get("prompt_cache_miss_tokens")
+    # 只有供应商没给 miss 时才补算；显式的 0 也是真实数据，不能再加一遍。
+    cache_miss_tokens = (
+        prompt_tokens - cached_tokens if cache_miss is None else int(cache_miss or 0)
+    )
     return Usage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total,
         reasoning_tokens=int(details.get("reasoning_tokens") or 0),
-        cached_tokens=int(raw.get("prompt_cache_hit_tokens") or 0),
-        cache_miss_tokens=int(raw.get("prompt_cache_miss_tokens") or 0),
+        cached_tokens=cached_tokens,
+        cache_miss_tokens=cache_miss_tokens,
     )
 
 
@@ -63,6 +73,7 @@ class OpenAICompatProvider:
         *,
         label: str = "",
         send_reasoning_content: bool = False,
+        include_usage: bool = False,
     ) -> None:
         # `label` 是**显示名**，会出现在"{label} 返回 HTTP …"这类报错里。
         # 空串 = 用当前语言的默认名（**现取**：语言是运行期可切的，
@@ -74,19 +85,30 @@ class OpenAICompatProvider:
         self.label = label
         self.name = label
         self._send_reasoning = send_reasoning_content
+        self._include_usage = include_usage
 
     # ------------------------------------------------------------------
     # 请求构造
     # ------------------------------------------------------------------
 
+    def _filter_message_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # 实际请求与 prompt 审计共用同一个过滤点，避免日志里出现并未发送的思维链。
+        filtered = dict(payload)
+        if not self._send_reasoning:
+            filtered.pop("reasoning_content", None)
+        return filtered
+
     def _message_payload(self, message: Message) -> dict[str, Any]:
         # 带图 user 消息的 content 块数组（text + image_url data URL）由
         # `Message.to_api()` 产出 —— 这里刻意**不再加工**：图片块的形状只有一处
         # 定义，才不会有"某个 provider 忘了带图"这种静默丢图。
-        payload = message.to_api()
-        if not self._send_reasoning:
-            payload.pop("reasoning_content", None)
-        return payload
+        return self._filter_message_payload(message.to_api())
+
+    def filter_prompt_records(
+        self, records: Sequence[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """对**已经脱敏**的消息应用与实际请求相同的字段过滤。"""
+        return [self._filter_message_payload(record) for record in records]
 
     def build_payload(
         self,
@@ -107,6 +129,8 @@ class OpenAICompatProvider:
             payload["max_tokens"] = int(wanted)
         if tools:
             payload["tools"] = list(tools)
+        if self._include_usage:
+            payload["stream_options"] = {"include_usage": True}
         if self._settings.reasoning_effort:
             payload["reasoning_effort"] = self._settings.reasoning_effort
         return payload
@@ -142,7 +166,7 @@ class OpenAICompatProvider:
                     t("provider.store.base_url_scheme")
                 ) from exc
             try:
-                with urllib.request.urlopen(
+                with open_provider_request(
                     request, timeout=self._settings.request_timeout
                 ) as response:
                     for event in self._parse_sse(response):
@@ -176,6 +200,7 @@ class OpenAICompatProvider:
 
     def _parse_sse(self, response: Any) -> Iterator[StreamEvent]:
         saw_payload = False
+        finished = False
         raw_preview: list[str] = []
 
         for raw_line in response:
@@ -190,8 +215,8 @@ class OpenAICompatProvider:
             saw_payload = True
             data = line[5:].strip()
             if data == "[DONE]":
-                yield Finished(reason=None, usage=None)
-                return
+                # DONE 只是协议标记，不是模型已经给出终止块的证据。
+                break
 
             try:
                 chunk = json.loads(data)
@@ -214,6 +239,7 @@ class OpenAICompatProvider:
 
             if not choices:
                 if usage is not None:
+                    finished = True
                     yield Finished(reason=None, usage=usage)
                 continue
 
@@ -239,6 +265,7 @@ class OpenAICompatProvider:
 
             finish_reason = choice.get("finish_reason")
             if finish_reason or usage is not None:
+                finished = True
                 yield Finished(reason=finish_reason, usage=usage)
 
         if not saw_payload:
@@ -248,6 +275,14 @@ class OpenAICompatProvider:
                     "provider.http.not_sse",
                     label=self.label,
                     preview=preview or t("provider.http.empty_body"),
+                )
+            )
+        if not finished:
+            raise ProviderError(
+                t(
+                    "provider.http.network",
+                    label=self.label,
+                    detail=t("provider.http.incomplete_stream"),
                 )
             )
 

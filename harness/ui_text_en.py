@@ -501,7 +501,8 @@ MESSAGES: dict[str, str] = {
     "ui.loop.summarize_failed": "Compression failed: {error}",
     "ui.loop.wall_clock": "This turn has run for {seconds:.0f} seconds, over the limit; aborted.",
     "ui.loop.token_budget": (
-        "This turn has used {tokens} tokens in total, over the per-turn limit; aborted."
+        "This turn has used {tokens} tokens in total, reaching or exceeding the per-turn "
+        "limit; aborted."
     ),
     "ui.loop.output_truncated": (
         "The model's output was cut off by max_tokens ({max_tokens}); the result may be incomplete."

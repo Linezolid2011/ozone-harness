@@ -13,9 +13,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
+from harness import i18n
 from harness.llm_types import (
     Finished,
+    ImagePart,
     Message,
     ReasoningDelta,
     StreamAssembler,
@@ -23,7 +26,7 @@ from harness.llm_types import (
     ToolCall,
 )
 from harness.providers.anthropic_compat import AnthropicCompatProvider, _messages_url
-from harness.providers.base import ProviderError
+from harness.providers.base import ProviderError, record_prompt
 from harness.providers.store import ProviderProfile, build_provider
 
 from .helpers import test_settings
@@ -76,6 +79,29 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(payload["system"], "规则一\n\n核心记忆")
         self.assertEqual(len(payload["messages"]), 1)
         self.assertNotIn("system", [m["role"] for m in payload["messages"]])
+
+    def test_prompt_record_drops_unsent_reasoning_without_reading_images(self) -> None:
+        ghost = ImagePart(
+            path=Path(self._tmp.name) / "不存在.png",
+            mime="image/png",
+            name="ghost.png",
+            width=10,
+            height=20,
+            id="ghost",
+        )
+
+        records = record_prompt(
+            self.provider,
+            [
+                Message(role="user", content="看图", images=[ghost]),
+                Message(role="assistant", content="答", reasoning="不会回传"),
+            ],
+        )
+
+        blob = json.dumps(records, ensure_ascii=False)
+        self.assertNotIn("base64", blob)
+        self.assertNotIn("reasoning_content", blob)
+        self.assertEqual(records[0]["attachments"][0]["id"], "ghost")
 
     def test_tool_calls_become_tool_use_blocks(self) -> None:
         payload = self.provider.build_payload(
@@ -220,6 +246,11 @@ class SseParsingTests(unittest.TestCase):
                         index=0,
                         delta={"type": "thinking_delta", "thinking": "想一下"},
                     ),
+                    _event(
+                        "message_delta",
+                        delta={"stop_reason": "end_turn"},
+                        usage={"output_tokens": 1},
+                    ),
                 ]
             )
         )
@@ -259,16 +290,56 @@ class SseParsingTests(unittest.TestCase):
                     _event("ping"),
                     _event("message_start", message={"usage": {"input_tokens": 3}}),
                     _event("content_block_delta", index=0, delta={"type": "text_delta", "text": "ok"}),
+                    _event(
+                        "message_delta",
+                        delta={"stop_reason": "end_turn"},
+                        usage={"output_tokens": 1},
+                    ),
                     _event("message_stop"),
                 ]
             )
         )
         self.assertEqual([e.text for e in events if isinstance(e, TextDelta)], ["ok"])
-        # 即使没有 message_delta，也必须补一个 Finished：
-        # 上层约定"最后一个事件一定是 Finished"，否则这一轮的用量会记成 0
         finished = [e for e in events if isinstance(e, Finished)]
         self.assertEqual(len(finished), 1)
         self.assertEqual(finished[0].reason, "stop")
+
+    def test_eof_or_message_stop_without_message_delta_is_truncated(self) -> None:
+        for suffix in ([], [_event("message_stop")]):
+            with self.subTest(suffix=suffix):
+                lines = [
+                    _event("message_start", message={"usage": {"input_tokens": 3}}),
+                    _event(
+                        "content_block_delta",
+                        index=0,
+                        delta={"type": "text_delta", "text": "partial"},
+                    ),
+                    *suffix,
+                ]
+                with i18n.use("en"):
+                    with self.assertRaises(ProviderError) as ctx:
+                        list(self.provider._parse_sse(lines))
+                self.assertIn("terminal", str(ctx.exception))
+
+    def test_stream_uses_the_safe_open_helper(self) -> None:
+        response = mock.MagicMock()
+        response.__iter__.return_value = iter(
+            [
+                _event(
+                    "message_delta",
+                    delta={"stop_reason": "end_turn"},
+                    usage={"output_tokens": 1},
+                )
+            ]
+        )
+        with mock.patch(
+            "harness.providers.anthropic_compat.open_provider_request"
+        ) as safe_open:
+            safe_open.return_value.__enter__.return_value = response
+            events = list(self.provider.stream([Message(role="user", content="hi")]))
+        self.assertTrue(any(isinstance(event, Finished) for event in events))
+        request = safe_open.call_args.args[0]
+        self.assertEqual(request.get_header("X-api-key"), "k")
 
     def test_missing_key_fails_fast(self) -> None:
         with self.assertRaises(ProviderError):

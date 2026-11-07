@@ -11,7 +11,9 @@ from __future__ import annotations
 import base64
 import io
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -165,6 +167,47 @@ class StoreFormatTests(TempDataCase):
             declared_mime="image/png",
         )
         self.assertEqual(record["warnings"], [])
+
+
+# --------------------------------------------------------------------------
+# 原子写：同进程并发也不能共享临时文件
+# --------------------------------------------------------------------------
+
+
+class AtomicWriteTests(TempDataCase):
+    def test_concurrent_writers_use_independent_temp_files(self) -> None:
+        path = self.tmp / "attachments" / "s1" / "same.png"
+        path.parent.mkdir(parents=True)
+        barrier = threading.Barrier(2)
+        sources: list[str] = []
+        sources_lock = threading.Lock()
+        synchronized: set[str] = set()
+        real_replace = attachments.os.replace
+
+        def replace_together(src, dst):
+            name = Path(src).name
+            with sources_lock:
+                sources.append(name)
+                first_attempt = name not in synchronized
+                synchronized.add(name)
+            # 只同步每个临时文件的第一次 replace。Windows 允许生产代码在短暂
+            # PermissionError 后重试；重试若再等同一个 barrier 反而会把它弄坏。
+            if first_attempt:
+                barrier.wait(timeout=10)
+            return real_replace(src, dst)
+
+        with mock.patch.object(attachments.os, "replace", side_effect=replace_together):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(attachments._atomic_write, path, b"same")
+                    for _ in range(2)
+                ]
+                for future in futures:
+                    future.result(timeout=10)
+
+        self.assertEqual(path.read_bytes(), b"same")
+        self.assertEqual(len(set(sources)), 2, "两个写入仍然共享了临时文件名")
+        self.assertEqual(list(path.parent.glob(".*.tmp")), [])
 
 
 # --------------------------------------------------------------------------
@@ -570,6 +613,35 @@ class GcTests(TempDataCase):
         # 空掉的会话目录会被收掉，但留着文件的那个目录必须还在
         self.assertFalse(orphan.parent.exists())
         self.assertTrue(referenced.parent.exists())
+
+    def test_apply_rechecks_references_before_deleting(self) -> None:
+        """报告生成后才出现的引用也必须保住文件，不能按过期快照 unlink。"""
+        _referenced, orphan = self._seed()
+        original_report = attachments.gc_report
+
+        def report_then_reference(settings):
+            report = original_report(settings)
+            log = EventLog(self.settings.sessions_dir / "s2.jsonl", "s2")
+            try:
+                log.append(
+                    "user_message",
+                    text="现在引用了这张图",
+                    attachments=[
+                        {
+                            "id": "b" * 16,
+                            "file": orphan.relative_to(self.tmp).as_posix(),
+                        }
+                    ],
+                )
+            finally:
+                log.close()
+            return report
+
+        with mock.patch.object(attachments, "gc_report", side_effect=report_then_reference):
+            result = gc_apply(self.settings)
+
+        self.assertTrue(orphan.is_file(), "GC 删掉了报告生成后已经被引用的图片")
+        self.assertNotIn(orphan.relative_to(self.tmp).as_posix(), result["deleted"])
 
     def test_report_is_read_only(self) -> None:
         _referenced, orphan = self._seed()

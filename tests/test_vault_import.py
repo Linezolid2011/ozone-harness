@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from harness.vault import VaultStore
 from harness.vault_import import VaultImportError, import_vault_zip
@@ -113,6 +115,46 @@ class ImportTests(unittest.TestCase):
             archive.writestr(info, "target")
         with self.assertRaises(VaultImportError):
             import_vault_zip(bad, self.store)
+
+    def test_rejects_exact_duplicate_paths(self) -> None:
+        bad = self.tmp / "duplicate.zip"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            with zipfile.ZipFile(bad, "w") as archive:
+                archive.writestr("entities/same.md", "first")
+                archive.writestr("entities/same.md", "second")
+        with self.assertRaises(VaultImportError):
+            import_vault_zip(bad, self.store)
+        self.assertFalse(self.store.root.exists())
+
+    def test_copy_failure_leaves_existing_vault_unchanged(self) -> None:
+        self.store.root.mkdir(parents=True)
+        (self.store.root / "README.md").write_text("old readme", encoding="utf-8")
+        (self.store.root / "entities").mkdir()
+        (self.store.root / "entities" / "old.md").write_text("keep", encoding="utf-8")
+        before = {
+            path.relative_to(self.store.root): path.read_bytes()
+            for path in self.store.root.rglob("*")
+            if path.is_file()
+        }
+
+        def copy_then_fail(source, destination, **kwargs) -> None:
+            target = Path(destination)
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "README.md").write_text("partial", encoding="utf-8")
+            # 旧库没有清单；只有复制暂存的新档案时才模拟写完后的失败。
+            if (Path(source) / "sections.yaml").is_file():
+                raise OSError("simulated commit failure")
+
+        with mock.patch("harness.vault_import.shutil.copytree", side_effect=copy_then_fail):
+            with self.assertRaisesRegex(OSError, "simulated commit failure"):
+                import_vault_zip(self.zip, self.store, overwrite=True)
+        after = {
+            path.relative_to(self.store.root): path.read_bytes()
+            for path in self.store.root.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(after, before)
 
     def test_skips_system_junk(self) -> None:
         files = dict(NATIVE_FILES)

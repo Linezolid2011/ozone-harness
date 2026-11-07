@@ -122,6 +122,8 @@ class Message:
     # 让模型在工具循环的多步之间保持思考连续性。
     # 参考：https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/
     reasoning: str | None = None
+    # 重放时的来源事件序号。只用于把请求级失败追回原消息，不进入 API 或事件正文。
+    source_seq: int | None = None
 
     def to_api(self) -> dict[str, Any]:
         if self.role == "tool":
