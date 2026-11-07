@@ -1,7 +1,10 @@
 # O₃ᶻᵒⁿᵉ
 
-> 版本 **1.0.1-rc1**（`run.cmd --version` 或界面侧栏第二行；版本号的唯一来源是
+> 版本 **1.1.0-rc1**（`run.cmd --version` 或界面侧栏第二行；版本号的唯一来源是
 > [`docs/version.txt`](docs/version.txt)）· 变更记录见 [`docs/changelog.md`](docs/changelog.md)
+>
+> 本版新增双击启动的 venv 完整性检查与网页引导安装：自动选空闲端口，支持官方 PyPI / 镜像、
+> 下载进度、暂停/继续、退出回滚，以及拒绝下载后的正常聊天降级。
 
 > 读作「O3 zone」。产品名只在 `harness/__init__.py` 里定义一处（`PRODUCT_NAME`）；
 > 纯文本场合（标签页标题、控制台横幅）用排版形态 `O₃ᶻᵒⁿᵉ`，
