@@ -1317,7 +1317,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="按 sections.yaml 重建 README / index / earlier_months（仅原生 vault）",
     )
     parser.add_argument("--web", action="store_true", help="启动 Web 界面（默认只监听本机）")
-    parser.add_argument("--port", type=int, default=8787, help="Web 端口，默认 8787")
+    parser.add_argument(
+        "--guided-venv",
+        action="store_true",
+        help="配合 --web：在界面里检查并按需引导安装项目 venv（start.cmd 使用）",
+    )
+    parser.add_argument("--port", type=int, default=8787, help="Web 端口，默认 8787；0 = 自动选空闲端口")
     parser.add_argument("--host", default="127.0.0.1", help="Web 监听地址，默认仅本机 127.0.0.1")
     parser.add_argument("--no-open", action="store_true", help="Web 启动时不自动打开浏览器")
     parser.add_argument("--usage", action="store_true", help="汇总 token 用量")
@@ -1414,6 +1419,7 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             open_browser=not args.no_open,
+            guide_venv=args.guided_venv,
         )
 
     if not provider_store(settings).providers():

@@ -262,7 +262,7 @@ class LauncherEncodingTests(unittest.TestCase):
     """启动脚本必须纯 ASCII（两个 shell 的编码坑都踩过）。"""
 
     def test_launchers_are_pure_ascii(self) -> None:
-        for name in ("run.cmd", "run.ps1"):
+        for name in ("run.cmd", "run.ps1", "start.cmd"):
             path = ROOT / name
             data = path.read_bytes()
             bad = [i for i, byte in enumerate(data) if byte > 127]
@@ -276,7 +276,7 @@ class LauncherEncodingTests(unittest.TestCase):
 
     def test_launchers_do_not_pin_python_by_path(self) -> None:
         """启动脚本只能按名字找 Python，不能写死某个 python.exe 的路径。"""
-        for name in ("run.cmd", "run.ps1"):
+        for name in ("run.cmd", "run.ps1", "start.cmd"):
             text = (ROOT / name).read_text(encoding="ascii", errors="replace")
             self.assertNotIn(".dsh-runtimes", text, name)
             self.assertRegex(text, r"\bpy\b", f"{name} 应当优先用 py 启动器")

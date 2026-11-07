@@ -404,6 +404,12 @@ function primeShell() {
     'toggle-web-search', 'toggle-multimodal', 'multimodal-hint', 'chat-title', 'chat-meta',
     // 顶部品牌行与输入框下面那句提示（renderBrandAndHint 往这两处写字）
     'brand-sub',
+    // start.cmd 的 venv 启动门（stub 不解析 HTML，直接渲染测试需要这些真 id）
+    'app', 'startup-gate', 'setup-card', 'setup-loading', 'setup-network-error',
+    'setup-consent-panel', 'setup-missing', 'setup-mirror', 'setup-error',
+    'setup-start', 'setup-skip', 'setup-download-panel', 'setup-download-title',
+    'setup-source', 'setup-progress', 'setup-progress-text', 'setup-log',
+    'setup-action-error', 'setup-pause', 'setup-cancel',
     // 设置 → 接口（providerCard / wireProviderCards 要往这些容器里画）
     'settings-meta', 'api-body', 'preset-pick', 'preset-add',
     // 设置 → Dream 的整理模型选择器（ADR-103；选项由 renderDreamPicker 填）
@@ -635,6 +641,8 @@ const EXPORTS = `
   askRevertAllPrompts, revertPrompts, promptsRevertAllNode, promptsBodyNodes,
   promptsLanguageOf, promptOverrideCount, promptOverridesText, promptWarnText,
   promptsStoreErrorNode, promptsNoteNode,
+  // start.cmd 的 venv 完整性检查、镜像选择、进度与暂停/取消
+  renderSetupGate, setSetupGateOpen, setupMutation, runSetupGate, setupErrorMessage,
 };
 `;
 /* i18n.js 必须和 app.js 在**同一个 vm 上下文**里，而且先加载 ——
@@ -7210,6 +7218,79 @@ await scenario('守卫 9：t() 缺 key 不返回空串；切语言不刷新页�
     app.applyStaticTexts();
     assert.equal(staticNode('chat.send').textContent, '发送');
     assert.equal(doc.documentElement.lang, 'zh-CN');
+  });
+});
+
+await scenario('start.cmd 启动门：同意、镜像、真实进度、暂停/取消与继续聊天', async () => {
+  app.setLanguageNow('zh');
+  app.state.setupActionBusy = false;
+  app.state.setupActionError = '';
+  app.state.setupNetworkError = '';
+  app.state.setup = {
+    state: 'consent', can_chat: false,
+    integrity: { missing: ['Pillow'], issues: ['import_failed'] }, progress: {},
+  };
+  app.renderSetupGate();
+  check('完整性不足时先给选择，不显示下载控制', () => {
+    assert.equal(shell('setup-consent-panel').classList.contains('hidden'), false);
+    assert.equal(shell('setup-download-panel').classList.contains('hidden'), true);
+    assert.match(shell('setup-missing').textContent, /Pillow/);
+  });
+
+  await check('下载请求带显式 consent:true 与用户填的镜像', async () => {
+    shell('setup-mirror').value = 'https://mirror.example/simple';
+    posts['/api/setup/start'] = () => ({
+      status: 202,
+      body: { state: 'downloading', source: 'mirror', progress: { percent: null } },
+    });
+    await app.setupMutation('start');
+    const sent = sends.filter((item) => item.url === '/api/setup/start').at(-1);
+    assert.deepEqual(sent.payload, { consent: true, mirror: 'https://mirror.example/simple' });
+    assert.equal(app.state.setup.state, 'downloading');
+  });
+
+  check('pip 没有百分比时进度条保持 indeterminate；暂停态有继续按钮', () => {
+    app.state.setup.state = 'paused';
+    app.renderSetupGate();
+    assert.equal(shell('setup-progress').getAttribute('value'), null);
+    assert.equal(shell('setup-pause').textContent, '继续下载');
+    assert.equal(shell('setup-pause').disabled, false);
+    assert.equal(shell('setup-cancel').disabled, false);
+  });
+
+  check('真实百分比才写 progress.value；pip 输出只当文本，不变成 HTML', () => {
+    app.state.setup = {
+      state: 'downloading', source: 'official',
+      progress: { percent: 42.4, message: '<img src=x onerror=alert(1)>' },
+    };
+    app.renderSetupGate();
+    assert.equal(shell('setup-progress').value, 42.4);
+    assert.equal(shell('setup-log').textContent, '<img src=x onerror=alert(1)>');
+    assert.equal(shell('setup-log').children.length, 0);
+    assert.equal(shell('setup-source').textContent, '下载源：官方 PyPI');
+  });
+
+  await check('无效镜像的后端 code 变成一句可读翻译，不只留英文代号', async () => {
+    posts['/api/setup/start'] = () => ({
+      status: 400, body: { code: 'invalid_mirror', error: 'invalid_mirror' },
+    });
+    app.state.setup = { state: 'consent', integrity: {}, progress: {} };
+    await app.setupMutation('start');
+    assert.match(shell('setup-error').textContent, /有效的 HTTP\(S\)/);
+  });
+
+  check('关门同时撤掉 inert；正常 ready 不需要用户再点一次', async () => {
+    app.setSetupGateOpen(true);
+    assert.equal(shell('app').inert, true);
+    fixture = () => ({
+      status: 200,
+      body: { state: 'ready', can_chat: true, full_venv: true, language: 'en', progress: {} },
+    });
+    await app.runSetupGate();
+    assert.equal(shell('startup-gate').classList.contains('hidden'), true);
+    assert.equal(shell('app').inert, false);
+    assert.equal(app.currentLanguage(), 'en');
+    app.setLanguageNow('zh');
   });
 });
 

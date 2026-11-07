@@ -19,43 +19,24 @@ set PYTHONUTF8=1
 title O3zone
 cd /d "%~dp0"
 
-REM -- 1. Already running? Then just open the UI. ------------------
-REM Double-clicking twice is the most likely user action, and a
-REM second server would refuse to bind the port and print an error
-REM that looks like a failure. Check the port first (plain
-REM PowerShell, no extra tools), and if something is listening,
-REM open the browser and leave that instance alone.
-powershell -NoProfile -Command "try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 8787); $c.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
-if not errorlevel 1 (
-    echo [info] The web UI is already running on port 8787.
-    echo [info] Opening the browser - the existing window keeps serving.
-    start "" "http://127.0.0.1:8787/"
-    timeout /t 2 >nul
-    exit /b 0
-)
+REM -- 1. Start the guided server on a free port. ------------------
+REM Port zero asks the OS to bind an available port atomically. The
+REM Python server reads the real port and opens that URL in the browser.
+REM Never probe port 8787 and assume a listener there is O3zone.
 
-REM -- 2. Start the server. ---------------------------------------
-REM The project-local venv wins when present: web search and image
-REM attachments need httpx / trafilatura / lxml / Pillow / OCR, and
-REM those should never be installed into the system Python.
-if exist ".venv\Scripts\python.exe" (
-    ".venv\Scripts\python.exe" -X utf8 -m harness.cli --web
-    goto done
-)
-
-echo [warn] .venv not found - web search and image attachments will be unavailable.
-echo [warn] Run "run.cmd --setup" once to install the dependencies.
-echo.
+REM Always use the base interpreter for this guided entry point. It can
+REM then check or repair .venv without trying to replace the interpreter
+REM that is currently executing it. A complete venv is activated before
+REM the chat APIs unlock; declining setup still opens the normal Web UI.
 
 REM Prefer the official py launcher: it avoids the fake python.exe
 REM app-execution alias inside WindowsApps.
-py -3 -X utf8 -m harness.cli --web
+py -3 -X utf8 -m harness.cli --web --guided-venv --port 0
 if errorlevel 9009 (
-    python -X utf8 -m harness.cli --web
+    python -X utf8 -m harness.cli --web --guided-venv --port 0
     if errorlevel 9009 (
         echo.
-        echo [ERROR] No usable Python found. Install Python 3.10+ first,
-        echo         then run "run.cmd --setup" once.
+        echo [ERROR] No usable Python found. Install Python 3.10+ first.
         pause
         exit /b 2
     )

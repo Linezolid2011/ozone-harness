@@ -158,7 +158,8 @@ class ServeWiringTests(unittest.TestCase):
     def _run_serve(self, *, elevated: bool) -> str:
         class FakeServer:
             def __init__(self, *_args: object, **_kwargs: object) -> None:
-                pass
+                # port=0 的真实 server 在 bind 后这里一定是 OS 分配的非零端口。
+                self.server_address = ("127.0.0.1", 45678)
 
             def serve_forever(self) -> None:
                 raise KeyboardInterrupt
@@ -185,6 +186,8 @@ class ServeWiringTests(unittest.TestCase):
         text = self._run_serve(elevated=False)
         self.assertNotIn("管理员权限", text)
         self.assertIn("Ctrl+C 停止", text)
+        self.assertIn("http://127.0.0.1:45678/", text)
+        self.assertNotIn("127.0.0.1:0", text)
 
 
 if __name__ == "__main__":  # pragma: no cover

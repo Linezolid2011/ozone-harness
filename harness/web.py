@@ -120,6 +120,7 @@ from .providers.store import (
 from .reset import UnsafeDataDirError, perform_reset, preview_reset
 from .runtime import Runtime, provider_store, resolve_dream_provider, resolve_provider
 from .session_ids import SESSION_ID_PATTERN, session_log_path
+from .venv_setup import SetupError, VenvSetupManager
 from .vault import (
     GENERATED_RELS,
     INDEX_NAME,
@@ -1571,6 +1572,27 @@ class HarnessHandler(BaseHTTPRequestHandler):
     def _api_get(self, path: str, query: dict[str, list[str]]) -> None:
         settings = self.settings
 
+        if path == "/api/setup/status":
+            manager = self.server.venv_setup  # type: ignore[attr-defined]
+            payload = manager.snapshot() if manager is not None else {
+                "enabled": False,
+                "state": "ready",
+                "can_chat": True,
+                "full_venv": False,
+            }
+            # 第一道页面在读取其它应用配置之前，就能据此选择正确语言。
+            payload["language"] = language_store(settings).language()
+            self._send_json(payload)
+            return
+
+        manager = self.server.venv_setup  # type: ignore[attr-defined]
+        if manager is not None and not manager.allows_chat():
+            self._send_json(
+                {**manager.snapshot(), "error": "setup_in_progress", "code": "setup_in_progress"},
+                503,
+            )
+            return
+
         if path == "/api/config":
             store = provider_store(settings)
             default = store.defaults()
@@ -1842,6 +1864,53 @@ class HarnessHandler(BaseHTTPRequestHandler):
 
     def _api_post(self, path: str, payload: dict[str, Any]) -> None:
         settings = self.settings
+
+        if path.startswith("/api/setup/"):
+            manager = self.server.venv_setup  # type: ignore[attr-defined]
+            if manager is None:
+                self._send_json({"error": "setup_disabled", "code": "setup_disabled"}, 404)
+                return
+            try:
+                if path == "/api/setup/start":
+                    if payload.get("consent") is not True:
+                        raise SetupError("consent_required")
+                    result = manager.start_install(payload.get("mirror") or "")
+                    status = 202
+                elif path == "/api/setup/skip":
+                    result = manager.skip()
+                    status = 200
+                elif path == "/api/setup/pause":
+                    result = manager.pause()
+                    status = 200
+                elif path == "/api/setup/resume":
+                    result = manager.resume()
+                    status = 200
+                elif path == "/api/setup/cancel":
+                    result = manager.cancel()
+                    status = 202
+                else:
+                    self._send_json({"error": _t("web.error.unknown_api", path=path)}, 404)
+                    return
+            except SetupError as exc:
+                self._send_json(
+                    {
+                        **manager.snapshot(),
+                        "error": exc.detail or exc.code,
+                        "code": exc.code,
+                    },
+                    exc.http_status,
+                )
+                return
+            self._send_json(result, status)
+            return
+
+        manager = self.server.venv_setup  # type: ignore[attr-defined]
+        if manager is not None and not manager.allows_chat():
+            self._send_json(
+                {**manager.snapshot(), "error": "setup_in_progress", "code": "setup_in_progress"},
+                503,
+            )
+            return
 
         if path == "/api/reset":
             # 破坏性且不可逆，所以只接受 POST（一个误点的链接或刷新不该触发它）；
@@ -2917,6 +2986,8 @@ class HarnessServer(ThreadingHTTPServer):
         self.settings: Settings = Settings.load()
         self.verbose = True
         self.dream_lock = threading.Lock()
+        # 只有 start.cmd 的引导模式会放入 manager；普通 --web 不改变既有启动行为。
+        self.venv_setup: VenvSetupManager | None = None
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
 
@@ -3038,6 +3109,7 @@ def serve(
     port: int = 8787,
     open_browser: bool = True,
     verbose: bool = True,
+    guide_venv: bool = False,
 ) -> int:
     # **先确认端口是空的，再动手**（ADR-080：能预防就别只提示）。
     # 以前这里直接构造服务器：Windows 上两个实例能同时绑住 8787，
@@ -3065,7 +3137,13 @@ def serve(
     settings = replace(settings, language=i18n.current())
     server.settings = settings
     server.verbose = verbose
-    url = f"http://{host}:{port}/"
+    # port=0 由操作系统在 bind 时选空闲端口；之后必须读真实边界，不能再拿 0 拼 URL。
+    bound_port = int(server.server_address[1])  # type: ignore[attr-defined]
+    url = f"http://{host}:{bound_port}/"
+    if guide_venv:
+        server.venv_setup = VenvSetupManager(ROOT)  # type: ignore[attr-defined]
+        # 先完成 bind，再检查 import/pip：检查慢时浏览器也已经有加载页可看。
+        server.venv_setup.begin()  # type: ignore[attr-defined]
 
     print(f"{PRODUCT_NAME} · Web 端", flush=True)
     print(f"  {settings.describe()}", flush=True)
@@ -3091,5 +3169,8 @@ def serve(
     except KeyboardInterrupt:
         print("\n已停止。", flush=True)
     finally:
+        manager = getattr(server, "venv_setup", None)
+        if manager is not None:
+            manager.shutdown()
         server.server_close()
     return 0

@@ -18,6 +18,8 @@ tmp*/
 .tmp-shots/
 # 测试的临时根（tests/__init__.py 在系统临时目录不可写时会退到这里）
 .tmp-tests/
+# Windows 权限诊断的恢复记录（只含权限元数据与恢复脚本，不含源码）
+.tmp-acl-recovery/
 # 注意：如果你改了 HARNESS_DATA_DIR 指向别处，记得把它也加到这里 ——
 # 那些目录里同样有会话历史和明文 key。
 runs/
@@ -26,6 +28,8 @@ runs/
 __pycache__/
 *.py[cod]
 .venv/
+.venv-download-*/
+.venv-setup.lock
 venv/
 .pytest_cache/
 .mypy_cache/

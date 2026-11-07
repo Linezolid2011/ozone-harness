@@ -92,6 +92,12 @@ const state = {
   // 这种"改了到底成没成"的结论不能被一次重画或一个一闪而过的 toast 吞掉）。
   //   kind  ok | warn  → 决定那行字用什么颜色（warn = 成功了但有后果）
   promptNote: null,
+  // 双击启动门与普通聊天 busy/controller 完全分开：pip 的暂停与取消绝不能误停一轮对话。
+  setup: null,
+  setupGateOpen: false,
+  setupActionBusy: false,
+  setupActionError: '',
+  setupNetworkError: '',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -4700,6 +4706,7 @@ async function rerenderForLanguage() {
   state.promptNote = null;
   // 1. 静态字（含 <title> 与 <html lang>）
   applyStaticTexts();
+  if (state.setupGateOpen) renderSetupGate();
   // 2. 侧栏与会话列表 + 品牌行 + 选择器 + 两个开关（+ 附件区那句提示）
   renderSessions();
   renderBrandAndHint();
@@ -5797,10 +5804,181 @@ async function loadResetPane() {
   }
 }
 
+/* ── start.cmd 的 venv 引导门 ─────────────────────────────
+   轮询是串行的：上一个状态请求结束后才安排下一个。安装器不复用聊天的
+   AbortController / busy，也不需要 SSE；刷新页面只会重新接上当前状态。 */
+
+let setupGateWired = false;
+
+function setupErrorMessage(err) {
+  const code = err && err.body && err.body.code;
+  const translated = {
+    invalid_mirror: 'setup.invalid_mirror',
+    install_busy: 'setup.install_busy',
+    consent_required: 'setup.consent_required',
+    not_active: 'setup.not_active',
+  };
+  if (code && translated[code]) return t(translated[code]);
+  return t('setup.action_failed', { msg: String((err && err.message) || err) });
+}
+
+function setSetupGateOpen(open) {
+  const changed = state.setupGateOpen !== open;
+  state.setupGateOpen = open;
+  $('startup-gate').classList.toggle('hidden', !open);
+  $('app').inert = open;
+  $('app').setAttribute('aria-hidden', open ? 'true' : 'false');
+  if (open && changed) {
+    const target = state.setup && state.setup.state === 'consent' ? $('setup-start') : $('setup-card');
+    if (target && typeof target.focus === 'function') target.focus();
+  }
+}
+
+function renderSetupGate() {
+  const status = state.setup || { state: 'checking', progress: {} };
+  const phase = status.state || 'checking';
+  const downloading = ['preparing', 'downloading', 'paused', 'verifying', 'finalizing', 'cancelling'].includes(phase);
+  const consent = phase === 'consent' || phase === 'error';
+  $('setup-loading').classList.toggle('hidden', phase !== 'checking');
+  $('setup-consent-panel').classList.toggle('hidden', !consent);
+  $('setup-download-panel').classList.toggle('hidden', !downloading);
+
+  const network = $('setup-network-error');
+  network.textContent = state.setupNetworkError || '';
+  network.classList.toggle('hidden', !state.setupNetworkError);
+
+  const integrity = status.integrity || {};
+  const missing = integrity.missing || [];
+  $('setup-missing').textContent = t('setup.missing', {
+    // 内部 issue code 只供诊断/测试，不把 import_failed 这类英文代号倒给用户。
+    items: missing.length ? missing.join(', ') : t('setup.missing_generic'),
+  });
+  const failure = $('setup-error');
+  const failureText = state.setupActionError || state.setupNetworkError || (phase === 'error'
+    ? t('setup.failed', { msg: status.error || status.error_code || 'unknown' })
+    : '');
+  failure.textContent = failureText;
+  failure.classList.toggle('hidden', !failureText);
+
+  const phaseKeys = {
+    preparing: 'setup.preparing',
+    downloading: 'setup.downloading',
+    paused: 'setup.paused',
+    verifying: 'setup.verifying',
+    finalizing: 'setup.finalizing',
+    cancelling: 'setup.cancelling',
+  };
+  if (phaseKeys[phase]) $('setup-download-title').textContent = t(phaseKeys[phase]);
+  $('setup-source').textContent = status.source === 'mirror'
+    ? t('setup.source_mirror') : t('setup.source_official');
+  const progress = status.progress || {};
+  const bar = $('setup-progress');
+  if (typeof progress.percent === 'number' && Number.isFinite(progress.percent)) {
+    bar.value = Math.max(0, Math.min(100, progress.percent));
+    $('setup-progress-text').textContent = t('setup.progress_percent', {
+      value: Math.round(progress.percent),
+    });
+  } else {
+    // 没有 pip 的真实测量就保持浏览器原生 indeterminate，绝不编一个百分比。
+    bar.removeAttribute('value');
+    $('setup-progress-text').textContent = phase === 'paused'
+      ? t('setup.paused') : t('setup.progress_waiting');
+  }
+  $('setup-log').textContent = String(progress.message || '');
+  const actionFailure = $('setup-action-error');
+  const actionText = downloading ? (state.setupActionError || state.setupNetworkError || '') : '';
+  actionFailure.textContent = actionText;
+  actionFailure.classList.toggle('hidden', !actionText);
+
+  $('setup-start').disabled = !!state.setupActionBusy;
+  $('setup-skip').disabled = !!state.setupActionBusy;
+  $('setup-pause').textContent = phase === 'paused' ? t('setup.resume') : t('setup.pause');
+  $('setup-pause').disabled = !!state.setupActionBusy || !['downloading', 'paused'].includes(phase);
+  $('setup-cancel').disabled = !!state.setupActionBusy
+    || !['preparing', 'downloading', 'paused', 'verifying'].includes(phase);
+}
+
+async function setupMutation(kind) {
+  if (state.setupActionBusy) return;
+  state.setupActionBusy = true;
+  state.setupActionError = '';
+  state.setupNetworkError = '';
+  renderSetupGate();
+  try {
+    let result;
+    if (kind === 'start') {
+      result = await postJSON('/api/setup/start', {
+        consent: true,
+        mirror: $('setup-mirror').value.trim(),
+      });
+    } else if (kind === 'skip') {
+      result = await postJSON('/api/setup/skip', {});
+    } else if (kind === 'pause') {
+      const paused = state.setup && state.setup.state === 'paused';
+      result = await postJSON(paused ? '/api/setup/resume' : '/api/setup/pause', {});
+    } else {
+      result = await postJSON('/api/setup/cancel', {});
+    }
+    state.setup = result;
+  } catch (err) {
+    state.setupActionError = setupErrorMessage(err);
+  } finally {
+    state.setupActionBusy = false;
+    renderSetupGate();
+  }
+}
+
+function wireSetupGate() {
+  if (setupGateWired) return;
+  setupGateWired = true;
+  $('setup-start').onclick = () => setupMutation('start');
+  $('setup-skip').onclick = () => setupMutation('skip');
+  $('setup-pause').onclick = () => setupMutation('pause');
+  $('setup-cancel').onclick = () => setupMutation('cancel');
+}
+
+function setupStatusDelay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function runSetupGate() {
+  wireSetupGate();
+  setSetupGateOpen(true);
+  for (;;) {
+    try {
+      const status = await getJSON('/api/setup/status');
+      state.setupNetworkError = '';
+      state.setup = status;
+      const language = status.language || 'zh';
+      if (language !== current()) {
+        setLanguageNow(language);
+        applyStaticTexts();
+      }
+      renderSetupGate();
+      if (status.can_chat) {
+        setSetupGateOpen(false);
+        return status;
+      }
+    } catch (err) {
+      // 页面已经由本机静态服务打开时，短暂连接失败不等于 pip 失败；保留现有
+      // 阶段并自动重试。真正的安装错误来自状态接口，不会和网络错误混为一谈。
+      state.setupNetworkError = t('setup.network_retry', { msg: String(err.message || err) });
+      if (!state.setup) state.setup = { state: 'checking', progress: {} };
+      renderSetupGate();
+      await setupStatusDelay(1000);
+      continue;
+    }
+    await setupStatusDelay(400);
+  }
+}
+
 /* ── 初始化 ───────────────────────────────────────────── */
 
 async function init() {
   initTheme();
+  // 先接通启动门：普通 --web 立即 ready；start.cmd 则在这里完成完整性检查、
+  // 用户选择与可选下载。只有 ready / bypassed 才会继续触碰聊天应用 API。
+  const setupResult = await runSetupGate();
   // 语言必须在**画任何东西之前**定下来：下面每一句 t() 都按它取文案。
   // 接口没就绪（还没有 language 字段）时 normalize() 会退回 zh —— 与后端默认一致。
   try {
@@ -5901,6 +6079,9 @@ async function init() {
     state.stick = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   });
   $('input').focus();
+  if (setupResult && setupResult.state === 'bypassed') {
+    toast(t('setup.continued_without'));
+  }
 }
 
 /* `globalThis.__HARNESS_NO_INIT__` 只有自检脚本会设：它让这个文件能被当成

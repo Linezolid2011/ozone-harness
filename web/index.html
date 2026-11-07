@@ -246,6 +246,52 @@
   </main>
 </div>
 
+<!-- start.cmd 的引导启动门：静态资源先开这一屏，检查/选择完成前不初始化聊天 API。
+     普通 run.cmd --web 的状态接口会立刻返回 ready，因此这里只是短暂的首屏加载。 -->
+<div class="startup-gate" id="startup-gate" role="dialog" aria-modal="true" aria-labelledby="setup-loading-title">
+  <div class="startup-card" id="setup-card" tabindex="-1">
+    <div class="startup-brand" aria-hidden="true">O₃ᶻᵒⁿᵉ</div>
+
+    <section id="setup-loading" aria-live="polite">
+      <div class="startup-spinner" aria-hidden="true"></div>
+      <h1 id="setup-loading-title" data-i18n="setup.loading_title">正在启动</h1>
+      <p data-i18n="setup.checking">正在检查本地运行环境…</p>
+      <p class="startup-error hidden" id="setup-network-error"></p>
+    </section>
+
+    <section class="hidden" id="setup-consent-panel">
+      <h1 data-i18n="setup.consent_title">下载完整运行环境？</h1>
+      <p data-i18n="setup.consent_body">完整环境包含联网、图片与本地 OCR 依赖。没有发现完整的 .venv；你可以现在下载，也可以直接进入聊天。</p>
+      <p class="startup-detail" id="setup-missing"></p>
+      <label class="startup-field" for="setup-mirror">
+        <span data-i18n="setup.mirror_label">PyPI 镜像地址（可选）</span>
+        <input type="url" id="setup-mirror" data-i18n-placeholder="setup.mirror_placeholder"
+               placeholder="留空使用 https://pypi.org/simple" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="startup-note" data-i18n="setup.mirror_note">镜像只用于本次 pip 下载；留空时使用官方 PyPI。拒绝或取消不会记住选择，下次启动仍会检查。</p>
+      <p class="startup-error hidden" id="setup-error" role="alert"></p>
+      <div class="startup-actions">
+        <button class="btn-primary" id="setup-start" data-i18n="setup.download">下载并安装</button>
+        <button class="btn-ghost" id="setup-skip" data-i18n="setup.skip">暂不下载，继续聊天</button>
+      </div>
+    </section>
+
+    <section class="hidden" id="setup-download-panel" aria-live="polite">
+      <h1 id="setup-download-title" data-i18n="setup.downloading">正在下载完整环境</h1>
+      <p class="startup-note" id="setup-source"></p>
+      <progress class="startup-progress" id="setup-progress" max="100"></progress>
+      <div class="startup-progress-text" id="setup-progress-text"></div>
+      <div class="startup-log" id="setup-log"></div>
+      <p class="startup-note" data-i18n="setup.cancel_note">退出会停止 pip，删除本次下载的内容，然后进入不使用完整 venv 的聊天界面。</p>
+      <p class="startup-error hidden" id="setup-action-error" role="alert"></p>
+      <div class="startup-actions">
+        <button class="btn-ghost" id="setup-pause" data-i18n="setup.pause">暂停下载</button>
+        <button class="btn-danger" id="setup-cancel" data-i18n="setup.cancel">退出下载并继续</button>
+      </div>
+    </section>
+  </div>
+</div>
+
 <div class="modal hidden" id="dialog">
   <div class="modal-card">
     <div class="modal-title" id="dialog-title"></div>
