@@ -4259,6 +4259,125 @@ ADR-105 的入口对齐与 ADR-106 的双击引导都在这条边界内做了取
 
 ---
 
+## ADR-112 可选的 pywebview 原生窗口外壳（装了就用窗口，没有就退浏览器）
+
+**背景**：产品现在通过浏览器标签页呈现（ADR-080 起有提权转交等一整套打开逻辑），
+用户希望它"看起来像一个应用"——一个原生窗口，而不是一个网址。同时明确**不要**
+打包成 .exe（"那会毁掉它的乐趣"）：保持"项目目录 + .venv + 启动脚本"的形态，
+窗口只是外壳，服务仍是那个零依赖本地 Web 服务。
+
+**决定**：
+
+1. **外壳可选，依赖走既有引导门**。`pywebview` 加进 `requirements.txt` 与
+   `venv_setup._IMPORT_NAMES`，成为引导门检查的第六项依赖：新 clone 没有 venv、
+   或 venv 被精简缺了它，启动页照常询问是否安装；用户在引导门里拒绝，就按"没有"
+   处理。**不装、拒绝安装、或 venv 事后被剥掉，全部退到浏览器标签页**，启动与
+   聊天本身不受影响。
+2. **探测与使用分离，两层退路都明说**（`harness/native_window.py`）：
+   `load_webview()` 延迟 import，**任何**失败（没装 / ABI 坏 / pythonnet 初始化炸）
+   一律返回 None；`serve()` 据此选 `"window" / "browser" / "none"`（`--no-open` 连
+   探测都不做），选 `"browser"` 时打印一行"未检测到 pywebview…改用浏览器标签页"，
+   不静默退回。`run_window()` 包掉 `create_window`/`start` 的运行期异常——典型场景是
+   装了 pywebview 但机器缺 WebView2 运行时——返回 False 并打印原因，`serve()` 退回
+   浏览器定时器那条老路，**服务不许跟着死**：窗口是壳，服务才是产品。
+3. **GUI 循环在主线程，HTTP 服务退后台线程**。pythonnet/WinForms 要求 GUI 跑在
+   主线程，因此窗口模式下 `serve_forever` 移进 daemon 线程，`webview.start()` 阻塞
+   主线程；用户关窗 = 产品退出（`return 0`），与 README 里"关掉黑窗口就等于停掉服务"
+   是同一语义。关窗后 `server.shutdown()` + join，再释放 venv_setup、
+   `server_close()`——与浏览器路径同一份收尾，不另写一套。
+4. **不打包、不改入口**。`start.cmd` / `run.cmd` / `run.ps1` 一律不动；端口选择沿用
+   现有规则（显式端口被占拒绝启动、双击路径 `--port 0` 由操作系统选空闲端口）。
+   窗口打开的也是 `http://<host>:<port>/` 同一个 URL，前端零改动。
+
+**理由**：把"可选"做成依赖硬前提会违背引导门的初衷（拒绝安装的人照样要能聊天）；
+把运行期失败做成致命错误则会让"装了但环境缺 WebView2"的用户连服务都起不来——
+这两种都比"退回浏览器"糟。外壳与服务的职责 therefore 必须随时可以拆：探测失败、
+初始化失败、窗口被关，三种情况各自落在"退浏览器 / 退浏览器 / 退出进程"三个不同
+且都自洽的结局上。不打包成 exe 则保住了"拷给别人也能直接跑"的可移植性约束
+（无绝对路径、.cmd 纯 ASCII 等，`tests/test_paths.py` 继续守着）。
+
+**验证**：
+
+* `tests/test_native_window.py`：import 失败 / 可用 / ABI 坏三种探测结局；
+  `run_window` 正常关窗返回 True 且收到标题与 URL、起不来返回 False 并打印原因；
+  `_decide_ui_open` 三模式真值表与"退回必须明说"。
+* `tests/test_browser_launch.py`：窗口模式接线——`serve()` 返回 0、后台服务线程被
+  `shutdown()`、窗口模式不起浏览器定时器、启动失败退回浏览器定时器且服务继续跑、
+  `--no-open` 不探测不开窗；原 `ServeWiringTests` 钉死 `load_webview=None`，保证
+  开发机真装了 pywebview 时浏览器路径测试仍走老路。
+* `tests/test_venv_setup.py`：requirements 名单与 `_IMPORT_NAMES` 增加 pywebview，
+  "装了的依赖必须有 import 探针"这条守卫同步更新。
+* 全部离线：测试用假 webview 模块，不 import 真 pywebview、不真开窗口。
+
+**教训**：把"可选外壳"做对的关键不是探测，而是**每一种失败各自落在什么结局上**——
+没装、装了起不来、窗口被关掉是三件事，混成一种处理（或吞掉其中一种）就会在离
+原因很远的地方爆出来。外壳类功能的测试要钉的也正是这三个结局，而不是"窗口能
+打开"本身。
+
+---
+
+## ADR-113 原生窗口起不来时：报错说清出路，不在产品内硬修环境级故障
+
+**背景**：ADR-112 落地后在一台机器上复现了窗口启动失败：`Failed to resolve
+Python.Runtime.Loader.Initialize`（pythonnet 经 clr_loader 在 .NET Framework 里
+`Assembly.LoadFrom` 失败）。逐层排查（每一层都有实证）：
+
+1. `import webview` 正常、失败发生在 `webview.start()` 触发 `import clr` 时 ——
+   pythonnet 的 .NET 桥是运行期才加载的，启动门的 import 探针**探测不到**这一类
+   "装了但用不了"；
+2. 内层异常是 .NET Framework 经典的 `0x80131515 NotSupported`："attempt was made
+   to load an assembly from a network location… enable the loadFromRemoteSources
+   switch"；
+3. 但用 `[Zone]::CreateFromUrl` 量出来：**该目录下每一个已存在的文件都被判为
+   Internet 区**（新创建的文件也立刻是），而同盘根目录、C: 盘都是 MyComputer
+   —— 是**项目目录本身**被打了目录级的不可信标记；
+4. 标记对标准手段**全部隐身且无效**：无 `Zone.Identifier` ADS（`dir /r` 确认）、
+   ZoneMap 注册表干净、Smart App Control 关闭、无 AppLocker 规则；
+   `Unblock-File` 清不掉；`loadFromRemoteSources enabled="true"` 的配置**实测
+   无效**（专为这类标记设计的开关在这台机器上解不开它）；
+5. 对照实验：同一份 pythonnet/clr_loader 文件复制到 C: 普通目录后 `import clr`
+   **成功** —— 文件本身完好，纯粹是位置问题；微软 Authenticode 签名的 DLL 在
+   标记目录里仍能加载（未签名的才被拒）。硬链接实验证明标记跟着**文件对象**走
+   （同一份 inode 从目录外查询同样被判 Internet），且新创建的文件立刻继承 ——
+   是"目录继承式"打标，不是路径匹配；
+6. **归因**：同盘其它目录（projects / Photon / OzoneTester / test-2versions）
+   全部干净，唯独两个 **DeepSeek Harness 会话工作区**（test2、test3）被判
+   Internet —— 且 D: 盘根的 `dsh-acl-recovery`（DSH 沙箱 ACL 机制的恢复记录）比
+   test3 的创建早 6 分钟。最可能是 **DSH 沙箱层在建立会话工作区时打的"按外部
+   内容对待"标记**（用户明确不记得做过任何标记）；未提权枚举不了过滤驱动
+   （fltmc 拒绝），保留"安全软件"为次候选，但证据链明显指向沙箱。
+
+**决定**：
+
+1. **产品内不修**：这是环境/安全软件（或沙箱）给整个目录打的标记，.NET 加载层
+   的拦截发生在 clr_loader 的原生代码里（`LoadFrom`），产品侧没有任何不改第三方
+   库就能绕过的钩子；试过且实测无效的配置方案不进代码。
+2. **报错必须说清出路**（`native_window.run_window`）：失败时除原始原因外，附两
+   条实测过的典型出路 —— ① 装 WebView2 运行时；② 项目目录被标记为不可信区域
+   时把项目移到普通目录 —— 并明说"都不必折腾，浏览器标签页功能不受影响"。
+3. **行为不变**：两种失败都照旧退回浏览器标签页、服务照常（ADR-112 的那套不
+   变量不动），本次只把"静默退一半"变成"带着出路的明说"。
+
+**理由**：这个项目最讨厌的错误类型是"出错了但看起来成功了/不知怎么办"。环境级
+故障修不了不丢人，**让用户对着一句 0x80131515 干瞪眼才丢人**。而把实测无效的
+方案（loadFromRemoteSources、Unblock-File）写进产品，只会给下一个维护者制造
+"为什么代码里有没作用的配置"的谜题 —— 它们属于 ADR 里的记录，不属于代码。
+
+**验证**：
+
+* `tests/test_native_window.py`：失败消息里必须同时出现 WebView2、不可信区域、
+  移目录、浏览器四条出路（ADR-113 的机械守卫）。
+* 全量离线回归通过；窗口/浏览器两条路的既有守卫（ADR-112）不动。
+* 机器侧实证记录：Zone 判定（目录级 Internet）、无 ADS、配置无效、复制出目录
+  即恢复 —— 均在本机逐条量过（见背景节）。
+
+**教训**：**"装了但用不了"与"没装"是两种失败，启动门的 import 探针只能拦住后
+者** —— 外壳类可选依赖必须预留运行期失败这条退路，且退路出口的信息量决定它是
+"功能"还是"坑"。另外：环境问题要在产品边界处**诚实地止步**——试过且无效的方案
+写进 ADR 作证，不写进代码充数。
+
+---
+
 ## 附：其他踩过的坑
 
 | 坑 | 现象 | 结论 |
@@ -4309,3 +4428,4 @@ ADR-105 的入口对齐与 ADR-106 的双击引导都在这条边界内做了取
 | 把"建客户端"算进抓取预算里 | `fetch_url` 先算 deadline 再建 `httpx.Client`，而建一个要 1.6 秒；叠加本机代理绕一圈 2~4 秒，5 秒预算偶发撞线 → 本机假网站的测试**随机**报"请求超时"（连测 30 次里 6 次，最慢 7.58 秒） | 超时预算只能覆盖它该覆盖的那一段；"随机的红"要先量出**每一步各花多久**，再决定是环境还是代码。见 ADR-090 |
 | **每次抓取都新建一个 HTTP 客户端** | `httpx.Client()` 在本机要 0.7~1.6 秒（`HTTPTransport()` 单个 0.5~0.8 秒）；每抓一个页面白扔一次，连"同一站点的下一篇"也复用不了连接 | "不可见的固定开销"不会让任何测试变红，只会让每个功能都慢一点点。把它量出来之后：复用客户端 + 回环直连，30 次本机抓取从 90 秒级降到 **0.23 秒**。见 ADR-091 |
 | 本机系统代理连 `127.0.0.1` 都代理 | httpx 默认 `trust_env=True` 会读 Windows 注册表的代理，而那份列表没有回环绕过规则 → 一次本机抓取 2.1~3.9 秒（本该是毫秒） | 判"怎么这么慢"之前先看它**到底连到了谁**：`urllib.request.getproxies()` 与 `client._transport_for_url()` 能直接给出答案。见 ADR-090 |
+| **目录级"不可信区域"标记**（无 ADS、注册表干净，标准解封全无效） | .NET Framework `LoadFrom` 拒绝加载该目录下一切未 Authenticode 签名的 DLL，pythonnet 报 `0x80131515`；连 `loadFromRemoteSources` 开关都实测无效；把文件复制到普通目录立刻恢复 | 有些标记** invisible 到 dir /r / ZoneMap / Unblock-File**，遇到"文件本身没问题、换个目录就好"的机器级怪象，先量 zone（`[Zone]::CreateFromUrl`）再决定修不修。产品内不修，把出路写进报错。见 ADR-113 |

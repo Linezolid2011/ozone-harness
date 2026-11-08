@@ -38,7 +38,14 @@ class RequirementAndCommandTests(unittest.TestCase):
         names = requirement_names(ROOT / "requirements.txt")
         self.assertEqual(
             names,
-            ["httpx", "trafilatura", "lxml", "pillow", "rapidocr-onnxruntime"],
+            [
+                "httpx",
+                "trafilatura",
+                "lxml",
+                "pillow",
+                "rapidocr-onnxruntime",
+                "pywebview",
+            ],
         )
         for name in names:
             self.assertIn(name, venv_setup._IMPORT_NAMES)

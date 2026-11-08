@@ -80,7 +80,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from . import PRODUCT_NAME, PRODUCT_SLUG, attachments, version
+from . import PRODUCT_NAME, PRODUCT_SLUG, attachments, native_window, version
 from . import i18n
 from .config import ROOT, Settings, display_path
 from .dream import DreamRunner, DreamRunStore
@@ -3099,6 +3099,28 @@ def _open_ui_in_browser(url: str) -> None:
         print(f"  ! {message}。请手动打开：{url}", flush=True)
 
 
+def _decide_ui_open(open_browser: bool) -> tuple[str, Any | None]:
+    """决定界面怎么开：返回 `(模式, webview 模块或 None)`，模式是
+    `"none"`（`--no-open`）/ `"window"`（pywebview 原生窗口）/ `"browser"`。
+
+    pywebview 是**可选外壳**（ADR-112）：探测不到就退回浏览器标签页，并明说
+    一声 —— 静默退回正是这个项目最忌讳的那种"看起来没变、其实少了一层"。
+    探测本身不许失败：import 错误与运行期错误是两种退回，前者在这里兜掉，
+    后者由 `native_window.run_window()` 兜。
+    """
+    if not open_browser:
+        return "none", None
+    webview = native_window.load_webview()
+    if webview is not None:
+        return "window", webview
+    print(
+        "  提示：未检测到 pywebview，本次用浏览器标签页打开；"
+        "把它装进 .venv 后，下次启动会改用原生窗口。",
+        flush=True,
+    )
+    return "browser", None
+
+
 def port_is_taken(host: str, port: int) -> bool:
     """这个端口上是不是已经有人在听。**不带 `SO_REUSEADDR`** 地试绑一次来判定。
 
@@ -3181,14 +3203,44 @@ def serve(
         )
     print("  Ctrl+C 停止", flush=True)
 
-    if open_browser:
-        # 0.6 秒是让"界面：…"那几行先落到终端上，免得被浏览器抢在前面
-        threading.Timer(0.6, lambda: _open_ui_in_browser(url)).start()
+    ui_mode, webview = _decide_ui_open(open_browser)
+
+    # 原生窗口模式下 HTTP 服务退到后台线程（GUI 循环必须在主线程跑，
+    # 见 native_window.run_window）；window_started 记录"服务线程还活着"，
+    # 两条退出路径（关窗 / Ctrl+C）都要把它停干净。
+    window_server_thread: threading.Thread | None = None
+
+    def _stop_window_server() -> None:
+        nonlocal window_server_thread
+        if window_server_thread is not None:
+            server.shutdown()
+            window_server_thread.join(timeout=5)
+            window_server_thread = None
+
     try:
+        if ui_mode == "window":
+            assert webview is not None  # "window" 模式的前提是探测成功
+            print("  界面：原生窗口（关窗口 = 停止，与关这个控制台同义）", flush=True)
+            window_server_thread = threading.Thread(
+                target=server.serve_forever, name="o3zone-http", daemon=True
+            )
+            window_server_thread.start()
+            window_closed = native_window.run_window(webview, url, title=PRODUCT_NAME)
+            _stop_window_server()
+            if window_closed:
+                return 0
+            # 窗口没能起来（原因已打印）：退回浏览器标签页，服务继续跑。
+            # 退回必须明说 —— 静默退回是这个项目最讨厌的错误类型。
+            print("  ! 改用浏览器标签页打开（服务不受影响）。", flush=True)
+            threading.Timer(0.6, lambda: _open_ui_in_browser(url)).start()
+        elif ui_mode == "browser":
+            # 0.6 秒是让"界面：…"那几行先落到终端上，免得被浏览器抢在前面
+            threading.Timer(0.6, lambda: _open_ui_in_browser(url)).start()
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n已停止。", flush=True)
     finally:
+        _stop_window_server()
         manager = getattr(server, "venv_setup", None)
         if manager is not None:
             manager.shutdown()

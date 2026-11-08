@@ -52,6 +52,7 @@ harness/
   net/              联网工具：抓取（SSRF fail-closed）、搜索后端、工具设置
   tools/            工具注册表 + 对话侧工具（记忆三件套、档案读写七件套）+ 整理侧工具
   web.py            零依赖 HTTP + SSE（所有路由都在这里，含安全闸）
+  native_window.py  可选 pywebview 原生窗口外壳（ADR-112；探测/运行期失败都退浏览器）
   venv_setup.py     start.cmd 引导门：完整性探针、事务安装、暂停/取消与恢复
   cli.py            命令行入口
   i18n.py / prompts/  zh/en 两套文案与长提示词（**成对**，守卫会查键集一致）
@@ -84,6 +85,8 @@ scripts/ui_check/   前端自检（自写 DOM stub 跑真 app.js）、截图、�
 * **原生 zip 导入只写空 vault**（ADR-104）：逐条校验路径/符号链接/大小/图片内容，
   全过才从暂存搬入；非空要 `--yes`。
 * **SSRF 判据要自己归一化、fail-closed**（ADR-052）：不认的输入一律拒。
+* **pywebview 外壳可退且不静默**（ADR-112）：没装 / 装了起不来都退浏览器标签页并
+  明说；窗口关了 = 服务退出。外壳失败绝不能让服务起不来。
 
 ## 怎么验证（每次改完都跑）
 

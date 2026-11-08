@@ -17,6 +17,11 @@
 #                   中文+英文开箱可用。代价是它拖来 onnxruntime / opencv / numpy（约 150 MB），
 #                   所以它只在"真的要用 OCR"时才被 import（`harness/ocr.py` 里延迟导入）。
 #                   缺了它：开关关着发图片会被**明确拒绝**并告诉你去装，不静默降级。
+#   pywebview      —— 把界面装进原生窗口，让它"看起来像一个应用"（见 ADR-112）。
+#                   Windows 上走 WebView2（EdgeChromium 后端，pythonnet 中转）。
+#                   **纯可选外壳**：没装就退回浏览器标签页，启动与使用都不受影响；
+#                   装了但机器缺 WebView2 运行时起不来，同样明说一声再退回。
+#                   延迟导入（`harness/native_window.py`），不用窗口不付代价。
 #
 # 刻意**没有**装的东西：
 #   ddgs / duckduckgo-search —— 试过，它只打 DuckDuckGo 与 Google，
@@ -28,3 +33,4 @@ trafilatura>=2.0
 lxml>=5.0
 Pillow>=11
 rapidocr-onnxruntime>=1.2
+pywebview>=5.0

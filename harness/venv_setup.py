@@ -40,6 +40,7 @@ _IMPORT_NAMES = {
     "lxml": "lxml.etree",
     "pillow": "PIL.Image",
     "rapidocr-onnxruntime": "rapidocr_onnxruntime",
+    "pywebview": "webview",
 }
 
 _ACTIVE_STATES = {"preparing", "downloading", "paused", "verifying"}

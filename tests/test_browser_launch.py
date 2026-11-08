@@ -169,6 +169,11 @@ class ServeWiringTests(unittest.TestCase):
 
         with mock.patch.object(web, "HarnessServer", FakeServer), mock.patch.object(
             web, "is_elevated", return_value=elevated
+        ), mock.patch.object(
+            # 钉死"没有 pywebview"：开发机真装了它时，这条路也必须走浏览器分支。
+            web.native_window,
+            "load_webview",
+            return_value=None,
         ), mock.patch.object(web, "threading") as fake_threading:
             buffer = io.StringIO()
             with redirect_stdout(buffer):
@@ -188,6 +193,95 @@ class ServeWiringTests(unittest.TestCase):
         self.assertIn("Ctrl+C 停止", text)
         self.assertIn("http://127.0.0.1:45678/", text)
         self.assertNotIn("127.0.0.1:0", text)
+
+
+class NativeWindowServeTests(unittest.TestCase):
+    """原生窗口模式（ADR-112）在 `serve()` 里的接线。
+
+    钉三件事：窗口拿到正确的标题与地址、关窗后服务线程被停掉且进程返回 0、
+    窗口起不来时**退回浏览器**而不是让服务跟着死。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.settings = test_settings(Path(self._tmp.name))
+
+    def _run_serve_window(self, *, start_exc: Exception | None = None) -> tuple[object, object, str]:
+        class FakeServer:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                self.server_address = ("127.0.0.1", 45678)
+                self.shutdown_called = False
+
+            def serve_forever(self) -> None:
+                return  # 后台线程里的服务：Fake 立即返回（相当于已被 shutdown）
+
+            def shutdown(self) -> None:
+                self.shutdown_called = True
+
+            def server_close(self) -> None:
+                pass
+
+        server = FakeServer()
+        webview = types.SimpleNamespace(
+            create_window=mock.Mock(),
+            start=mock.Mock(side_effect=start_exc),
+        )
+        with mock.patch.object(
+            web, "HarnessServer", lambda *a, **k: server
+        ), mock.patch.object(web, "is_elevated", return_value=False), mock.patch.object(
+            web.native_window, "load_webview", return_value=webview
+        ), mock.patch.object(web, "threading") as fake_threading:
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                code = web.serve(self.settings, port=0, open_browser=True)
+        self.assertEqual(code, 0)
+        # 两条路都不许再用"开浏览器"的定时器：窗口路开的是窗口，退回路只有起不来才开浏览器
+        return server, webview, buffer.getvalue(), fake_threading
+
+    def test_window_mode_runs_gui_and_stops_server_on_close(self) -> None:
+        server, webview, text, fake_threading = self._run_serve_window()
+        webview.create_window.assert_called_once()
+        args, _kwargs = webview.create_window.call_args
+        self.assertEqual(args[1], "http://127.0.0.1:45678/")
+        webview.start.assert_called_once_with()
+        self.assertTrue(server.shutdown_called, "关窗后后台服务线程必须被停掉")
+        self.assertFalse(
+            fake_threading.Timer.called,
+            "窗口模式下不许再起「开浏览器」定时器",
+        )
+        self.assertIn("原生窗口", text)
+
+    def test_window_startup_failure_falls_back_to_browser(self) -> None:
+        """装了但起不来（缺 WebView2…）：明说原因、退回浏览器、服务继续跑。"""
+        server, webview, text, fake_threading = self._run_serve_window(
+            start_exc=RuntimeError("no WebView2")
+        )
+        self.assertIn("no WebView2", text)
+        self.assertIn("浏览器", text)
+        self.assertTrue(fake_threading.Timer.called, "退回浏览器必须走定时器那条老路")
+        self.assertTrue(server.shutdown_called)
+        self.assertIn("http://127.0.0.1:45678/", text)
+
+    def test_no_open_never_touches_window_or_browser(self) -> None:
+        """--no-open 的语义不变：窗口与浏览器都不许出现。"""
+        server = types.SimpleNamespace(
+            server_address=("127.0.0.1", 45678),
+            serve_forever=lambda: None,
+            shutdown=lambda: None,
+            server_close=lambda: None,
+        )
+        with mock.patch.object(
+            web, "HarnessServer", lambda *a, **k: server
+        ), mock.patch.object(
+            web.native_window, "load_webview"
+        ) as probe, mock.patch.object(web, "threading") as fake_threading:
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                code = web.serve(self.settings, port=0, open_browser=False)
+        self.assertEqual(code, 0)
+        probe.assert_not_called()
+        self.assertFalse(fake_threading.Timer.called)
 
 
 if __name__ == "__main__":  # pragma: no cover
