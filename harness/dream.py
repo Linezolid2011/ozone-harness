@@ -72,6 +72,7 @@ from .providers.base import LLMProvider
 from .tools.dream_tools import build_dream_tools
 from .tools.registry import ToolRegistry
 from .vault import (
+    MEMORY_INSTRUCTION_NAME,
     VaultStore,
     diff_images,
     vault_image,
@@ -83,6 +84,13 @@ from .vault import (
 
 def new_dream_id() -> str:
     return "dream-" + datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+
+
+def _dream_image(root: Path) -> dict[str, str]:
+    """Dream 投影的差异输入；独立记忆永远不能算成整理产物。"""
+    image = vault_image(root)
+    image.pop(MEMORY_INSTRUCTION_NAME, None)
+    return image
 
 
 def build_dream_system_message(
@@ -330,7 +338,7 @@ class DreamRunner:
         self.real_root = Path(vault.root)
         # **运行前的内存影像**：算差异要有"之前"可比，但绝不能落盘成快照
         # （那又是备份了，ADR-065）。进程结束它自然就没了。
-        self.before_image = vault_image(self.real_root)
+        self.before_image = _dream_image(self.real_root)
 
         registry = ToolRegistry(max_result_chars=settings.max_tool_result_chars)
         for tool in build_dream_tools(
@@ -460,7 +468,7 @@ class DreamRunner:
         self.vault.rebuild_generated(today=today, last_dream=today)
 
         # 差异 = 内存影像对比：运行前那份在内存里，运行后从磁盘读（同一个函数）
-        diff = diff_images(vault_image(self.vault.root), self.before_image)
+        diff = diff_images(_dream_image(self.vault.root), self.before_image)
         check = self.vault.check()
 
         # 读到记录不等于整理完成：熔断/输出截断/工具失败后，下一轮没有这些记录
@@ -624,9 +632,15 @@ def format_dream(
     moved: list[str] = []
     cleared = 0
     leftovers: list[str] = []
+    preserved_memory = staged / MEMORY_INSTRUCTION_NAME
     try:
         for target in (vault_dir, dreams_dir):
             if target.exists():
+                # memory instructions 不是 Dream 投影，不能随 vault 格式化一起删。
+                # 先把它挪到暂存根部，成功后再放回原路径；失败则先并回旧 vault 再恢复。
+                candidate = target / MEMORY_INSTRUCTION_NAME
+                if target == vault_dir and candidate.is_file():
+                    os.replace(candidate, preserved_memory)
                 # **先改名挪走再删**（同 reset.py 的理由）：直接删一半失败会留下
                 # 一个"删了一半"的目录，看起来像坏了；改名是原子的。
                 destination = staged / target.name
@@ -643,9 +657,14 @@ def format_dream(
                 name_max_chars=settings.vault_name_max_chars,
                 readme_token_budget=settings.vault_readme_token_budget,
             ).init_skeleton()
+        if preserved_memory.is_file():
+            vault_dir.mkdir(parents=True, exist_ok=True)
+            os.replace(preserved_memory, vault_dir / MEMORY_INSTRUCTION_NAME)
     except BaseException:
         # **失败时把档案与整理进度都放回去**。clear_cursors 已经提交之后，初始化仍可能
         # 失败；只搬回目录会让旧档案配上空游标，下一次把全部会话重复整理一遍。
+        if preserved_memory.is_file() and (staged / "vault").is_dir():
+            os.replace(preserved_memory, staged / "vault" / MEMORY_INSTRUCTION_NAME)
         restored = _restore_staged(staged, data_dir)
         cursor_errors: list[str] = []
         for session_id, last_seq in cursors_before.items():

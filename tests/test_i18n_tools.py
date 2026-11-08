@@ -106,7 +106,12 @@ class _ToolCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
-        self.memory = MemoryStore(self.tmp / "memory.db", max_items=20, max_chars=60)
+        self.memory = MemoryStore(
+            instruction_path=self.tmp / "vault" / "memory_instruction.md",
+            cursor_db_path=self.tmp / "memory.db",
+            max_items=20,
+            max_chars=60,
+        )
         self.addCleanup(self.memory.close)
         self.vault = VaultStore(self.tmp / "vault")
 
@@ -306,7 +311,8 @@ class ChineseIsTheOriginalTextTests(_ToolCase):
                 "（这是**工具结果上限**决定的，不是文件只有这么长）；"
                 "要更多内容请分次读别的档案。",
             )
-            self.assertEqual(i18n.t("tool.common.category_hint"), "可选分类，建议取值：身份、偏好、项目、关系、约定、其他。默认 general。")
+            self.assertNotIn("tool.common.category_hint", i18n.catalog("zh"))
+            self.assertNotIn("tool.common.category_hint", i18n.catalog("en"))
 
     def test_payload_text_is_verbatim(self) -> None:
         with i18n.use("zh"):

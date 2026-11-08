@@ -96,8 +96,6 @@ const I18N = {
   "toggle.web.on_title": '这个会话允许模型自己搜索；点击关闭',   // app.js:586
   "toggle.web.off_title": '这个会话不允许模型自己搜索（打开用户给的链接仍然可以）；点击开启',   // app.js:587
   "toast.save_web_failed": `保存联网开关失败：{msg}`,   // app.js:598
-  "multimodal.off_text": '多模态模式已关：只会把图片里的文字识别出来发给模型，',   // app.js:610
-  "multimodal.off_bold": '图片本身不会发出去',   // app.js:611
   "multimodal.badge": '将只发送识别出的文字',   // app.js:612
   "multimodal.ocr_label": '多模态已关 · 只发送了下面的识别文本',   // app.js:615
   "toggle.multimodal.on": '多模态：开',   // app.js:630
@@ -144,11 +142,18 @@ const I18N = {
   "tool.result": `结果：{result}`,   // app.js:988
   "usage.cached": `缓存命中 {cached}`,   // app.js:995
   "usage.this_chat": `本会话 {total} token`,   // app.js:1000
+  "stats.turns": `{n} 轮`,
+  "stats.speed": `{value} tok/s`,
+  "stats.tokens": `{value} tok`,
+  "stats.tokens_title": `本会话累计 {value} token`,
+  "stats.cache": `缓存命中 {value}%`,
+  "stats.context": `{value}%`,
+  "stats.context_title": `当前模型上下文：{used} / {window} token`,
+  "stats.context_none": `未选择模型，上下文使用率显示 0%`,
   "attachment.read_failed": `读不到文件{detail}`,   // app.js:1051
   "attachment.setup_hint": `{msg}（先跑 run.cmd --setup）`,   // app.js:1102
   "attachment.remove_title": '从待发列表里移除（服务器上的文件不动）',   // app.js:1140
   "attachment.busy_add": '正在生成中，先等这一轮结束（或点「停止」）再加图片',   // app.js:1184
-  "attachment.busy_hint": '正在生成中，暂时不能再加图片。',   // app.js:1334
   "attachment.session_changed": '上传期间切换了会话，这张图已丢弃；请在新会话里重新添加',   // app.js:1133
   "chat.no_provider": '还没有可用的接口，先去「设置 → 接口」添加一个',   // app.js:1361
   "chat.images_only": '（图片）',   // app.js:1396
@@ -160,7 +165,7 @@ const I18N = {
   "notice.stream_handler_failed": `这一帧没能画出来（{msg}）；后面的内容会继续接收。`,   // app.js:1480
   "notice.ocr_refresh_failed": `这一轮只发送了 OCR 文字，但会话视图没刷新出来（{msg}）。`,   // app.js:1464
   "notice.ocr_refresh_hint": '刷新页面就能看到模型实际收到的文字。',   // app.js:1465
-  "memory.stats": `有效 {active}/{cap} · 已删除 {deleted} · 操作记录 {ops}`,   // app.js:1513
+  "memory.stats": `有效 {active}/{cap} 条`,   // app.js:1513
   "memory.range": `范围 {min}–{max}`,   // app.js:1521
   "memory.lowest_now": `，现在最低可设到 {lowest}`,   // app.js:1522
   "memory.full": ' · 已满，模型现在记不了新东西',   // app.js:1523
@@ -170,8 +175,6 @@ const I18N = {
   "memory.card_html": `
       <div class="mem-head">
         <span class="chip id">mem:{id}</span>
-        <span class="chip {cls}">{category}</span>
-        {deleted}
       </div>
       <div class="mem-content">{content}</div>
       <div class="mem-foot">
@@ -188,7 +191,7 @@ const I18N = {
   "memory.content_required": '内容不能为空',   // app.js:1616
   "memory.updated": '已更新',   // app.js:1619
   "memory.delete_confirm": `删除这条记忆？\n\n{preview}`,   // app.js:1626
-  "memory.deleted_note": '已删除（可从「显示已删除」查看原文）',   // app.js:1629
+  "memory.deleted_note": '已从 memory_instruction.md 移除',   // app.js:1629
   "dream.meta": `{parts} · 待整理 {n} 个会话`,   // app.js:1660
   "dream.runs_load_failed": `<div class="session-sub">运行历史加载失败：{msg}</div>`,   // app.js:1672
   "dream.seconds": `{n} 秒`,   // app.js:1740
@@ -677,8 +680,6 @@ const I18N = {
   "reset.row_disk": '占用空间',   // app.js:4313
   "brand.version": 'v{version}',   // 侧栏第二行：版本号（ADR-096）
   "brand.version_unknown": '版本未知',
-  "brand.memory": `记忆：{mode}`,   // app.js:4371
-  "brand.no_provider_hint": '⚠ 还没有可用的接口。点左下角「设置 → 接口」添加一个并填入 API Key。',   // app.js:4372
   "reset.pane_html": `
     <div class="reset-card">
       <div class="section-title">恢复出厂设置</div>
@@ -729,7 +730,6 @@ const I18N = {
   "api.no_tools_chip": '<span class="chip" style="color:var(--warn)">不支持工具 → 记忆会失效</span>',   // app.js:3773
   "api.key_stored": '已保存',   // app.js:3773
   "api.key_paste": '粘贴你的 key',   // app.js:3773
-  "brand.memory_mode_default": '全量注入',   // app.js:4147
   "reset.nothing_to_clear": '已经没有可清空的数据了',   // app.js:4157
   "reset.factory_reset": '恢复出厂设置',   // app.js:4157
   "app.title": "O₃ᶻᵒⁿᵉ",
@@ -745,7 +745,6 @@ const I18N = {
   "chat.input_placeholder": "说点什么…（Enter 发送，Shift+Enter 换行，可直接粘贴截图）",
   "chat.send": "发送",
   "chat.stop": "停止",
-  "static.attach_hint": "图片会随请求一并发给模型接口（不是只留在本地）。",
   "settings.title": "设置",
   "settings.back": "返回对话",
   "settings.nav.memory": "记忆",
@@ -828,7 +827,7 @@ const I18N = {
   "settings.nav.reset": "重置",
   "memory.limit_label": "上限",
   "memory.limit_save": "保存上限",
-  "memory.search_placeholder": "搜索内容 / 分类",
+  "memory.search_placeholder": "搜索记忆内容",
   "memory.show_deleted": "显示已删除",
   "action.refresh": "刷新",
   "dream.run_once": "整理一次",
@@ -982,8 +981,6 @@ const I18N = {
   "toggle.web.on_title": "This chat lets the model search on its own; click to turn it off",   // app.js:586
   "toggle.web.off_title": "This chat does not let the model search on its own (opening a link you hand it still works); click to turn it on",   // app.js:587
   "toast.save_web_failed": "Failed to save the web switch: {msg}",   // app.js:598
-  "multimodal.off_text": "Multimodal is off: only the text inside images is recognised and sent to the model, ",   // app.js:610
-  "multimodal.off_bold": "the image itself is not sent",   // app.js:611
   "multimodal.badge": "Only the recognised text will be sent",   // app.js:612
   "multimodal.ocr_label": "Multimodal is off · only the recognised text below was sent",   // app.js:615
   "toggle.multimodal.on": "Multimodal: on",   // app.js:630
@@ -1030,11 +1027,18 @@ const I18N = {
   "tool.result": "Result: {result}",   // app.js:988
   "usage.cached": "{cached} cached",   // app.js:995
   "usage.this_chat": "{total} token in this chat",   // app.js:1000
+  "stats.turns": "{n} turns",
+  "stats.speed": "{value} tok/s",
+  "stats.tokens": "{value} tok",
+  "stats.tokens_title": "{value} token used in this chat",
+  "stats.cache": "Cache hit {value}%",
+  "stats.context": "{value}%",
+  "stats.context_title": "Current model context: {used} / {window} token",
+  "stats.context_none": "No model selected; context usage is 0%",
   "attachment.read_failed": "Could not read the file{detail}",   // app.js:1051
   "attachment.setup_hint": "{msg} (run run.cmd --setup first)",   // app.js:1102
   "attachment.remove_title": "Remove from the pending list (the file on the server is left alone)",   // app.js:1140
   "attachment.busy_add": "Still generating — wait for this turn to end (or hit “Stop”) before adding images",   // app.js:1184
-  "attachment.busy_hint": "Still generating — you cannot add images right now.",   // app.js:1334
   "attachment.session_changed": "The chat changed while uploading, so this image was discarded; add it again in the new chat.",   // app.js:1133
   "chat.no_provider": "No provider is available yet — add one in Settings → Providers",   // app.js:1361
   "chat.images_only": "(images)",   // app.js:1396
@@ -1046,7 +1050,7 @@ const I18N = {
   "notice.stream_handler_failed": "This frame could not be rendered ({msg}); the rest of the stream keeps coming.",   // app.js:1480
   "notice.ocr_refresh_failed": "This turn sent only OCR text, but the session view did not refresh ({msg}).",   // app.js:1464
   "notice.ocr_refresh_hint": "Reload the page to see the text the model actually received.",   // app.js:1465
-  "memory.stats": "{active}/{cap} active · {deleted} deleted · {ops} operations",   // app.js:1513
+  "memory.stats": "{active}/{cap} active",   // app.js:1513
   "memory.range": "Range {min}–{max}",   // app.js:1521
   "memory.lowest_now": ", and the lowest you can set right now is {lowest}",   // app.js:1522
   "memory.full": " · full, the model cannot store anything new right now",   // app.js:1523
@@ -1056,8 +1060,6 @@ const I18N = {
   "memory.card_html": `
       <div class="mem-head">
         <span class="chip id">mem:{id}</span>
-        <span class="chip {cls}">{category}</span>
-        {deleted}
       </div>
       <div class="mem-content">{content}</div>
       <div class="mem-foot">
@@ -1076,7 +1078,7 @@ const I18N = {
   "memory.delete_confirm": `Delete this memory?
 
 {preview}`,   // app.js:1626
-  "memory.deleted_note": "Deleted (see the original under “Show deleted”)",   // app.js:1629
+  "memory.deleted_note": "Removed from memory_instruction.md",   // app.js:1629
   "dream.meta": "{parts} · {n} chats to tidy up",   // app.js:1660
   "dream.runs_load_failed": "<div class=\"session-sub\">Failed to load run history: {msg}</div>",   // app.js:1672
   "dream.seconds": "{n} s",   // app.js:1740
@@ -1569,8 +1571,6 @@ Done: {n} created · `,   // app.js:3721
   "reset.row_disk": "Disk usage",   // app.js:4313
   "brand.version": "v{version}",   // sidebar line 2: version (ADR-096)
   "brand.version_unknown": "version unknown",
-  "brand.memory": "Memory: {mode}",   // app.js:4371
-  "brand.no_provider_hint": "⚠ No usable provider yet. Click “Settings → Providers” at the bottom left, add one and fill in the API Key.",   // app.js:4372
   "reset.pane_html": `
     <div class="reset-card">
       <div class="section-title">Factory reset</div>
@@ -1625,7 +1625,6 @@ Done: {n} created · `,   // app.js:3721
   "api.no_tools_chip": "<span class=\"chip\" style=\"color:var(--warn)\">no tool support → memory will not work</span>",   // app.js:3773
   "api.key_stored": "stored",   // app.js:3773
   "api.key_paste": "paste your key",   // app.js:3773
-  "brand.memory_mode_default": "full injection",   // app.js:4147
   "reset.nothing_to_clear": "There is nothing left to clear",   // app.js:4157
   "reset.factory_reset": "Factory reset",   // app.js:4157
   "app.title": "O₃ᶻᵒⁿᵉ",
@@ -1641,7 +1640,6 @@ Done: {n} created · `,   // app.js:3721
   "chat.input_placeholder": "Say something… (Enter to send, Shift+Enter for a newline, paste a screenshot directly)",
   "chat.send": "Send",
   "chat.stop": "Stop",
-  "static.attach_hint": "Images are sent to the model together with the request (they are not kept only on this machine).",
   "settings.title": "Settings",
   "settings.back": "Back to chat",
   "settings.nav.memory": "Memory",
@@ -1725,7 +1723,7 @@ Only {language} is touched: the other language is left untouched.`,
   "settings.nav.reset": "Reset",
   "memory.limit_label": "Cap",
   "memory.limit_save": "Save cap",
-  "memory.search_placeholder": "Search content / category",
+  "memory.search_placeholder": "Search memory content",
   "memory.show_deleted": "Show deleted",
   "action.refresh": "Refresh",
   "dream.run_once": "Tidy up once",

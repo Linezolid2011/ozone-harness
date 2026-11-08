@@ -140,7 +140,7 @@ class ModelSideWrapperTests(unittest.TestCase):
     # -- 记忆注入 ------------------------------------------------------
 
     def _memory(self) -> MemoryStore:
-        memory = MemoryStore(self.settings.memory_db_path, max_items=5, max_chars=200)
+        memory = MemoryStore(instruction_path=self.settings.memory_instruction_path, cursor_db_path=self.settings.memory_db_path, max_items=5, max_chars=200)
         self.addCleanup(memory.close)
         return memory
 
@@ -187,7 +187,7 @@ class ModelSideWrapperTests(unittest.TestCase):
 
         中文那几条是既有测试断言过的原句，这里顺便把它们钉住。
         """
-        memory = MemoryStore(self.settings.memory_db_path, max_items=2, max_chars=40)
+        memory = MemoryStore(instruction_path=self.settings.memory_instruction_path, cursor_db_path=self.settings.memory_db_path, max_items=2, max_chars=40)
         self.addCleanup(memory.close)
         created = memory.create("用户喜欢手冲")
 
@@ -200,7 +200,7 @@ class ModelSideWrapperTests(unittest.TestCase):
             self.assertIn("记忆条数过多", too_many["error"])
             self.assertIn("mem_edit", too_many["hint"])
             self.assertEqual(
-                memory.edit(9999)["error"], "不存在 id=9999 的有效记忆"
+                memory.edit(9999, "x")["error"], "不存在 id=9999 的有效记忆"
             )
             self.assertEqual(
                 memory.delete(9999)["error"],
@@ -208,7 +208,7 @@ class ModelSideWrapperTests(unittest.TestCase):
             )
             self.assertEqual(
                 memory.edit(created["id"])["error"],
-                "至少要提供 content 或 category 之一",
+                "必须提供 content",
             )
             self.assertEqual(memory.edit(created["id"], content="用户喜欢手冲")["note"],
                              "内容没有变化，未做修改")
@@ -721,7 +721,7 @@ class EnglishEndToEndTests(unittest.TestCase):
             self.assertEqual(CJK.findall(cleaned), [], cleaned)
 
     def test_english_memory_block_has_no_chinese(self) -> None:
-        memory = MemoryStore(self.settings.memory_db_path, max_items=5, max_chars=200)
+        memory = MemoryStore(instruction_path=self.settings.memory_instruction_path, cursor_db_path=self.settings.memory_db_path, max_items=5, max_chars=200)
         self.addCleanup(memory.close)
         memory.create("USER-MEMORY")
         with i18n.use("en"):

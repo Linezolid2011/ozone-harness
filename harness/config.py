@@ -224,7 +224,12 @@ class Settings:
 
     @property
     def memory_db_path(self) -> Path:
+        # 这里只存 Dream 游标；逐条记忆正文在 memory_instruction_path。
         return self.data_dir / "memory.db"
+
+    @property
+    def memory_instruction_path(self) -> Path:
+        return self.vault_dir / "memory_instruction.md"
 
     @property
     def dreams_dir(self) -> Path:

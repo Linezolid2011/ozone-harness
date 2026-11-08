@@ -214,7 +214,7 @@ class RuntimeArtifactsArePortableTests(unittest.TestCase):
 
         memory = open_memory(self.settings)
         self.addCleanup(memory.close)
-        memory.create("用户在做一个记忆系统的项目", "项目")
+        memory.create("用户在做一个记忆系统的项目")
 
         vault = VaultStore(self.settings.vault_dir)
         vault.write_file("sections/项目.md", "---\ntitle: 项目\n---\n\n记忆系统。\n")

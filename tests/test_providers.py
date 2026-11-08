@@ -771,6 +771,18 @@ class ModelLabelTests(unittest.TestCase):
         self.assertEqual([item["model"] for item in models], ["m1", "m2"])
         self.assertEqual([item["label"] for item in models], ["P · M One", "P · m2"])
         self.assertEqual(models[0]["model_label"], "M One")
+        self.assertEqual(models[0]["context_window"], 200_000)
+
+    def test_all_models_exposes_each_models_context_window(self) -> None:
+        """统计条与请求预算必须用同一个按模型窗口，不能在前端另写默认值。"""
+        store = ProviderStore(self.path)
+        store.upsert(ProviderProfile(
+            id="p", label="P", base_url="https://x", api_key="k",
+            models=["small", "large"],
+            model_limits={"small": 32_000, "large": 1_000_000},
+        ))
+        models = store.all_models()
+        self.assertEqual([item["context_window"] for item in models], [32_000, 1_000_000])
 
 
 class TokenLimitParsingTests(unittest.TestCase):

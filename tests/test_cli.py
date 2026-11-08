@@ -44,7 +44,7 @@ class CliSmokeTests(unittest.TestCase):
         log.close()
         memory = open_memory(self.settings)
         self.addCleanup(memory.close)
-        memory.create("用户在做记忆系统", "项目")
+        memory.create("用户在做记忆系统")
         memory.advance_cursor("s1", 1, "dream-x")
         vault = VaultStore(self.settings.vault_dir)
         vault.write_file("entities/小林.md", "---\ntitle: 小林\n---\n\n内容\n")
@@ -123,6 +123,13 @@ class CliSmokeTests(unittest.TestCase):
         text = out.getvalue()
         self.assertIn(PRODUCT_NAME, text)
         self.assertIn(version(), text)
+
+    def test_web_guides_venv_by_default_and_has_an_explicit_opt_out(self) -> None:
+        """任何 CLI Web 入口都不能因漏传 start.cmd 的私有旗标而跳过启动门。"""
+        parser = cli.build_parser()
+        self.assertTrue(parser.parse_args(["--web"]).guided_venv)
+        self.assertTrue(parser.parse_args(["--web", "--guided-venv"]).guided_venv)
+        self.assertFalse(parser.parse_args(["--web", "--no-guided-venv"]).guided_venv)
 
     def test_dream_format_yes_skips_the_question(self) -> None:
         """`--yes` 给脚本用：不该再问（问了就会卡在等待输入上）。"""

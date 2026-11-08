@@ -330,7 +330,11 @@ function seedFixtures(dataDir) {
   seedProviders(resolved);
 
   const ts = '2026-10-14T00:00:00+08:00';
-  const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  // 非零夹具让会话统计条的五种数字与上下文小进度条都能被截图验证。
+  const usage = {
+    prompt_tokens: 12000, completion_tokens: 600, total_tokens: 12600,
+    reasoning_tokens: 0, cached_tokens: 11400, cache_miss_tokens: 600,
+  };
 
   writeSession(resolved, IMAGE_SESSION, [IMAGE_ID], [
     {
@@ -346,6 +350,10 @@ function seedFixtures(dataDir) {
       ts,
       message: { content: IMAGE_REPLY, reasoning: '' },
       usage,
+    },
+    {
+      kind: 'turn_end', seq: 3, ts, steps: 1, stop_reason: 'completed',
+      elapsed: 20, usage, user_seq: 1,
     },
   ]);
 
@@ -370,11 +378,15 @@ function seedFixtures(dataDir) {
       usage,
     },
     {
+      kind: 'turn_end', seq: 3, ts, steps: 1, stop_reason: 'completed',
+      elapsed: 20, usage, user_seq: 1,
+    },
+    {
       // 这个会话的「多模态」是**关着**的（契约 §13.1：会话级开关，最后一条为准）。
       // 少了它，页面上会出现"多模态：开"配"多模态已关 · 只发送了下面的识别文本"
-      // 这种自相矛盾的截图 —— 而且输入框附近那句"图片会随请求发给模型"也会冒出来。
+      // 这种自相矛盾的截图。
       kind: 'session_tools',
-      seq: 3,
+      seq: 4,
       ts,
       web_search: false,
       multimodal: false,
@@ -385,9 +397,8 @@ function seedFixtures(dataDir) {
 }
 
 /* 夹具数据目录里没有接口档案时补一份**假的**（只为截图连贯）。
-   没有它，右上角会写"（没有可用模型，去「设置 → 接口」添加）"、输入框下面还挂一条
-   琥珀色的"还没有可用的接口…" —— 文档截图看起来像坏了，而这一页要讲的是折叠的
-   OCR 气泡。key 是**假**的（真去发一轮只会拿到 401，不会花钱），而且
+   没有它就没有可选模型，统计条的上下文占用必须显示 0%；这份档案让截图能验证
+   正常的非零百分比。key 是**假**的（真去发一轮只会拿到 401，不会花钱），而且
    **只在文件不存在时写**：绝不覆盖别人自己那份配置。 */
 function seedProviders(dataDir) {
   const file = path.join(dataDir, 'providers.json');
@@ -450,6 +461,29 @@ async function waitForThumbs(label) {
   );
 }
 
+async function verifyStatsBar(language) {
+  const actual = await evaluate(`(() => {
+    const text = (id) => (document.getElementById(id) || {}).textContent || '';
+    return {
+      turns: text('stats-turns'), speed: text('stats-speed'), tokens: text('stats-tokens'),
+      cache: text('stats-cache'), context: text('stats-context'),
+      meter: (document.getElementById('context-meter-fill') || {}).style.width || '',
+      oldHints: document.querySelectorAll('#composer-hint, #attach-hint, #multimodal-hint').length,
+      steps: !!document.getElementById('stats-steps'),
+    };
+  })()`);
+  const expected = language === 'en'
+    ? { turns: '1 turns', cache: 'Cache hit 95%' }
+    : { turns: '1 轮', cache: '缓存命中 95%' };
+  if (actual.turns !== expected.turns || actual.speed !== '30 tok/s'
+    || actual.tokens !== '12.6k tok' || actual.cache !== expected.cache
+    || actual.context !== '6%' || actual.meter !== '6%'
+    || actual.oldHints !== 0 || actual.steps) {
+    throw new Error(`会话统计条形状/数值不对：${JSON.stringify(actual)}`);
+  }
+  console.log('  会话统计条：', JSON.stringify(actual));
+}
+
 /* 切界面语言（ADR-085）。**走真接口**，而且收尾必须切回去 ——
    截图脚本顺手改掉别人数据目录里的语言设置是不可接受的。 */
 async function setLanguage(language) {
@@ -493,6 +527,7 @@ async function captureFixtureShots(dataDir) {
       // ① 缩略图那条（原来的第 4 张）
       await openFixtureSession(IMAGE_TEXT);
       await waitForThumbs('历史气泡里的缩略图加载完成');
+      await verifyStatsBar(language);
       await sleep(300);
       await shot(`chat-attachments${suffix}`, DOCS_OUT);
 
@@ -508,13 +543,13 @@ async function captureFixtureShots(dataDir) {
         15000,
         '默认折叠的 OCR 气泡（折起来 + 缩略图加载完）',
       );
+      await verifyStatsBar(language);
       // 折起来不等于看不见：标题里必须有状态摘要（这里就该是那段 OCR 文字的真实字数）
       const folded = await evaluate(`(() => {
         const label = document.querySelector('.msg.user .ocr-label');
         const preview = document.querySelector('.msg.user .ocr-preview');
         const chev = document.querySelector('.msg.user .ocr-head .chev');
         const toggle = document.getElementById('toggle-multimodal');
-        const hint = document.getElementById('attach-hint');
         return {
           label: label ? label.textContent : null,
           preview: preview ? preview.textContent : null,
@@ -522,7 +557,6 @@ async function captureFixtureShots(dataDir) {
           collapsed: !!document.querySelector('.msg.user .ocr-block.collapsed'),
           bodyVisible: !!document.querySelector('.msg.user .ocr-block .ocr-body'),
           multimodalLabel: toggle ? toggle.textContent.trim() : null,
-          hintHidden: hint ? hint.classList.contains('hidden') : null,
         };
       })()`);
       console.log('  折叠态 OCR 气泡：', JSON.stringify(folded));
@@ -544,14 +578,10 @@ async function captureFixtureShots(dataDir) {
           + JSON.stringify(folded.label));
       }
       if (folded.chev !== '▸') throw new Error(`折叠时箭头应当是 ▸，实际 ${folded.chev}`);
-      // 截图里不许出现自相矛盾：气泡说"多模态已关"，右上角那个开关也得是关；
-      // 而"图片会随请求发给模型接口"那句在关着的时候**必须**让位（这一轮修的）。
+      // 截图里不许出现自相矛盾：气泡说"多模态已关"，右上角那个开关也得是关。
       if (!new RegExp(words.off).test(folded.multimodalLabel || '')) {
         throw new Error(`夹具会话的开关没恢复成"关"（会话里那条 session_tools 没写进去？）：`
           + JSON.stringify(folded.multimodalLabel));
-      }
-      if (folded.hintHidden !== true) {
-        throw new Error('开关关着时"图片会随请求发给模型接口"那句仍然露着 —— 截图会自相矛盾');
       }
       await sleep(300);
       await shot(`chat-multimodal-ocr${suffix}`, DOCS_OUT);

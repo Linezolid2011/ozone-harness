@@ -234,8 +234,8 @@ def _chat_specs(cond: _Conditions, settings: Settings) -> list[dict[str, Any]]:
     cap = settings.max_tool_result_chars
     rows: list[dict[str, Any]] = []
     # 记忆三件套的 store 是个一次性替身：`__init__` 只存引用，这一页从不 `run()`。
-    # 这样"看一眼工具定义"不会在你 data/ 里种出一个 memory.db。
-    proxy = MemoryStore(":memory:", max_items=1, max_chars=1000)
+    # 这样"看一眼工具定义"不会在你 data/ 里种出 memory.db 或 memory_instruction.md。
+    proxy = MemoryStore(instruction_path=":memory:", max_items=1, max_chars=1000)
     try:
         for tool in (MemCreateTool(proxy), MemEditTool(proxy), MemDeleteTool(proxy)):
             rows.append(_spec(tool, state="on"))

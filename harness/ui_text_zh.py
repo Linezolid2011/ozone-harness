@@ -263,6 +263,7 @@ MESSAGES: dict[str, str] = {
     "ui.vault.import_case_clash": "导入包里有两个只差大小写的路径：{a} / {b}",
     "ui.vault.import_empty": "导入包里没有任何可识别的档案：{path}",
     "ui.vault.import_bad_image": "raw 素材不是可识别的图片：{path}",
+    "ui.vault.import_bad_memory": "memory_instruction.md 不是合法的原生记忆格式：{path}（{error}）",
     "ui.vault.import_image_mismatch": (
         "raw 素材 {path} 的扩展名与内容不符（内容看起来是 {sniffed}）"
     ),
@@ -338,7 +339,12 @@ MESSAGES: dict[str, str] = {
     "ui.memory.no_such_id": "不存在 id={id} 的有效记忆",
     "ui.memory.no_such_id_deleted": "不存在 id={id} 的有效记忆（可能已被删除）",
     "ui.memory.edit_missing_hint": "用 mem_create 新建，或核对上下文里 [mem:<id>] 的编号",
-    "ui.memory.need_a_field": "至少要提供 content 或 category 之一",
+    "ui.memory.need_a_field": "必须提供 content",
+    "ui.memory.content_reserved_heading": "正文不能包含形如 `## 数字` 的独立行（会与原生记忆标题冲突）",
+    "ui.memory.format_header": "memory_instruction.md 缺少文件头：{header}",
+    "ui.memory.format_empty": "记忆 {id} 没有正文",
+    "ui.memory.format_duplicate_id": "memory_instruction.md 里重复的记忆 id：{id}",
+    "ui.memory.format_junk": "文件头与第一个记忆标题之间有杂项：{line}",
     "ui.memory.edit_duplicate": "修改后的内容与另一条记忆完全相同",
     "ui.memory.edit_duplicate_hint": "考虑改为 mem_del 删除重复项",
     "ui.memory.unchanged": "内容没有变化，未做修改",

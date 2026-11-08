@@ -94,14 +94,22 @@
             <button class="btn-stop hidden" id="stop" data-i18n="chat.stop">停止</button>
           </div>
         </div>
-        <!-- 契约 §13.7 第 1 句：开关关着**且有待发图片**时才显示。
-             文案由 app.js 填进来（一个常量，只写一处），这里只负责占位。 -->
-        <div class="composer-hint multimodal-hint hidden" id="multimodal-hint"></div>
-        <div class="composer-hint" id="composer-hint"></div>
-        <!-- 这句是**独立**元素：上面那句 composer-hint 被"没有可用接口"用着，
-             两者谁都不该把对方冲掉。字由 app.js 的 syncAttachEntry() 填
-             （同一个 key，busy 时换成另一句），这里留着当兜底。 -->
-        <div class="composer-hint attach-hint" id="attach-hint" data-i18n="static.attach_hint">图片会随请求一并发给模型接口（不是只留在本地）。</div>
+        <!-- 会话统计条：只显示当前会话，不显示 agent 步数。新会话归零；打开或
+             分叉会话时由服务端事件日志重建，每轮 turn_end 后累加。 -->
+        <div class="session-stats" id="session-stats" role="status" aria-live="polite">
+          <span class="session-stat" id="stats-turns">0 轮</span>
+          <span class="session-stats-separator" aria-hidden="true">·</span>
+          <span class="session-stat" id="stats-speed">0 tok/s</span>
+          <span class="session-stats-separator" aria-hidden="true">·</span>
+          <span class="session-stat" id="stats-tokens">0 tok</span>
+          <span class="session-stats-separator" aria-hidden="true">·</span>
+          <span class="session-stat" id="stats-cache">缓存命中 0%</span>
+          <span class="session-stats-separator" aria-hidden="true">·</span>
+          <span class="session-stat session-context-stat" id="stats-context-wrap">
+            <span class="context-meter" aria-hidden="true"><span id="context-meter-fill"></span></span>
+            <span id="stats-context">0%</span>
+          </span>
+        </div>
       </div>
     </section>
 
@@ -143,8 +151,7 @@
             <div class="pane-note" id="memory-injection-note"></div>
             <div class="toolbar">
               <input type="search" id="memory-search"
-                     data-i18n-placeholder="memory.search_placeholder" placeholder="搜索内容 / 分类">
-              <label class="check"><input type="checkbox" id="memory-show-deleted"> <span data-i18n="memory.show_deleted">显示已删除</span></label>
+                     data-i18n-placeholder="memory.search_placeholder" placeholder="搜索记忆内容">
               <button class="btn-ghost" id="memory-reload" data-i18n="action.refresh">刷新</button>
               <span class="pane-meta" id="memory-stats"></span>
             </div>

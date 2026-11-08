@@ -54,6 +54,7 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(outcome.text, "你好呀")
         self.assertEqual(outcome.steps, 1)
         self.assertEqual(outcome.usage.total_tokens, 30)
+        self.assertEqual(outcome.context_tokens, 20)
         self.assertEqual(len(harness.provider.calls), 1)
 
         tool_names = [spec["function"]["name"] for spec in harness.provider.calls[0]["tools"]]
@@ -68,7 +69,7 @@ class LoopTests(unittest.TestCase):
     def test_tool_call_round_trip_writes_memory(self) -> None:
         script = [
             tool_reply(
-                [("call_1", "mem_create", '{"content":"用户喜欢美式咖啡","category":"偏好"}')]
+                [("call_1", "mem_create", '{"content":"用户喜欢美式咖啡"}')]
             ),
             text_reply("好的，记住了。"),
             text_reply("你喜欢美式咖啡。"),
@@ -108,7 +109,8 @@ class LoopTests(unittest.TestCase):
         # 下一轮开始时，新记忆才出现在记忆块里
         next_turn_system = harness.provider.calls[2]["messages"][0].content
         self.assertIn("用户喜欢美式咖啡", next_turn_system)
-        self.assertIn("[mem:1]", next_turn_system)
+        memory_id = harness.memory.active_items()[0].id
+        self.assertIn(f"[mem:{memory_id}]", next_turn_system)
         self.assertEqual(second.text, "你喜欢美式咖啡。")
 
     def test_tool_call_id_is_matched_in_history(self) -> None:
@@ -363,7 +365,7 @@ class LoopTests(unittest.TestCase):
                     harness = make_harness(Path(tmp), [text_reply("好")])
                     try:
                         for index in range(size):
-                            harness.memory.create(f"事实编号 {index}", "偏好")
+                            harness.memory.create(f"事实编号 {index}")
 
                         harness.loop.run("我有什么偏好？")
 

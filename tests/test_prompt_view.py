@@ -339,7 +339,7 @@ class PromptTruthfulnessTests(unittest.TestCase):
         """记忆三件套用的是 `:memory:` 替身 —— 参数与原型必须与真库构造的一致。"""
         from harness.memory import MemoryStore
 
-        proxy = MemoryStore(":memory:", max_items=1, max_chars=1000)
+        proxy = MemoryStore(instruction_path=":memory:", max_items=1, max_chars=1000)
         try:
             expected = {
                 tool.name: (tool.description, tool.parameters)

@@ -15,7 +15,7 @@ class El {
     this.tagName = String(tag || 'div').toUpperCase();
     this.children = []; this.parentNode = null; this.attrs = {}; this._text = '';
     this.onclick = null; this.firstChild = null; this._ownId = ''; this.type = '';
-    this.dataset = {}; this.scrollTop = 0;
+    this.dataset = {}; this.scrollTop = 0; this.style = {};
     // 图片附件的入口三件套要验"哪个元素挂了哪个监听"，所以这里不把
     // addEventListener 当空操作（与 dom-stub.test.mjs 里那个 stub 一个道理）
     this._listeners = {}; this.files = null; this.clickCount = 0;
@@ -128,9 +128,11 @@ const byId = new Map();
 function primeShell() {
   for (const id of [
     'messages', 'input', 'toast', 'send', 'stop',
-    'attach', 'attach-file', 'attach-hint', 'composer-drop', 'composer-attachments',
-    'composer-hint', 'lightbox', 'lightbox-img', 'lightbox-caption',
-    'toggle-web-search', 'toggle-multimodal', 'multimodal-hint', 'chat-meta',
+    'attach', 'attach-file', 'composer-drop', 'composer-attachments',
+    'lightbox', 'lightbox-img', 'lightbox-caption',
+    'toggle-web-search', 'toggle-multimodal', 'chat-meta',
+    'session-stats', 'stats-turns', 'stats-speed', 'stats-tokens', 'stats-cache',
+    'stats-context-wrap', 'stats-context', 'context-meter-fill',
   ]) doc.getElementById(id);
   // 两个开关都会写各自的 `.label` 子节点（index.html 里就有）
   for (const id of ['toggle-web-search', 'toggle-multimodal']) {
@@ -142,13 +144,12 @@ function primeShell() {
     }
   }
   const zone = doc.getElementById('composer-drop');
-  for (const id of ['composer-attachments', 'input', 'attach', 'attach-file', 'attach-hint']) {
+  for (const id of ['composer-attachments', 'input', 'attach', 'attach-file', 'session-stats']) {
     const node = doc.getElementById(id);
     if (node.parentNode !== zone) zone.appendChild(node);
   }
   doc.getElementById('lightbox').classList.add('hidden');
   doc.getElementById('composer-attachments').classList.add('hidden');
-  doc.getElementById('multimodal-hint').classList.add('hidden');
 }
 const doc = { documentElement: new El('html'), body: new El('body'), createElement: (t) => new El(t),
   createTextNode: (t) => new Txt(t),
@@ -498,7 +499,9 @@ await check('真响应渲染出标题/路径/属性/extra', () => {
   assert.equal(find(viewerNow(), (x) => x.classList.contains('vault-view-title')).textContent, '小林');
   assert.equal(find(viewerNow(), (x) => x.classList.contains('vault-view-path')).textContent, 'entities/小林.md');
   const labels = byClass(viewerNow(), 'va-k').map((x) => x.textContent);
-  assert.deepEqual(labels.slice(0, 7), ['name', 'kind', 'relation', 'status', 'created', 'updated', 'tags']);
+  for (const expected of ['name', 'kind', 'relation', 'status', 'created', 'updated', 'tags', 'aliases', 'sources']) {
+    assert.ok(labels.includes(expected), `属性区缺少 ${expected}：${labels.join(', ')}`);
+  }
   const extras = byClass(viewerNow(), 'vault-attr-extra').map((x) => x.textContent);
   assert.ok(extras.some((t) => t.includes('mood') && t.includes('偏谨慎')));
 });
@@ -1262,21 +1265,16 @@ await check('§13.7 第 3 句：OCR 文字块默认折叠，标题带状态摘�
   assert.equal(find(box, (n) => n.classList.contains('chev')).textContent, '▾');
 });
 
-await check('那句"图片会随请求发给模型"只在开关打开时出现（关着时与有没有待发图片无关）', () => {
-  const hint = byId.get('attach-hint');
+await check('输入区旧提示已移除；待发缩略图上的模态徽标仍按开关显示', () => {
   const wasBusy = app.state.busy;
   app.state.busy = false;
   app.state.multimodal = false;
-  app.state.attachments = [];
-  app.renderAttachments();
-  assert.ok(hint.classList.contains('hidden'), '关着 + **没有**待发图片时它也不许出现');
   app.state.attachments = [{ id: 'aaaa00000000000f', ext: 'png', name: 'a.png', url: '/x.png' }];
   app.renderAttachments();
-  assert.ok(hint.classList.contains('hidden'), '关着 + 有待发图片时同样不出现');
+  assert.equal(byClass(byId.get('composer-attachments'), 'attach-badge').length, 1);
   app.state.multimodal = true;
-  app.state.attachments = [];
   app.renderAttachments();
-  assert.equal(hint.classList.contains('hidden'), false, '开关打开时回来');
+  assert.equal(byClass(byId.get('composer-attachments'), 'attach-badge').length, 0);
   app.state.busy = wasBusy;
   app.state.attachments = [];
   app.renderAttachments();

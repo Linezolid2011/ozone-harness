@@ -542,7 +542,7 @@ class ProviderStore:
             "effort": str(raw.get("effort") or ""),
         }
 
-    def all_models(self) -> list[dict[str, str]]:
+    def all_models(self) -> list[dict[str, Any]]:
         """给前端下拉用：把每家已配置好的模型摊平成一个列表。
 
         `label` 用**显示名**（没填就是 id）：下拉框是用户唯一会反复看的那一栏，
@@ -561,6 +561,9 @@ class ProviderStore:
                         "model": model,
                         "model_label": profile.display_name(model),
                         "label": f"{profile.label} · {profile.display_name(model)}",
+                        # 输入区统计条按当前选中模型算上下文百分比；与请求预算共用
+                        # 同一个 context_window()，避免前端另写一份 200k 默认值。
+                        "context_window": profile.context_window(model),
                     }
                 )
         return out

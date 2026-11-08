@@ -311,6 +311,7 @@ MESSAGES: dict[str, str] = {
     ),
     "ui.vault.import_empty": "The import archive contains no recognisable archives: {path}",
     "ui.vault.import_bad_image": "A raw asset is not a recognisable image: {path}",
+    "ui.vault.import_bad_memory": "memory_instruction.md is not valid native memory format: {path} ({error})",
     "ui.vault.import_image_mismatch": (
         "Raw asset {path} has an extension that does not match its content "
         "(the content looks like {sniffed})"
@@ -394,7 +395,12 @@ MESSAGES: dict[str, str] = {
     "ui.memory.edit_missing_hint": (
         "Use mem_create to add one, or check the [mem:<id>] number in the context"
     ),
-    "ui.memory.need_a_field": "At least one of content or category must be provided",
+    "ui.memory.need_a_field": "content is required",
+    "ui.memory.content_reserved_heading": "Memory content cannot contain a standalone `## <number>` line (it conflicts with the native item heading)",
+    "ui.memory.format_header": "memory_instruction.md is missing the required header: {header}",
+    "ui.memory.format_empty": "Memory item {id} has no content",
+    "ui.memory.format_duplicate_id": "Duplicate memory id in memory_instruction.md: {id}",
+    "ui.memory.format_junk": "Unexpected content between the file header and first memory heading: {line}",
     "ui.memory.edit_duplicate": "The edited content is identical to another memory",
     "ui.memory.edit_duplicate_hint": "Consider using mem_del to remove the duplicate",
     "ui.memory.unchanged": "The content did not change, so nothing was modified",

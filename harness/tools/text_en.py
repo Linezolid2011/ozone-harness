@@ -63,7 +63,7 @@ MESSAGES: dict[str, str] = {
         "You must give the id — ids appear in your context as a prefix of the form [mem:12]. "
         "For the same topic, prefer editing the existing item over creating a new one, so "
         "memories do not pile up in duplicates. "
-        "Give at least one of content and category."
+        "You must give both id and content (a full replacement); native memory has no category field."
     ),
     "tool.mem_edit.param.id": "The id of the memory to edit, for example 12 in [mem:12].",
     "tool.mem_edit.param.content": "The new memory content (replaces the whole item).",
@@ -78,7 +78,7 @@ MESSAGES: dict[str, str] = {
         "and recreating it."
     ),
     "tool.mem_del.param.id": "The id of the memory to delete.",
-    "tool.mem_del.param.reason": "Why it is deleted (optional, for auditing only).",
+    "tool.mem_del.param.reason": "Why it is deleted (optional, recorded in the session log).",
     "tool.mem_del.display.deleted": "Forgot #{id}: {forgot}",
     "tool.mem_del.display.failed": "Not deleted: {error}",
     # ── Read-only background-archive tools (vault_tools) ───────────
@@ -361,7 +361,6 @@ MESSAGES: dict[str, str] = {
     ),
     "tool.readme_write.display": "wrote README ({tokens}/{budget} tokens)",
     # ── Shared sentences (said by more than one tool) ──────────────
-    "tool.common.category_hint": "Optional category; suggested values: identity, preference, project, relationship, agreement, other. Defaults to general.",
     "tool.common.bad_id": "id must be an integer, got: {raw_id!r}",
     "tool.common.bad_id.display": "invalid id",
     "tool.common.path_required": "path must not be empty",

@@ -99,6 +99,22 @@ class DreamPipelineTests(unittest.TestCase):
 
     # ------------------------------------------------------------------
 
+    def test_dream_diff_never_owns_memory_instruction_changes(self) -> None:
+        self.memory.create("运行前已有的独立记忆")
+        runner = self._runner([text_reply("不需要改动档案")])
+        self.assertNotIn("memory_instruction.md", runner.before_image)
+        # 模拟整理期间另一请求改了独立记忆：不能记成 Dream 的新增/修改/删除。
+        self.memory.create("整理期间新增的另一条独立记忆")
+
+        outcome = runner.run()
+
+        changed_paths = {
+            item["path"]
+            for group in outcome.diff.values()
+            for item in group
+        }
+        self.assertNotIn("memory_instruction.md", changed_paths)
+
     def test_full_run_writes_files_and_advances_the_cursor(self) -> None:
         script = [
             tool_reply([("c1", "records_list", "{}")]),
@@ -745,7 +761,7 @@ class DreamFormatTests(unittest.TestCase):
         log.append("user_message", text="你好")
         log.append("assistant_message", message={"content": "嗯"})
         log.close()
-        self.memory.create("用户在做记忆系统", "项目")
+        self.memory.create("用户在做记忆系统")
         self.memory.advance_cursor("s1", 2, "dream-x")
 
         vault = _vault(self.settings)
@@ -828,6 +844,7 @@ class DreamFormatTests(unittest.TestCase):
         archive_before = archive.read_bytes()
         dream_record = self.settings.dreams_dir / "dream-20261012-000000-aaaa.json"
         record_before = dream_record.read_bytes()
+        instruction_before = self.settings.memory_instruction_path.read_bytes()
 
         with unittest.mock.patch.object(
             VaultStore, "init_skeleton", side_effect=OSError("模拟：初始化失败")
@@ -838,6 +855,7 @@ class DreamFormatTests(unittest.TestCase):
         self.assertEqual(self.memory.cursor_map(), {"s1": 2}, "已清掉的游标没有恢复")
         self.assertEqual(archive.read_bytes(), archive_before)
         self.assertEqual(dream_record.read_bytes(), record_before)
+        self.assertEqual(self.settings.memory_instruction_path.read_bytes(), instruction_before)
         self.assertEqual(
             [p.name for p in self.settings.data_dir.glob(".dream-format-*")], []
         )
@@ -851,11 +869,17 @@ class DreamFormatTests(unittest.TestCase):
         before_bytes = session_path.read_bytes()
         provider_file = self.settings.data_dir / "providers.json"
         provider_file.write_text('{"providers": [{"id": "x"}]}', encoding="utf-8")
+        instruction_before = self.settings.memory_instruction_path.read_bytes()
 
         format_dream(self.settings, self.memory)
 
         self.assertEqual(session_path.read_bytes(), before_bytes, "会话被动过")
         self.assertEqual(self.memory.stats()["active"], 1, "记忆条目被动过")
+        self.assertEqual(
+            self.settings.memory_instruction_path.read_bytes(),
+            instruction_before,
+            "独立记忆的原始字节不能被 Dream 格式化改变",
+        )
         self.assertEqual(self.memory.cursor_map(), {}, "进度应当清空")
         self.assertEqual(
             provider_file.read_text(encoding="utf-8"), '{"providers": [{"id": "x"}]}'
@@ -875,8 +899,12 @@ class DreamFormatTests(unittest.TestCase):
         from harness.dream import format_dream
 
         self._seed()
+        before = self.settings.memory_instruction_path.read_bytes()
         format_dream(self.settings, self.memory, initialize=False)
-        self.assertFalse(self.settings.vault_dir.exists(), "initialize=False 不该建骨架")
+        self.assertEqual(self.settings.memory_instruction_path.read_bytes(), before)
+        self.assertFalse((self.settings.vault_dir / "sections").exists(), "不该建 sections 骨架")
+        self.assertFalse((self.settings.vault_dir / "entities").exists(), "不该建 entities 骨架")
+        self.assertFalse((self.settings.vault_dir / "README.md").exists(), "不该建 README")
 
     def test_format_refuses_a_vault_outside_the_data_dir(self) -> None:
         """防手滑：目录被指到 data 外面时，**拒绝**而不是照着删。

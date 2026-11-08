@@ -43,7 +43,7 @@ harness/
   loop.py           Agent 循环（对话与整理共用）：熔断、工具执行、事件落盘
   context.py        system 提示 + 记忆/README 注入 + 历史裁剪（顺序 = 缓存经济学）
   events.py         事件溯源 JSONL：唯一真相来源；seq 分配、重放、悬空 tool_calls 修补
-  memory.py         记忆条目（SQLite）：软删除、可调上限、整理游标
+  memory.py         逐条记忆（原生 Markdown：id + 正文、硬删除）+ SQLite 整理游标
   vault.py          背景档案：路径安全、frontmatter、README 预算、结构校验
   vault_import.py   原生 Kimi vault zip 的安全导入（ADR-104）
   dream.py          整理流水线（单向门，无预演）+ 格式化重来
@@ -68,8 +68,9 @@ scripts/ui_check/   前端自检（自写 DOM stub 跑真 app.js）、截图、�
 * **一个请求只能产生一个响应**（ADR-089）：SSE 已经开始的异常只能变成 `notice` 帧。
 * **事件日志的 `seq` 唯一且递增**：整理游标靠它定位；重复 = 有记录被无声吞掉。
 * **`data/` 下的 JSON 一律原子写**：半截文件会被读成"没有配置"（= key 全丢）。
-* **记忆条目与背景档案是两个存储、两种写权限**（ADR-053）：对话模型只读档案，
-  整理者碰不到记忆条目。
+* **记忆条目与背景档案是两套系统、两种写权限**（ADR-053/109）：它们可以同在
+  `data/vault/`，但 `memory_instruction.md` 只由 MemoryStore 写；Dream 不显示、不改写、
+  不把它算作整理产物，格式化 Dream 时保留它的原始字节。
 * **会话 id 必须校验**（ADR-049）：它直接拼文件名；非法一律 400 且不碰磁盘。
 * **完整 API key 永不出现在任何响应里**（只给掩码）。
 * **"只看一眼"的接口不落盘**（预览、`GET /api/reset`、`prompt_view`）。

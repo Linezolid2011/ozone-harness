@@ -31,13 +31,31 @@
 | | memory instructions | dream vault |
 |---|---|---|
 | 谁写 | **只有**对话模型（`mem_create/edit/del`） | **只有** dream 整理流程 |
-| 存在哪 | `data/memory.db`（SQLite） | `data/vault/**.md` |
+| 存在哪 | `data/vault/memory_instruction.md`（原生 Markdown） | `data/vault/**.md` |
 | 注什么 | 条目本身（**全部**，有硬上限） | **只有 README** |
 | 怎么取更多 | 不需要：都在上下文里 | 模型自己调 `dream_list / dream_read / dream_search` |
 | 可信度 | 最高（用户明说） | 次之（压缩推断，可能失真） |
 
 提示词里把这条分层**写出来**了（见 `harness/context.py` 的 system 提示），
 并且工具层面也成立：**对话模型没有任何写 vault 的能力**。
+
+### 同目录不等于同所有权（ADR-109）
+
+逐条记忆现在也放在 vault 根下，但它是独立系统，不是 Dream 的可重建投影：
+
+```md
+# Memory instructions
+
+## 1
+
+用户喜欢美式咖啡。
+```
+
+* 文件只有 `## <正整数 id>` 与正文；没有分类、版本、时间戳或软删除状态。删除是硬删除。
+* 旧 SQLite `memories` / `memory_ops` 不读取、不迁移；`data/memory.db` 仅用于 Dream 游标。
+* Dream 档案树不显示它，`VaultStore` 的保存/删除入口一律拒绝它；设置 → 记忆才是管理窗口。
+* Dream 格式化保留它的原始字节，Dream 差异不把它算成整理产物。
+* 原生 zip 导入先跑同一套格式校验；`overwrite=True` 会同时替换现有记忆，必须显式选择。
 
 ## 目录结构
 
@@ -58,7 +76,8 @@ data/vault/
   entities/project_photon.md
   raw/source_11/icais2026_pic1.jpg
   raw/source_11/icais2026_pic1.jpg.meta.json
-  log.md / observations.md / memory_instruction.md  ← 旁路导出/日志，可读
+  log.md / observations.md  ← 旁路导出/日志，可读
+  memory_instruction.md   ← 独立逐条记忆；由「设置 → 记忆」管理，不在 Dream 树展示
 ```
 
 **旧模式（没有 `sections.yaml`）**：仍然只有 `README.md` + `sections/<名字>.md` +

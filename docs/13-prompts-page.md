@@ -107,9 +107,9 @@ GET /api/prompts          → 200 JSON（不需要配置任何接口；不调模
 1. 分组表 `PROMPT_GROUPS` 与 prompts 模块**必须严格互补**，对不上就抛异常
    —— 新增提示词忘了归组会当场炸，而不是页面上静默少一条；
 2. 工具定义用**真工具类**构造（文案在实例化时按当前语言取）；
-3. **零落盘**：记忆三件套用一个 `:memory:` 的 store 当替身，档案用只读的
-   `VaultStore`，联网配置走只读的 `ToolStore`。所以"点开这一页"不会在你 `data/` 里
-   种出 `memory.db`。这条有测试守着。
+3. **零落盘**：记忆三件套用一个 `instruction_path=":memory:"` 的原生存储替身，
+   档案用只读的 `VaultStore`，联网配置走只读的 `ToolStore`。所以"点开这一页"不会在你
+   `data/` 里种出 `memory.db` 或 `memory_instruction.md`。这条有测试守着。
 
 ## 4. 文案分工（契约，别搞混）
 

@@ -70,9 +70,9 @@ class ResetTests(unittest.TestCase):
         (vault / "README.md").write_text("# README\n", encoding="utf-8")
         (vault / "entities" / "小林.md").write_text("后端同事\n", encoding="utf-8")
 
-        memory = MemoryStore(self.settings.memory_db_path)
-        memory.create("用户爱喝红茶", "偏好")
-        memory.create("用户叫小林", "身份")
+        memory = MemoryStore(instruction_path=self.settings.memory_instruction_path, cursor_db_path=self.settings.memory_db_path)
+        memory.create("用户爱喝红茶")
+        memory.create("用户叫小林")
         memory.close()
 
         seed_provider(self.settings, base_url="https://api.deepseek.com")
@@ -86,6 +86,8 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(data["dream_runs"], 1, "运行记录数")
         self.assertEqual(data["vault_files"], 1, "背景档案数（README 是索引，不算档案）")
         self.assertEqual(data["memories"], 2)
+        self.assertNotIn("deleted_memories", data)
+        self.assertNotIn("memory_ops", data)
         self.assertEqual(data["providers"], 1)
         self.assertGreater(data["bytes"], 0)
         self.assertGreater(data["bytes"], 0)

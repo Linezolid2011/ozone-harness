@@ -143,36 +143,11 @@ def _tree_stats(path: Path) -> tuple[int, int]:
     return files, total
 
 
-def _memory_counts(db_path: Path) -> dict[str, int]:
-    """只读地数一下记忆库。库不存在就返回全 0，**绝不创建它**。"""
-    empty = {"memories": 0, "deleted": 0, "ops": 0}
-    if not db_path.is_file():
-        return empty
-    try:
-        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    except sqlite3.Error:
-        return empty
-    try:
-        with connection:
-            counts = dict(empty)
-            try:
-                counts["memories"] = connection.execute(
-                    "SELECT COUNT(*) FROM memories WHERE status = 'active'"
-                ).fetchone()[0]
-                counts["deleted"] = connection.execute(
-                    "SELECT COUNT(*) FROM memories WHERE status != 'active'"
-                ).fetchone()[0]
-            except sqlite3.Error:
-                pass
-            try:
-                counts["ops"] = connection.execute(
-                    "SELECT COUNT(*) FROM memory_ops"
-                ).fetchone()[0]
-            except sqlite3.Error:
-                pass
-            return counts
-    finally:
-        connection.close()
+def _memory_counts(instruction_path: Path) -> dict[str, int]:
+    """只读统计原生记忆；文件不存在才是 0，坏文件必须显式报错。"""
+    from .memory import read_memory_instructions
+
+    return {"memories": len(read_memory_instructions(instruction_path))}
 
 
 def _dream_run_count(dreams_dir: Path) -> int:
@@ -270,7 +245,7 @@ def preview_reset(settings: Settings) -> dict[str, Any]:
     # （它是索引）。早先这里数是"vault 目录下所有文件"，于是同一个东西有两个数字
     # —— `/api/reset` 说 2 个文件、`/api/vault` 说 1 份档案，迟早有人读错。
     state = dream_state(settings)
-    counts = _memory_counts(settings.memory_db_path)
+    counts = _memory_counts(settings.memory_instruction_path)
     # 占用空间直接量整个数据目录：以前是"把几项加起来"，每加一种新数据
     # （先是 vault、后来是运行记录）就有一次忘记加的机会。量目录不会漏。
     _, total_bytes = _tree_stats(settings.data_dir)
@@ -286,8 +261,6 @@ def preview_reset(settings: Settings) -> dict[str, Any]:
         "vault_files": state["vault_files"],
         "providers": _provider_count(settings.data_dir / "providers.json"),
         "memories": counts["memories"],
-        "deleted_memories": counts["deleted"],
-        "memory_ops": counts["ops"],
         # dream 层的两个数字（ADR-065：重置会把它们格式化）：档案数 + 运行次数。
         # `cursor_sessions` 不放进界面（它是进度，用户看不到也不关心），
         # 但测试会用它确认"整理进度确实被清空了"。

@@ -89,6 +89,9 @@ class TurnOutcome:
     #: 本轮那条 `user_message` 的 seq —— 前端「分叉」按钮靠它定位分叉点。
     #: 历史回放时由 `build_session_view` 从事件里补；这里是**实时流**那一侧。
     user_seq: int | None = None
+    #: 本轮最后一次模型请求实际收到的输入 token。多步循环不能把各步输入相加，
+    #: 否则会把同一段历史重复算成"当前上下文"。
+    context_tokens: int = 0
 
     @property
     def ok(self) -> bool:
@@ -186,22 +189,16 @@ class AgentLoop:
 
         从 `plan_chat_turn` 里提出来，是因为压缩必须在第一步之前就知道
         记忆块有多大 —— 它是整条请求固定开销的一部分（ADR-100）。
-        `set_context` 每步都要更新（它记录"这条记忆是第几轮写的"），
-        而渲染只做一次。
+        渲染只做一次；原生存储不再记录"这条记忆是第几轮写的"这类库内元数据。
         """
-        turn_index = sum(1 for message in history if message.role == "user")
-        # 工具写入需要知道"哪轮对话写了什么记忆"
-        self.memory.set_context(self.session_id, turn_index)
         if self._turn_memory_text is not None:
             return
         budget = self.settings.memory_token_budget
-        # 先问一次"实际会注入哪些、有几条因预算看不到"，再渲染 ——
-        # 这两件事必须来自同一次判断，否则界面上的数字会和实际注入不符。
-        _items, omitted = self.memory.injection_plan(max_tokens=budget)
-        self._turn_memory_text = self.memory.render_for_prompt(max_tokens=budget)
+        # 正文、省略数与总数必须来自同一份文件快照，不能在两次读取之间换了一份。
+        self._turn_memory_text, omitted, total = self.memory.injection_view(max_tokens=budget)
         self.emit(
             "memory",
-            count=len(self.memory.active_items()),
+            count=total,
             limit=self.memory.max_items,
             omitted=omitted,
         )
@@ -534,6 +531,7 @@ class AgentLoop:
             raise
 
         total_usage = Usage()
+        context_tokens = 0
         step = 0
         # 与循环变量 step 区分：step 是"第几次迭代"，steps_run 才是真正发生的模型调用次数。
         # 预算熔断会在下一次迭代开头触发，此时 step 已经自增，不能拿来当步数上报。
@@ -640,6 +638,7 @@ class AgentLoop:
 
                 usage = assembler.usage or Usage()
                 total_usage.add(usage)
+                context_tokens = usage.prompt_tokens
                 steps_run += 1
                 message = assembler.message()
                 if message.content:
@@ -818,6 +817,7 @@ class AgentLoop:
             stop_reason=stop_reason,
             error=error,
             user_seq=user_seq,
+            context_tokens=context_tokens,
         )
         self.emit("turn_end", outcome=outcome)
         return outcome

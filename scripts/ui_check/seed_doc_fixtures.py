@@ -56,9 +56,9 @@ PROVIDER = {
 }
 
 MEMORIES = [
-    ("用户在做一个小小的本地对话项目，第一阶段刚收尾", "项目"),
-    ("用户喜欢手冲咖啡，浅烘为主，习惯早上七点起来磨豆子", "偏好"),
-    ("用户是中学生，预算有限，希望每轮对话的花费能看得见", "背景"),
+    "用户在做一个小小的本地对话项目，第一阶段刚收尾",
+    "用户喜欢手冲咖啡，浅烘为主，习惯早上七点起来磨豆子",
+    "用户是中学生，预算有限，希望每轮对话的花费能看得见",
 ]
 
 TURNS = [
@@ -123,14 +123,14 @@ def main(argv: list[str]) -> int:
 
     memory = open_memory(settings)
     try:
-        existing = {item.content for item in memory.all_items()}
+        existing = {item.content for item in memory.active_items()}
         added = 0
-        for content, category in MEMORIES:
+        for content in MEMORIES:
             if content in existing:
                 continue
-            memory.create(content, category)
+            memory.create(content)
             added += 1
-        print(f"  记忆：新增 {added} 条（共 {len(memory.all_items())} 条）")
+        print(f"  记忆：新增 {added} 条（共 {len(memory.active_items())} 条）")
     finally:
         memory.close()
 
@@ -144,18 +144,28 @@ def main(argv: list[str]) -> int:
         log.append("session_start", model="deepseek-flash", reasoning_effort="", tools=[])
         for question, answer, prompt, completion in TURNS:
             log.append("user_message", text=question)
+            turn_usage = {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": prompt + completion,
+                "reasoning_tokens": 0,
+                "cached_tokens": prompt - 172,
+                "cache_miss_tokens": 172,
+            }
             log.append(
                 "assistant_message",
                 finish_reason="stop",
-                usage={
-                    "prompt_tokens": prompt,
-                    "completion_tokens": completion,
-                    "total_tokens": prompt + completion,
-                    "reasoning_tokens": 0,
-                    "cached_tokens": prompt - 172,
-                    "cache_miss_tokens": 172,
-                },
+                usage=turn_usage,
                 message={"content": answer},
+            )
+            # 统计条的轮数与平均速度以 turn_end 为准；缺了它，夹具虽然有对话，
+            # 截图却会错误地显示 0 轮 / 0 tok/s。
+            log.append(
+                "turn_end",
+                steps=1,
+                stop_reason="completed",
+                elapsed=2.0,
+                usage=turn_usage,
             )
             # 一条压缩摘要（对话页顶部那块「更早的对话已压缩」）。
             # covered_groups=1：只把**第一组**算作已压缩 —— 全部压掉的话，

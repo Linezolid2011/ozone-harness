@@ -50,6 +50,17 @@ class TempCase(unittest.TestCase):
 
 
 class VaultPathTests(TempCase):
+    def test_memory_instruction_is_read_only_even_without_sections_yaml(self) -> None:
+        store = self.store()
+        self.assertFalse(store.is_native(), "这条专门覆盖旧 vault 模式")
+        for operation in (
+            lambda: store.write_file("memory_instruction.md", "# Memory instructions\n"),
+            lambda: store.delete_file("memory_instruction.md"),
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaises(VaultPathError):
+                    operation()
+
     def test_accepts_the_three_canonical_forms(self) -> None:
         self.assertEqual(normalize_rel_path("README.md"), "README.md")
         self.assertEqual(normalize_rel_path("sections/口味.md"), "sections/口味.md")

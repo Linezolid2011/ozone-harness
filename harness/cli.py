@@ -324,9 +324,8 @@ def cmd_memories(settings: Settings) -> int:
         limit = memory.max_items
         full = "  ← 已满：模型现在记不了新东西" if stats["active"] >= limit else ""
         emit_line(
-            f"记忆库：{settings.memory_db_path}\n"
-            f"有效 {stats['active']}/{limit} 条{full}\n"
-            f"已删除 {stats['deleted']} 条 ／ 操作记录 {stats['ops']} 条",
+            f"记忆库：{settings.memory_instruction_path}\n"
+            f"有效 {stats['active']}/{limit} 条{full}",
             "bold",
         )
         # 全量注入：条目总量超过 token 预算时会有条目**看不到**。
@@ -341,11 +340,8 @@ def cmd_memories(settings: Settings) -> int:
                 "yellow",
             )
         emit_line()
-        for item in memory.all_items():
-            if item.status == "active":
-                emit_line(f"  [mem:{item.id}] ({item.category}) {item.content}")
-            else:
-                emit_line(f"  [mem:{item.id}] 已删除  {item.content}", "dim")
+        for item in memory.active_items():
+            emit_line(f"  [mem:{item.id}] {item.content}")
         emit_line()
         emit_line(
             "调上限：run.cmd --memory-limit 80  （或到界面：设置 → 记忆）", "dim"
@@ -549,7 +545,7 @@ def cmd_chat(settings: Settings, args: argparse.Namespace, renderer: ConsoleRend
         + (f" · thinking {effective.reasoning_effort}" if effective.reasoning_effort else "")
     )
     emit_line(f"  会话：{runtime.session_id}")
-    emit_line(f"  记忆库：{settings.memory_db_path}（{runtime.memory.stats()['active']} 条有效）")
+    emit_line(f"  记忆库：{settings.memory_instruction_path}（{runtime.memory.stats()['active']} 条有效）")
     emit_line("  命令：/memories  /usage  /prompt  /new  /exit", "dim")
     emit_line()
 
@@ -570,9 +566,9 @@ def cmd_chat(settings: Settings, args: argparse.Namespace, renderer: ConsoleRend
                 if command in ("exit", "quit", "q"):
                     break
                 if command == "memories":
-                    for item in runtime.memory.all_items():
-                        emit_line(f"  [mem:{item.id}] ({item.category}) {item.content}")
-                    if not runtime.memory.all_items():
+                    for item in runtime.memory.active_items():
+                        emit_line(f"  [mem:{item.id}] {item.content}")
+                    if not runtime.memory.active_items():
                         emit_line("  (记忆库为空)", "dim")
                     continue
                 if command == "usage":
@@ -1319,8 +1315,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--web", action="store_true", help="启动 Web 界面（默认只监听本机）")
     parser.add_argument(
         "--guided-venv",
-        action="store_true",
-        help="配合 --web：在界面里检查并按需引导安装项目 venv（start.cmd 使用）",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="配合 --web：默认检查并引导安装项目 venv；--no-guided-venv 可显式关闭",
     )
     parser.add_argument("--port", type=int, default=8787, help="Web 端口，默认 8787；0 = 自动选空闲端口")
     parser.add_argument("--host", default="127.0.0.1", help="Web 监听地址，默认仅本机 127.0.0.1")

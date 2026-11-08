@@ -1,4 +1,4 @@
-"""记忆存储测试：增删改查、查重、上限、软删除、持久化、注入渲染。"""
+"""原生 memory_instruction.md 与 Dream 游标测试。"""
 
 from __future__ import annotations
 
@@ -7,429 +7,304 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
-from harness.memory import _DEAD_COLUMNS, MemoryStore
+from harness.memory import (
+    MEMORY_HEADER,
+    MemoryFormatError,
+    MemoryItem,
+    MemoryStore,
+    parse_memory_instructions,
+    read_memory_instructions,
+    render_memory_instructions,
+)
 
 
-class MemoryStoreTests(unittest.TestCase):
+class NativeMemoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
-        self.store = MemoryStore(self.tmp / "memory.db", max_items=5, max_chars=40)
+        self.instruction = self.tmp / "vault" / "memory_instruction.md"
+        self.cursor_db = self.tmp / "memory.db"
+        self.store = self.make_store()
         self.addCleanup(self.store.close)
 
-    # -- 基本流程 ----------------------------------------------------
+    def make_store(self, *, max_items: int = 5, max_chars: int = 80) -> MemoryStore:
+        return MemoryStore(
+            instruction_path=self.instruction,
+            cursor_db_path=self.cursor_db,
+            max_items=max_items,
+            max_chars=max_chars,
+        )
 
-    def test_create_read_edit_delete(self) -> None:
-        created = self.store.create("用户喜欢美式咖啡", "偏好")
+    def test_open_does_not_create_markdown(self) -> None:
+        self.assertFalse(self.instruction.exists(), "看一眼不能创建原生记忆文件")
+        self.assertEqual(self.store.active_items(), [])
+        self.assertEqual(self.store.stats(), {"active": 0})
+
+    def test_create_edit_delete_round_trip(self) -> None:
+        created = self.store.create("用户喜欢美式咖啡")
+        self.assertEqual(
+            set(created), {"ok", "id", "content", "active_count", "max_items", "note"}
+        )
         self.assertTrue(created["ok"])
         memory_id = created["id"]
-        self.assertEqual(created["category"], "偏好")
-
-        item = self.store.get(memory_id)
-        assert item is not None
-        self.assertEqual(item.content, "用户喜欢美式咖啡")
-        self.assertEqual(item.revision, 1)
+        self.assertGreater(memory_id, 0)
+        self.assertLess(memory_id, 2**53, "Web 端数字必须保持为 JS 安全整数")
 
         edited = self.store.edit(memory_id, content="用户更喜欢拿铁")
-        self.assertTrue(edited["ok"])
-        self.assertEqual(edited["revision"], 2)
-        item = self.store.get(memory_id)
-        assert item is not None
-        self.assertEqual(item.content, "用户更喜欢拿铁")
+        self.assertEqual(set(edited), {"ok", "id", "content", "note"})
+        self.assertEqual(self.store.get(memory_id).content, "用户更喜欢拿铁")
 
         deleted = self.store.delete(memory_id, reason="用户要求忘记")
         self.assertTrue(deleted["ok"])
         self.assertEqual(deleted["forgot"], "用户更喜欢拿铁")
+        self.assertEqual(deleted["reason"], "用户要求忘记")
         self.assertIsNone(self.store.get(memory_id))
-        self.assertEqual(self.store.stats()["active"], 0)
+        self.assertEqual(self.store.stats(), {"active": 0})
+        # 删除是硬删除：文件里没有另一份 deleted/status 副本。
+        text = self.instruction.read_text(encoding="utf-8")
+        self.assertNotIn("拿铁", text)
+        self.assertNotIn("deleted", text)
+        self.assertEqual(read_memory_instructions(self.instruction), [])
 
-    def test_delete_is_soft_and_audited(self) -> None:
-        memory_id = self.store.create("用户在做 O3 zone 项目")["id"]
-        self.store.delete(memory_id)
-
-        # 软删除：对外不可见，但原文仍在，且操作可审计
-        self.assertEqual(self.store.active_items(), [])
-        all_items = self.store.all_items()
-        self.assertEqual(len(all_items), 1)
-        self.assertEqual(all_items[0].status, "deleted")
-        ops = self.store.ops_for(memory_id)
-        self.assertEqual([op["op"] for op in ops], ["create", "delete"])
-
-    def test_persists_across_reopen(self) -> None:
-        self.store.create("用户的时间很有限", "身份")
+    def test_file_has_native_shape_and_persists_across_reopen(self) -> None:
+        first = self.store.create("第一条记忆")
+        second = self.store.create("第二条记忆")
         self.store.close()
+        text = self.instruction.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith(MEMORY_HEADER + "\n"))
+        self.assertIn(f"## {first['id']}\n\n第一条记忆", text)
+        self.assertIn(f"## {second['id']}\n\n第二条记忆", text)
 
-        reopened = MemoryStore(self.tmp / "memory.db", max_items=5, max_chars=40)
+        reopened = self.make_store()
         try:
-            items = reopened.active_items()
-            self.assertEqual(len(items), 1)
-            self.assertEqual(items[0].content, "用户的时间很有限")
+            self.assertEqual(
+                [(item.id, item.content) for item in reopened.active_items()],
+                [(first["id"], "第一条记忆"), (second["id"], "第二条记忆")],
+            )
         finally:
             reopened.close()
 
-    # -- 校验与查重 --------------------------------------------------
+    def test_parse_render_preserves_sparse_ids_file_order_and_multiline_body(self) -> None:
+        items = [
+            MemoryItem(id=2, content="第二\n\n段"),
+            MemoryItem(id=1, content="第一"),
+            MemoryItem(id=17, content="第十七"),
+        ]
+        rendered = render_memory_instructions(items)
+        self.assertEqual(parse_memory_instructions(rendered), items)
+        self.assertLess(rendered.index("## 2\n"), rendered.index("## 1\n"))
+        self.assertLess(rendered.index("## 1\n"), rendered.index("## 17\n"))
 
-    def test_rejects_empty_and_too_long(self) -> None:
+    def test_create_appends_and_edit_keeps_native_file_order(self) -> None:
+        self.instruction.parent.mkdir(parents=True, exist_ok=True)
+        self.instruction.write_text(
+            "# Memory instructions\n\n## 2\n\n旧二\n\n## 1\n\n旧一\n",
+            encoding="utf-8",
+        )
+        self.store.edit(2, "改二")
+        created = self.store.create("新三")
+        items = read_memory_instructions(self.instruction)
+        self.assertEqual([item.id for item in items], [2, 1, created["id"]])
+        self.assertEqual(items[0].content, "改二")
+
+    def test_deleted_highest_id_is_not_immediately_reused(self) -> None:
+        first = self.store.create("一")
+        second = self.store.create("二")
+        self.store.delete(second["id"])
+        third = self.store.create("三")
+        self.assertGreater(third["id"], second["id"])
+        self.assertNotEqual(third["id"], first["id"])
+
+    def test_rejects_empty_too_long_and_delimiter_collision(self) -> None:
         self.assertFalse(self.store.create("")["ok"])
         self.assertFalse(self.store.create("   ")["ok"])
-        long_content = "很" * 41
-        result = self.store.create(long_content)
-        self.assertFalse(result["ok"])
-        self.assertIn("过长", result["error"])
-        self.assertEqual(self.store.stats()["active"], 0)
+        self.assertFalse(self.store.create("很" * 81)["ok"])
+        for content in ("## 2", "第一行\n## 23\n第二行"):
+            with self.subTest(content=content):
+                result = self.store.create(content)
+                self.assertFalse(result["ok"])
+                self.assertIn("独立行", result["error"])
+        self.assertEqual(self.store.stats(), {"active": 0})
 
-    def test_rejects_duplicate(self) -> None:
+    def test_rejects_duplicate_create_and_edit(self) -> None:
         first = self.store.create("用户喜欢美式咖啡")
-        self.assertTrue(first["ok"])
-        again = self.store.create("  用户喜欢美式咖啡  ")  # 空白差异也算重复
+        second = self.store.create("用户喜欢拿铁")
+        again = self.store.create("  用户喜欢美式咖啡  ")
         self.assertFalse(again["ok"])
         self.assertEqual(again["existing_id"], first["id"])
-        self.assertEqual(self.store.stats()["active"], 1)
-
-    def test_edit_rejects_duplicate_of_other_item(self) -> None:
-        first = self.store.create("用户喜欢美式")
-        second = self.store.create("用户喜欢拿铁")
-        clash = self.store.edit(second["id"], content="用户喜欢美式")
+        clash = self.store.edit(second["id"], "用户喜欢美式咖啡")
         self.assertFalse(clash["ok"])
         self.assertEqual(clash["existing_id"], first["id"])
+        self.assertEqual(self.store.stats(), {"active": 2})
 
-    def test_edit_and_delete_unknown_id(self) -> None:
-        self.assertFalse(self.store.edit(999, content="x")["ok"])
+    def test_edit_requires_content_and_unknown_ids_fail(self) -> None:
+        memory_id = self.store.create("一条")["id"]
+        self.assertFalse(self.store.edit(memory_id)["ok"])
+        self.assertFalse(self.store.edit(999, "x")["ok"])
         self.assertFalse(self.store.delete(999)["ok"])
-        self.assertFalse(self.store.edit(1)["ok"])  # 没给任何字段
 
-    def test_enforces_max_items(self) -> None:
+    def test_enforces_max_items_and_unchanged_edit(self) -> None:
         for index in range(5):
-            self.assertTrue(self.store.create(f"事实编号 {index}")["ok"])
+            self.assertTrue(self.store.create(f"事实 {index}")["ok"])
         overflow = self.store.create("第六条")
         self.assertFalse(overflow["ok"])
-        self.assertIn("上限", overflow["error"])
+        self.assertEqual(overflow["active_count"], 5)
+        self.assertIn("mem_edit", overflow["hint"])
+        item = self.store.active_items()[0]
+        unchanged = self.store.edit(item.id, item.content)
+        self.assertEqual(unchanged["note"], "内容没有变化，未做修改")
 
-    def _create_concurrently(
-        self, contents: tuple[str, ...], *, max_items: int
-    ) -> list[dict]:
-        """让旧实现的多个连接都在插入前完成检查；事务实现则直接串行通过。"""
-        barrier = threading.Barrier(len(contents))
-
-        class RacingStore(MemoryStore):
-            def stats(self) -> dict[str, int]:
-                result = super().stats()
-                # 新实现此时已持有写事务，不能再等另一个被 SQLite 挡住的线程。
-                if not self._conn.in_transaction:
-                    barrier.wait(timeout=5)
-                return result
-
-        def create_one(content: str) -> dict:
-            # 连接必须在使用它的请求线程里创建，和 Web 的请求局部连接一致。
-            store = RacingStore(self.tmp / "memory.db", max_items=max_items, max_chars=40)
-            try:
-                return store.create(content)
-            finally:
-                store.close()
-
-        with ThreadPoolExecutor(max_workers=len(contents)) as pool:
-            futures = [pool.submit(create_one, content) for content in contents]
-            return [future.result() for future in futures]
-
-    def test_concurrent_connections_cannot_create_duplicates(self) -> None:
-        results = self._create_concurrently(("同一条记忆", "  同一条记忆  "), max_items=5)
-        self.assertEqual(sum(bool(result["ok"]) for result in results), 1)
-        self.assertEqual(self.store.stats()["active"], 1)
-
-    def test_concurrent_connections_cannot_exceed_max_items(self) -> None:
-        results = self._create_concurrently(("第一条", "第二条"), max_items=1)
-        self.assertEqual(sum(bool(result["ok"]) for result in results), 1)
-        self.assertEqual(self.store.stats()["active"], 1)
-
-    def test_full_store_error_points_at_mem_edit(self) -> None:
-        """满了要"满得响"：失败信息必须带可操作的下一步（ADR-057）。
-
-        否则模型只会反复重试 mem_create —— 每次都被拒，白烧几步 token。
-        """
-        for index in range(5):
-            self.store.create(f"事实编号 {index}")
-        result = self.store.create("第六条")
-        self.assertFalse(result["ok"])
-        self.assertIn("记忆条数过多", result["error"])
-        self.assertEqual(result["active_count"], 5)
-        self.assertEqual(result["max_items"], 5)
-        self.assertIn("mem_edit", result["hint"])
-
-    # -- 已经删掉的机制：守卫 -----------------------------------------
-
-    def test_alias_entry_points_are_gone_for_good(self) -> None:
-        """别名机制随检索一起删除（ADR-058），字段本身也在 M7 迁移里删掉了（ADR-059）。
-
-        这是一条**守卫**（同 `test_pricing.py` 的用意）：万一哪天有人把别名加回来，
-        他必须先回答"谁负责读它" —— 现在没有任何读取方，写进去只会是死数据。
-        """
-        self.assertFalse(hasattr(self.store, "set_aliases"))
-        self.assertFalse(hasattr(self.store, "format_dream_line"))
-        with self.assertRaises(TypeError):
-            self.store.create("小林会弹吉他", aliases=["乐器"])  # type: ignore[call-arg]
-
-        memory_id = self.store.create("小林会弹吉他")["id"]
-        item = self.store.get(memory_id)
-        assert item is not None
-        self.assertFalse(hasattr(item, "aliases"))
-        columns = {
-            row["name"] for row in self.store._conn.execute("PRAGMA table_info(memories)")
+    def test_strict_malformed_files_fail_closed(self) -> None:
+        cases = {
+            "missing_header": "## 1\n\n内容\n",
+            "junk": "# Memory instructions\n\n杂项\n## 1\n\n内容\n",
+            "duplicate_id": "# Memory instructions\n\n## 1\n\n一\n\n## 1\n\n二\n",
+            "empty_item": "# Memory instructions\n\n## 1\n\n\n## 2\n\n二\n",
+            "bad_heading": "# Memory instructions\n\n## zero\n\n一\n",
         }
-        for dead in ("aliases", "sources", "dreamed_at", "dream_run"):
-            self.assertNotIn(dead, columns, f"{dead} 又回来了？它没有任何读取方")
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(MemoryFormatError):
+                    parse_memory_instructions(text)
 
-    # -- 注入渲染 ----------------------------------------------------
+    def test_old_sqlite_is_neither_read_nor_migrated(self) -> None:
+        with closing(sqlite3.connect(self.cursor_db)) as connection:
+            connection.execute("CREATE TABLE memories (id INTEGER, content TEXT)")
+            connection.execute("INSERT INTO memories VALUES (1, '旧 SQLite 记忆')")
+            connection.commit()
+        self.instruction.parent.mkdir(parents=True, exist_ok=True)
+        self.instruction.write_text("# Memory instructions\n\n## 7\n\n原生记忆\n", encoding="utf-8")
 
-    def test_render_empty_and_format(self) -> None:
-        self.assertIn("没有任何记忆", self.store.render_for_prompt())
-        self.store.create("用户偏好中文", "偏好")
-        self.store.create("用户在做一个 Harness 项目", "项目")
+        items = self.store.active_items()
+        self.assertEqual([(item.id, item.content) for item in items], [(7, "原生记忆")])
+        with closing(sqlite3.connect(self.cursor_db)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT content FROM memories").fetchone()[0],
+                "旧 SQLite 记忆",
+                "不迁移也不借清理之名改写旧数据",
+            )
+        self.assertEqual(
+            self.store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_ops'"
+            ).fetchall(),
+            [],
+        )
+
+    def test_only_cursor_table_is_created_for_a_fresh_db(self) -> None:
+        names = {
+            row["name"]
+            for row in self.store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        self.assertEqual(names - {"sqlite_sequence"}, {"dream_cursor"})
+
+    def test_render_for_prompt_uses_native_id_content_shape(self) -> None:
+        self.store.create("用户偏好中文")
+        self.store.create("用户在做一个 Harness 项目")
         rendered = self.store.render_for_prompt()
         lines = rendered.splitlines()
-        # 第一行是"已用 N/上限 M"的表头（ADR-057 之后新增）：
-        # 全量注入下，用户与模型都该看得见"离满还有多远"。
         self.assertEqual(lines[0], "（已用 2/5）")
         self.assertEqual(len(lines), 3)
         self.assertTrue(lines[1].startswith("[mem:"))
-        self.assertIn("(偏好) 用户偏好中文", lines[1])
-        # 默认按 id 升序，保证 prompt 前缀稳定
+        self.assertIn("用户偏好中文", lines[1])
+        self.assertNotIn("category", lines[1])
         self.assertLess(lines[1], lines[2])
 
-    def test_render_stays_within_budget(self) -> None:
+    def test_injection_budget_and_snapshot_are_consistent(self) -> None:
         for index in range(5):
-            self.store.create(f"这是一条比较长的记忆内容编号为 {index} 用于撑爆预算")
-        rendered = self.store.render_for_prompt(max_tokens=5)
-        # 超预算时必须**如实说**少给了几条，不能悄悄少注入（ADR-058 保留了这条）
-        self.assertIn("没有显示", rendered)
-        self.assertLess(len(rendered), 200)
+            self.store.create(f"较长的记忆内容 {index} 用来撑预算")
+        text, omitted, total = self.store.injection_view(max_tokens=12)
+        self.assertEqual(total, 5)
+        self.assertGreater(omitted, 0)
+        self.assertIn("没有显示", text)
+        self.assertLess(len(text), 240)
 
-    def test_render_keeps_newest_when_overflowing(self) -> None:
-        for index in range(5):
-            self.store.create(f"内容 {index}")
-        rendered = self.store.render_for_prompt(max_tokens=12)
-        # 放不下时优先保留较新条目，但仍按 id 升序输出
-        self.assertIn("[mem:5]", rendered)
-        self.assertNotIn("[mem:1]", rendered)
+    def test_concurrent_stores_cannot_create_duplicates_or_exceed_cap(self) -> None:
+        def race(contents: tuple[str, str], cap: int, name: str) -> list[dict]:
+            instruction = self.tmp / f"{name}.md"
+            cursor_db = self.tmp / f"{name}.db"
+            barrier = threading.Barrier(2)
 
-    def test_context_is_recorded_in_ops(self) -> None:
-        self.store.set_context("20261004-abc", 3)
-        memory_id = self.store.create("带上下文的记忆")["id"]
-        ops = self.store.ops_for(memory_id)
-        self.assertEqual(ops[0]["session_id"], "20261004-abc")
-        self.assertEqual(ops[0]["turn"], 3)
+            class RacingStore(MemoryStore):
+                def _read_items(self):
+                    if not self._conn.in_transaction:
+                        barrier.wait(timeout=5)
+                    return super()._read_items()
 
-
-class MemoryMigrationTests(unittest.TestCase):
-    """M7 的那次一次性迁移（ADR-059）。
-
-    它做三件事：删 M4 留下的死列、删旧的 `dream_runs` 表、建 `dream_cursor`。
-    这几条都值得钉住 —— 迁移写错的后果是**用户的记忆看起来被清空了**，
-    那比报错更糟（他会以为数据没了，而不是以为程序坏了）。
-    """
-
-    # M4~M6 时期的 memories 表（多出四列），外加那时用来存快照的 dream_runs
-    LEGACY = """
-    CREATE TABLE memories (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        content TEXT NOT NULL,
-        category TEXT NOT NULL DEFAULT 'general',
-        status TEXT NOT NULL DEFAULT 'active',
-        revision INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        deleted_at TEXT,
-        session_id TEXT,
-        turn INTEGER,
-        aliases TEXT,
-        sources TEXT,
-        dreamed_at TEXT,
-        dream_run TEXT
-    );
-    CREATE INDEX idx_memories_status ON memories(status);
-    CREATE TABLE memory_ops (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, memory_id INTEGER NOT NULL,
-        op TEXT NOT NULL, before TEXT, after TEXT, session_id TEXT, turn INTEGER,
-        at TEXT NOT NULL
-    );
-    CREATE TABLE dream_runs (
-        id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT, mode TEXT,
-        status TEXT, memories_seen INTEGER, snapshot TEXT, diff TEXT, summary TEXT,
-        usage TEXT, stop_reason TEXT
-    );
-    """
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.tmp = Path(self._tmp.name)
-
-    def _legacy(self, name: str = "memory.db") -> Path:
-        path = self.tmp / name
-        connection = sqlite3.connect(path)
-        connection.executescript(self.LEGACY)
-        connection.execute(
-            "INSERT INTO memories (content, category, created_at, updated_at, aliases,"
-            " sources, dreamed_at, dream_run) VALUES ('用户是中学生','身份','2026-10-01',"
-            "'2026-10-01','[\"中学生\"]','[3]','2026-10-02','dream-1')"
-        )
-        connection.execute(
-            "INSERT INTO memories (content, category, status, created_at, updated_at)"
-            " VALUES ('用户会弹吉他','偏好','deleted','2026-10-01','2026-10-01')"
-        )
-        connection.execute(
-            "INSERT INTO dream_runs (id, started_at, snapshot) VALUES ('dream-1','2026-10-02','[]')"
-        )
-        connection.commit()
-        connection.close()
-        return path
-
-    @staticmethod
-    def _columns(store: MemoryStore) -> set[str]:
-        return {
-            row["name"] for row in store._conn.execute("PRAGMA table_info(memories)")
-        }
-
-    @staticmethod
-    def _tables(store: MemoryStore) -> set[str]:
-        return {
-            row["name"]
-            for row in store._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
-
-    def test_old_database_is_migrated_in_place(self) -> None:
-        path = self._legacy()
-        store = MemoryStore(path, max_items=10, max_chars=100)
-        try:
-            # 数据一条不少，状态也照旧
-            items = store.all_items()
-            self.assertEqual([item.content for item in items], ["用户是中学生", "用户会弹吉他"])
-            self.assertEqual([item.status for item in items], ["active", "deleted"])
-            self.assertEqual(items[0].category, "身份")
-            # 死列删掉、旧表删掉、游标建起来
-            self.assertEqual(self._columns(store) & set(_DEAD_COLUMNS), set())
-            self.assertNotIn("dream_runs", self._tables(store))
-            self.assertIn("dream_cursor", self._tables(store))
-            # 索引不能因为重建表而丢（丢了查询会随条目增多而变慢）
-            indexes = {
-                row["name"]
-                for row in store._conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+            def create_one(content: str) -> dict:
+                store = RacingStore(
+                    instruction_path=instruction,
+                    cursor_db_path=cursor_db,
+                    max_items=cap,
+                    max_chars=80,
                 )
-            }
-            self.assertIn("idx_memories_status", indexes)
-            self.assertNotIn("memories_legacy", self._tables(store))
-        finally:
-            store.close()
+                try:
+                    return store.create(content)
+                finally:
+                    store.close()
 
-    def test_migration_is_idempotent(self) -> None:
-        path = self._legacy()
-        for _ in range(3):
-            store = MemoryStore(path, max_items=10, max_chars=100)
-            self.assertEqual(len(store.all_items()), 2)
-            self.assertEqual(self._columns(store) & set(_DEAD_COLUMNS), set())
-            store.close()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                return list(pool.map(create_one, contents))
 
-    def test_interrupted_migration_is_repaired(self) -> None:
-        """上一次迁移如果在"改名之后、复制之前"崩了，会留下 memories_legacy。
-
-        这种半截状态会让用户看到一个**空**记忆库 —— 所以启动时必须自己收拾干净。
-        """
-        path = self._legacy("half.db")
-        connection = sqlite3.connect(path)
-        connection.execute("ALTER TABLE memories RENAME TO memories_legacy")
-        connection.executescript(
-            "CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            " content TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'general',"
-            " status TEXT NOT NULL DEFAULT 'active', revision INTEGER NOT NULL DEFAULT 1,"
-            " created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT,"
-            " session_id TEXT, turn INTEGER);"
+        duplicates = race(("同一条记忆", "  同一条记忆  "), 5, "duplicates")
+        self.assertEqual(sum(bool(item["ok"]) for item in duplicates), 1)
+        capped = race(("第一条", "第二条"), 1, "capped")
+        self.assertEqual(sum(bool(item["ok"]) for item in capped), 1)
+        self.assertEqual(self.store.stats(), {"active": 0})
+        self.assertEqual(
+            parse_memory_instructions((self.tmp / "capped.md").read_text(encoding="utf-8")),
+            read_memory_instructions(self.tmp / "capped.md"),
         )
-        connection.commit()
-        connection.close()
-
-        store = MemoryStore(path, max_items=10, max_chars=100)
-        try:
-            self.assertEqual(len(store.all_items()), 2, "半截迁移把用户的记忆弄丢了")
-            self.assertNotIn("memories_legacy", self._tables(store))
-        finally:
-            store.close()
-
-    def test_fresh_database_has_the_new_shape(self) -> None:
-        """全新库走的是另一条代码路径（直接建表），必须单独测 —— 它曾经因为
-        语句之间少写分号而在**全新安装**时直接抛语法错误。"""
-        store = MemoryStore(self.tmp / "fresh.db", max_items=10, max_chars=100)
-        try:
-            self.assertEqual(self._tables(store) - {"sqlite_sequence"},
-                             {"memories", "memory_ops", "dream_cursor"})
-            self.assertEqual(store.stats(), {"active": 0, "deleted": 0, "ops": 0})
-            self.assertEqual(store.cursor_map(), {})
-        finally:
-            store.close()
-
-    def test_audit_trail_survives_the_migration(self) -> None:
-        """`memory_ops` 是审计日志：迁移不能顺手把它清了。"""
-        path = self._legacy("ops.db")
-        connection = sqlite3.connect(path)
-        connection.execute(
-            "INSERT INTO memory_ops (memory_id, op, after, at)"
-            " VALUES (1,'create','用户是中学生','2026-10-01')"
-        )
-        connection.commit()
-        connection.close()
-        store = MemoryStore(path, max_items=10, max_chars=100)
-        try:
-            self.assertEqual(store.stats()["ops"], 1)
-        finally:
-            store.close()
 
 
 class DreamCursorTests(unittest.TestCase):
-    """整理游标：每个会话"整理到第几条"。"""
-
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.store = MemoryStore(
-            Path(self._tmp.name) / "memory.db", max_items=10, max_chars=100
+            instruction_path=Path(self._tmp.name) / "vault" / "memory_instruction.md",
+            cursor_db_path=Path(self._tmp.name) / "memory.db",
+            max_items=10,
+            max_chars=100,
         )
         self.addCleanup(self.store.close)
 
-    def test_cursor_is_per_session(self) -> None:
+    def test_cursor_is_per_session_and_persistent(self) -> None:
         self.store.advance_cursor("s-a", 12, "dream-1")
         self.store.advance_cursor("s-b", 3, "dream-1")
         self.assertEqual(self.store.cursor_map(), {"s-a": 12, "s-b": 3})
-
-    def test_cursor_never_goes_backwards(self) -> None:
-        """**只增不减**是硬的：调小只会让同样的内容被整理两遍（花两次钱），
-        调大则会永久丢掉中间没读的记录。所以写入用 MAX()，任何调用方都改不回去。"""
-        self.store.advance_cursor("s-a", 12, "dream-1")
         self.store.advance_cursor("s-a", 5, "dream-2")
         self.assertEqual(self.store.cursor_map()["s-a"], 12)
         self.store.advance_cursor("s-a", 20, "dream-3")
         self.assertEqual(self.store.cursor_map()["s-a"], 20)
+        self.store.close()
+        again = MemoryStore(
+            instruction_path=self.store.instruction_path,
+            cursor_db_path=self.store.db_path,
+        )
+        try:
+            self.assertEqual(again.cursor_map()["s-a"], 20)
+        finally:
+            again.close()
 
     def test_blank_session_is_ignored(self) -> None:
         self.store.advance_cursor("", 5)
         self.store.advance_cursor("   ", 5)
         self.assertEqual(self.store.cursor_map(), {})
 
-    def test_cursor_survives_reopen(self) -> None:
+    def test_cursor_does_not_touch_native_memories(self) -> None:
+        created = self.store.create("独立记忆")
         self.store.advance_cursor("s-a", 7, "dream-1")
-        self.store.close()
-        again = MemoryStore(self.store.db_path, max_items=10, max_chars=100)
-        try:
-            self.assertEqual(again.cursor_map(), {"s-a": 7})
-        finally:
-            again.close()
+        self.assertEqual(self.store.active_items()[0].content, "独立记忆")
+        self.store.clear_cursors()
+        self.assertEqual(self.store.cursor_map(), {})
+        self.assertEqual(self.store.active_items()[0].id, created["id"])
 
-    def test_cursor_does_not_touch_memories(self) -> None:
-        """整理进度与记忆条目必须互不影响 —— 这条边界是 ADR-053 的核心。"""
-        self.store.create("用户是中学生")
-        before = self.store.stats()["active"]
-        self.store.advance_cursor("s-a", 9, "dream-1")
-        self.assertEqual(self.store.stats()["active"], before)
+
+if __name__ == "__main__":
+    unittest.main()

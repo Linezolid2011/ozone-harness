@@ -24,6 +24,7 @@ from typing import Any
 
 from . import attachments
 from .i18n import t
+from .memory import MemoryFormatError, parse_memory_instructions
 from .vault import (
     LOG_NAME,
     MEMORY_INSTRUCTION_NAME,
@@ -211,6 +212,13 @@ def import_vault_zip(
                     raise VaultImportError(
                         t("ui.vault.import_too_large", limit=MAX_TOTAL_BYTES)
                     )
+                if canonical == MEMORY_INSTRUCTION_NAME:
+                    try:
+                        parse_memory_instructions(data.decode("utf-8-sig"))
+                    except (UnicodeDecodeError, MemoryFormatError) as exc:
+                        raise VaultImportError(
+                            t("ui.vault.import_bad_memory", path=canonical, error=exc)
+                        ) from exc
                 if kind == "raw" and not canonical.endswith(RAW_META_SUFFIX):
                     sniffed = attachments.sniff_ext(data)
                     if sniffed is None:

@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
+from harness.memory import read_memory_instructions
 from harness.vault import VaultStore
 from harness.vault_import import VaultImportError, import_vault_zip
 
@@ -74,6 +75,25 @@ class ImportTests(unittest.TestCase):
             self.store.read("entities/project_photon.md").frontmatter.name,
             "project_photon",
         )
+
+    def test_overwrite_replaces_memory_only_after_validating_it(self) -> None:
+        self.store.root.mkdir(parents=True, exist_ok=True)
+        (self.store.root / "memory_instruction.md").write_text(
+            "# Memory instructions\n\n## 1\n\n旧记忆\n", encoding="utf-8"
+        )
+        result = import_vault_zip(self.zip, self.store, overwrite=True)
+        self.assertTrue(result["ok"])
+        # 原生包里只有文件头 = 没有有效条目；显式覆盖会同时替换独立记忆。
+        self.assertEqual(read_memory_instructions(self.store.root / "memory_instruction.md"), [])
+
+    def test_rejects_invalid_memory_instruction_without_touching_vault(self) -> None:
+        bad = _make_zip(
+            self.tmp / "bad-memory.zip",
+            {"memory_instruction.md": "# 这不是原生记忆格式\n"},
+        )
+        with self.assertRaises(VaultImportError):
+            import_vault_zip(bad, self.store)
+        self.assertFalse(self.store.root.exists())
 
     def test_refuses_a_non_empty_vault_unless_overwrite(self) -> None:
         (self.store.root).mkdir(parents=True)

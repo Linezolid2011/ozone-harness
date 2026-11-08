@@ -399,10 +399,13 @@ const { doc, byId } = makeDocument();
 function primeShell() {
   for (const id of [
     'messages', 'input', 'toast', 'send', 'stop',
-    'attach', 'attach-file', 'attach-hint', 'composer-drop', 'composer-attachments',
-    'composer-hint', 'lightbox', 'lightbox-img', 'lightbox-caption',
-    'toggle-web-search', 'toggle-multimodal', 'multimodal-hint', 'chat-title', 'chat-meta',
-    // 顶部品牌行与输入框下面那句提示（renderBrandAndHint 往这两处写字）
+    'attach', 'attach-file', 'composer-drop', 'composer-attachments',
+    'lightbox', 'lightbox-img', 'lightbox-caption',
+    'toggle-web-search', 'toggle-multimodal', 'chat-title', 'chat-meta',
+    // 输入区下方的当前会话统计条
+    'session-stats', 'stats-turns', 'stats-speed', 'stats-tokens', 'stats-cache',
+    'stats-context-wrap', 'stats-context', 'context-meter-fill',
+    // 顶部品牌行
     'brand-sub',
     // start.cmd 的 venv 启动门（stub 不解析 HTML，直接渲染测试需要这些真 id）
     'app', 'startup-gate', 'setup-card', 'setup-loading', 'setup-network-error',
@@ -430,13 +433,11 @@ function primeShell() {
   // index.html 上本来就带 `hidden` 的两个：stub 不解析 HTML，初始状态得照抄
   doc.getElementById('lightbox').classList.add('hidden');
   doc.getElementById('composer-attachments').classList.add('hidden');
-  // 契约 §13.7 第 1 句那个占位 div 在 index.html 上也带 hidden
-  doc.getElementById('multimodal-hint').classList.add('hidden');
   // 真页面上这几个是**嵌套**的（#input / 📎 / 文件选择框都在 #composer-drop 里）。
   // 拖放的 dragleave 用 `contains(relatedTarget)` 判断"还在不在输入区里"，
   // 少了这层父子关系，自检里那条"内部移动不高亮闪烁"就成了空话。
   const zone = doc.getElementById('composer-drop');
-  for (const id of ['composer-attachments', 'input', 'attach', 'attach-file', 'attach-hint']) {
+  for (const id of ['composer-attachments', 'input', 'attach', 'attach-file', 'session-stats']) {
     const node = doc.getElementById(id);
     if (node.parentNode !== zone) zone.appendChild(node);
   }
@@ -605,16 +606,19 @@ const EXPORTS = `
   // 图片附件（docs/11-attachments.md）：入口三件套、上传、待发条、消息气泡、灯箱
   wireComposerAttachments, attachFiles, uploadAttachment, uploadAttachmentData,
   renderAttachments, removeAttachment, clearAttachments,
-  loadMemories,
+  loadMemories, renderMemories,
   addUser, renderStoredMessage, openSession, send, newChat, forkSession,
   openLightbox, closeLightbox, attachmentUrl, attachmentExt,
   onComposerDragOver, onComposerDragLeave, onComposerDrop, onComposerPaste,
   // 「多模态」开关与 OCR 降级（docs/11-attachments.md §13）
   renderMultimodalToggle, setMultimodal, toggleMultimodal, applyToolsFrame,
   loadToolsPane, saveToolsPane,
-  syncMultimodalHint, multimodalTextOnly, boolDefaultOn,
+  multimodalTextOnly, boolDefaultOn,
   ocrBlock, userBubbleNode, refreshLastUserMessage, attachmentSignature,
-  multimodalOffText, multimodalBadgeText,
+  multimodalBadgeText,
+  // 输入区会话统计条：重放、新建、逐轮累计、模型窗口与格式化
+  setSessionStats, recordTurnStats, renderSessionStats, normalizeSessionStats,
+  formatCompactTokens, formatContextPercent, selectedModelContextWindow,
   highlightMultimodalToggle, multimodalAttentionClass: () => 'attention',
   // 设置 → 接口：档案表单里的 vision_models（列表 → 文本 → 列表）
   renderApiPane, wireProviderCards, providerCard, splitModelList, parseTokenLimit,
@@ -930,7 +934,7 @@ const FORMAT_OK = {
 
 /* /api/reset 的预览：格式化对话框用它说"哪些东西不会被碰" */
 const RESET_PREVIEW = {
-  sessions: 12, memories: 34, deleted_memories: 2, memory_ops: 40,
+  sessions: 12, memories: 34,
   dream_runs: 2, vault_files: 7, providers: 2, bytes: 4096,
   data_dir: '.tmp-ui-check\\data',
 };
@@ -1142,7 +1146,7 @@ function resetAttachments() {
   // 「多模态」是会话级状态，会跨用例留着 —— 不在这里复位的话，
   // 上一个用例把开关关掉，后面的用例会在一个"只发文字"的世界里跑
   app.state.multimodal = true;
-  app.state.providers = { models: [{ provider: 'deepseek', model: 'deepseek-flash' }], default: {} };
+  app.state.providers = { models: [{ provider: 'deepseek', model: 'deepseek-flash', context_window: 200000 }], default: {} };
   app.state.selection = { provider: 'deepseek', model: 'deepseek-flash', effort: '' };
   primeShell();
   shell('messages').innerHTML = '';
@@ -3570,9 +3574,8 @@ await scenario('busy 时禁止再加图：📎 禁用、拖放/粘贴都不收�
   app.wireComposerAttachments();
   posts = { '/api/attachments': () => uploadOk() };
 
-  check('📎 被禁用，提示也换成"现在不能再加"', () => {
+  check('📎 被禁用（旧输入区提示已删，阻止原因由下面三种操作的 toast 明说）', () => {
     assert.equal(shell('attach').disabled, true);
-    assert.match(shell('attach-hint').textContent, /正在生成中，暂时不能再加图片/);
   });
 
   const picker = shell('attach-file');
@@ -3881,11 +3884,106 @@ await scenario('新对话：待发附件不跟着走', async () => {
   });
 });
 
+await scenario('会话统计条：重放快照、逐轮累计、模型窗口与新会话归零', async () => {
+  app.setLanguageNow('zh');
+  app.state.providers = {
+    models: [
+      { provider: 'p', model: 'small', context_window: 1000 },
+      { provider: 'p', model: 'large', context_window: 2000 },
+    ],
+    default: { provider: 'p', model: 'small' },
+    providers: [],
+  };
+  app.state.selection = { provider: 'p', model: 'small', effort: '' };
+  app.setSessionStats({
+    turns: 2,
+    elapsed_seconds: 4,
+    context_tokens: 250,
+    usage: {
+      prompt_tokens: 2000, completion_tokens: 100, total_tokens: 2100,
+      reasoning_tokens: 0, cached_tokens: 1500, cache_miss_tokens: 500,
+    },
+  });
+
+  check('快照显示轮数、平均输出速度、压缩 token 数与缓存命中率', () => {
+    assert.equal(shell('stats-turns').textContent, '2 轮');
+    assert.equal(shell('stats-speed').textContent, '25 tok/s');
+    assert.equal(shell('stats-tokens').textContent, '2.1k tok');
+    assert.equal(shell('stats-cache').textContent, '缓存命中 75%');
+    assert.equal(app.formatCompactTokens(43000000), '43M');
+  });
+  check('上下文 = 最后一次请求输入 / 当前模型窗口，并有微小进度条', () => {
+    assert.equal(shell('stats-context').textContent, '25%');
+    assert.equal(shell('context-meter-fill').style.width, '25%');
+    assert.match(shell('stats-context-wrap').title, /250 \/ 1000/);
+    assert.equal(app.formatContextPercent(0.47), '<1');
+    assert.equal(app.formatContextPercent(0), '0');
+  });
+  check('切到另一个模型会立刻按它的窗口重算；不选模型就是 0%', () => {
+    app.state.selection.model = 'large';
+    app.renderSessionStats();
+    assert.equal(shell('stats-context').textContent, '13%');
+    assert.equal(shell('context-meter-fill').style.width, '12.5%');
+    app.state.selection = { provider: '', model: '', effort: '' };
+    app.renderSessionStats();
+    assert.equal(shell('stats-context').textContent, '0%');
+    assert.equal(shell('context-meter-fill').style.width, '0%');
+  });
+
+  app.state.selection = { provider: 'p', model: 'small', effort: '' };
+  app.recordTurnStats({
+    elapsed: 2,
+    context_tokens: 400,
+    usage: {
+      prompt_tokens: 300, completion_tokens: 50, total_tokens: 350,
+      cached_tokens: 150, cache_miss_tokens: 150,
+    },
+  });
+  check('turn_end 累加本轮，而不是覆盖既有会话统计', () => {
+    assert.equal(shell('stats-turns').textContent, '3 轮');
+    assert.equal(shell('stats-speed').textContent, '25 tok/s');
+    assert.equal(shell('stats-tokens').textContent, '2.5k tok');
+    assert.equal(shell('stats-cache').textContent, '缓存命中 72%');
+    assert.equal(shell('stats-context').textContent, '40%');
+  });
+  check('多步轮次的上下文取后端给的最后一次输入，不累加 prompt_tokens', () => {
+    assert.equal(app.state.sessionStats.contextTokens, 400);
+    assert.notEqual(app.state.sessionStats.contextTokens, app.state.sessionStats.usage.prompt_tokens);
+  });
+
+  app.newChat();
+  check('新建会话立即清空五项统计与进度条', () => {
+    assert.equal(shell('stats-turns').textContent, '0 轮');
+    assert.equal(shell('stats-speed').textContent, '0 tok/s');
+    assert.equal(shell('stats-tokens').textContent, '0 tok');
+    assert.equal(shell('stats-cache').textContent, '缓存命中 0%');
+    assert.equal(shell('stats-context').textContent, '0%');
+    assert.equal(shell('context-meter-fill').style.width, '0%');
+  });
+
+  fixture = (url) => (url === '/api/sessions/sid-stats'
+    ? sessionMessages([], {
+      session_id: 'sid-stats',
+      stats: {
+        turns: 7, elapsed_seconds: 14, context_tokens: 100,
+        usage: { prompt_tokens: 500, completion_tokens: 70, total_tokens: 570, cached_tokens: 250 },
+      },
+    })
+    : { status: 404, body: { error: `没有这个夹具：${url}` } });
+  await app.openSession('sid-stats');
+  check('打开（含分叉后打开）会话时采用该会话自己的快照，不带入上一会话', () => {
+    assert.equal(shell('stats-turns').textContent, '7 轮');
+    assert.equal(shell('stats-speed').textContent, '5 tok/s');
+    assert.equal(shell('stats-tokens').textContent, '570 tok');
+    assert.equal(shell('stats-cache').textContent, '缓存命中 50%');
+    assert.equal(shell('stats-context').textContent, '10%');
+  });
+});
+
 /* ── 「多模态」开关与 OCR 降级（docs/11-attachments.md §13）────────
-   这一节对着两条硬约束：
-     ① §13.1 的默认 —— **缺键 = 开**（老会话不许因为加了个开关就悄悄变成只发文字）；
-     ② §13.7 的三句话 —— 一句都不许省，而且**开着的时候一句都不许出现**
-        （那会让人以为图片没发出去）。
+   输入框下方的旧提示已由会话统计条取代；待发缩略图徽标与气泡里的 OCR 原文仍保留。
+     默认仍是 **缺键 = 开**（老会话不许因为加了个开关就悄悄变成只发文字）。
+     缩略图徽标只在多模态关着时出现；OCR 原文始终在气泡里保留。
    另一条同样重要：OCR 文字是**图片里的内容**，与文件名、后端错误一样是
    外部可控输入 —— 它进 DOM 只能走 textContent，断言里专门有一条拿它当攻击载荷。 */
 
@@ -3985,7 +4083,7 @@ await scenario('会话加载：从 data.tools.multimodal 恢复（缺键当开�
   });
 });
 
-await scenario('§13.7 第 1/2 句：关着且有待发图片才有那两句，打开就没有', async () => {
+await scenario('多模态待发缩略图徽标：关着才显示；输入区旧提示不再参与', async () => {
   resetAttachments();
   posts = { '/api/attachments': () => uploadOk({ id: 'ba00000000000001', name: '字图.png' }) };
   await app.setMultimodal(false);
@@ -3995,47 +4093,24 @@ await scenario('§13.7 第 1/2 句：关着且有待发图片才有那两句，�
   await tick();
   assert.equal(app.state.attachments.length, 1, '前提：得真的有一张待发图片');
 
-  const hint = shell('multimodal-hint');
-  check('第 1 句：输入框附近那句提示出现了，一字不差', () => {
-    assert.equal(hint.classList.contains('hidden'), false);
-    assert.equal(hint.textContent,
-      '多模态模式已关：只会把图片里的文字识别出来发给模型，图片本身不会发出去');
-  });
-  check('第 2 句：每张待发缩略图上都标了"将只发送识别出的文字"', () => {
+  check('多模态关着：每张待发缩略图都标了"将只发送识别出的文字"', () => {
     const badges = hasClass(shell('composer-attachments'), 'attach-badge');
     assert.equal(badges.length, app.state.attachments.length);
     assert.equal(badges[0].textContent, '将只发送识别出的文字');
   });
-  check('那句"图片会随请求一并发给模型接口"让位（两句并排会互相抵消）', () => {
-    assert.ok(shell('attach-hint').classList.contains('hidden'));
-  });
 
-  check('关着且**没有**待发图片 → 那句"图片会发给模型"仍然不出现', () => {
-    // 这条正是"只在有待发图片时让位"那种写法漏掉的形态：发送之后待发图片就清空了，
-    // 于是那句假话又冒出来 —— 屏幕上同时出现"多模态：关"、"图片本身没有发出去"
-    // 和"图片会随请求一并发给模型接口"，自相矛盾（用户截图里就是这个样子）。
-    // 判据只能是**开关本身**，与有没有待发图片无关。
+  check('没有待发图片时徽标自然为零；统计条仍保持可见', () => {
     app.state.attachments = [];
     app.renderAttachments();
-    assert.ok(hint.classList.contains('hidden'));
     assert.equal(hasClass(shell('composer-attachments'), 'attach-badge').length, 0);
-    assert.ok(shell('attach-hint').classList.contains('hidden'),
-      '开关关着时它永远不该出现（与有没有待发图片无关）');
+    assert.equal(shell('session-stats').classList.contains('hidden'), false);
   });
 
-  check('打开多模态（默认态）→ 两句都消失，别让人以为图片没发出去；那句基础提示回来', () => {
+  check('打开多模态：待发图片仍在，但"只发送文字"徽标消失', () => {
     app.state.attachments = [{ id: 'ba00000000000001', ext: 'png', name: '字图.png', url: '/x.png' }];
     app.state.multimodal = true;
     app.renderMultimodalToggle();
-    assert.ok(hint.classList.contains('hidden'));
     assert.equal(hasClass(shell('composer-attachments'), 'attach-badge').length, 0);
-    assert.equal(shell('attach-hint').classList.contains('hidden'), false);
-  });
-
-  check('开关打开、**没有**待发图片 → 那句基础提示也在', () => {
-    app.state.attachments = [];
-    app.renderAttachments();
-    assert.equal(shell('attach-hint').classList.contains('hidden'), false);
   });
 });
 
@@ -4734,6 +4809,7 @@ await scenario('恢复出厂设置：指向已删数据的界面缓存必须重�
   // 都得有内容，才能验"重置之后它们会不会赖着不走"。
   shell('chat-title').textContent = '要被删掉的会话';
   shell('chat-meta').textContent = '42 token';
+  app.setSessionStats({ turns: 4, usage: { total_tokens: 42 } });
   shell('messages').innerHTML = '<div class="msg user">旧会话的最后一句</div>';
   // `#reset-start` 用 byId.get 取：stub 的 getElementById 是"边用边造"的，
   // app.js 接线的那个节点正是它（同 #dialog-confirm 的取法）
@@ -4750,6 +4826,8 @@ await scenario('恢复出厂设置：指向已删数据的界面缓存必须重�
       '被删会话的消息还留在消息流里');
     assert.equal(shell('chat-title').textContent, '新对话');
     assert.equal(shell('chat-meta').textContent, '');
+    assert.equal(shell('stats-turns').textContent, '0 轮');
+    assert.equal(shell('stats-tokens').textContent, '0 tok');
   });
   check('**重新拉了一次接口配置与 /api/config**（光清本地缓存是拉不回内容的）', () => {
     const providers = calls.filter((url) => url === '/api/providers').length;
@@ -4766,10 +4844,10 @@ await scenario('恢复出厂设置：指向已删数据的界面缓存必须重�
     assert.equal(app.state.selection.provider, '');
     assert.equal(app.state.selection.model, '');
   });
-  check('顶部与输入框下面那两句也跟着换了（同一个判断，不许各写一份）', () => {
-    // 品牌行第二格是**版本号**（ADR-096），不再是模型名；"没有接口"由下面那句提示说。
+  check('品牌行仍显示版本号；统计条不因接口被删而保留旧会话数字', () => {
     assert.equal(shell('brand-sub').textContent, 'v1.0.0-dev1');
-    assert.match(shell('composer-hint').textContent, /还没有可用的接口/);
+    assert.equal(shell('stats-turns').textContent, '0 轮');
+    assert.equal(shell('stats-context').textContent, '0%');
   });
   check('工具配置被清成"要重新拉"（tools.json 也一起被删了）', () => {
     assert.equal(app.state.tools, null);
@@ -5184,6 +5262,34 @@ await scenario('设置子页加载失败：记忆/用量/接口/工具/重置都
   }
 });
 
+await scenario('原生记忆页：只渲染 id 与正文，不依赖分类或软删除字段', async () => {
+  byId.clear();
+  primeShell();
+  primeStaticTexts();
+  app.setLanguageNow('zh');
+  app.state.memories = {
+    stats: { active: 1 },
+    limit: { max_items: 50 },
+    injection: { omitted: 0, token_budget: 6000 },
+    items: [{ id: 42, content: '用户喜欢美式咖啡' }],
+  };
+  app.renderMemories();
+
+  check('卡片和统计都来自原生形状，不虚构 category/status/ops', () => {
+    const cards = hasClass(shell('memory-list'), 'mem-card');
+    assert.equal(cards.length, 1);
+    assert.match(cards[0].textContent, /mem:42/);
+    assert.match(cards[0].textContent, /用户喜欢美式咖啡/);
+    assert.ok(!cards[0].textContent.includes('category'));
+    assert.ok(!cards[0].textContent.includes('已删除'));
+    assert.equal(shell('memory-stats').textContent, '有效 1/50 条');
+  });
+  check('设置里不再有“显示已删除”这个不存在的存储状态', () => {
+    const html = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+    assert.ok(!html.includes('memory-show-deleted'));
+  });
+});
+
 await scenario('服务端数据进 innerHTML 前必须转义/归一（记忆 id、压缩 covered）', async () => {
   byId.clear();
   primeShell();
@@ -5194,7 +5300,7 @@ await scenario('服务端数据进 innerHTML 前必须转义/归一（记忆 id�
   fixture = (url) => (url === '/api/memories'
     ? { status: 200, body: {
       stats: { active: 1 }, limit: { max_items: 50 }, injection: {},
-      items: [{ id: evil, category: '事实', content: '内容', status: 'active' }],
+      items: [{ id: evil, content: '内容' }],
     } }
     : { status: 404, body: { error: `没有这个夹具：${url}` } });
   await app.loadMemories();
@@ -5303,7 +5409,7 @@ await scenario('静态检查：两套深色变量都要定义同一组颜色（�
   });
 });
 
-await scenario('静态检查：index.html 里的入口元素与那句提示都还在（stub 不加载 index.html）', async () => {
+await scenario('静态检查：附件入口与会话统计条存在，旧输入区提示已彻底移除', async () => {
   const html = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
   check('隐藏的 file input：multiple + 四种图片格式的 accept', () => {
     assert.match(html, /id="attach-file"[^>]*multiple/);
@@ -5314,11 +5420,16 @@ await scenario('静态检查：index.html 里的入口元素与那句提示都�
     assert.match(html, /class="composer" id="composer-drop"/);
     assert.match(html, /id="composer-attachments"/);
   });
-  check('"图片会发给模型"那句是**独立**元素，没占 composer-hint', () => {
-    assert.match(html, /id="attach-hint"/);
-    assert.match(html, /图片会随请求一并发给模型接口/);
-    // composer-hint 自己那个空元素还在（"没有可用接口"那句写进它）
-    assert.match(html, /class="composer-hint" id="composer-hint"/);
+  check('统计条有轮数/速度/token/缓存/上下文五格，不含步数', () => {
+    for (const id of ['stats-turns', 'stats-speed', 'stats-tokens', 'stats-cache', 'stats-context']) {
+      assert.match(html, new RegExp(`id="${id}"`));
+    }
+    assert.match(html, /id="context-meter-fill"/);
+    assert.doesNotMatch(html, /id="stats-steps"/);
+  });
+  check('原来的接口/附件/多模态三个输入区提示容器全部删除', () => {
+    assert.doesNotMatch(html, /id="(?:composer-hint|attach-hint|multimodal-hint)"/);
+    assert.doesNotMatch(html, /class="[^"]*composer-hint/);
   });
   check('灯箱在页面上', () => {
     assert.match(html, /id="lightbox"/);
@@ -5332,8 +5443,11 @@ await scenario('静态检查：index.html 里的入口元素与那句提示都�
     assert.match(html.slice(multi - 200, multi), /class="web-toggle on"/);
     assert.match(html.slice(multi, multi + 200), /<span class="dot"><\/span><span class="label">多模态<\/span>/);
   });
-  check('§13.7 第 1 句那个提示容器在输入框附近（文案由 app.js 填，一开始是 hidden）', () => {
-    assert.match(html, /class="composer-hint multimodal-hint hidden" id="multimodal-hint"/);
+  check('统计条位于 composer 内、输入框之后', () => {
+    const composer = html.indexOf('class="composer" id="composer-drop"');
+    const box = html.indexOf('class="composer-box"', composer);
+    const stats = html.indexOf('id="session-stats"', box);
+    assert.ok(composer >= 0 && box > composer && stats > box);
   });
 });
 
@@ -5465,7 +5579,7 @@ await scenario('守卫 8：切到 en —— 静态字 / 侧栏 / 占位符 / 当
   byId.clear();
   primeShell();
   primeStaticTexts();
-  app.state.providers = { models: [{ provider: 'deepseek', model: 'deepseek-flash' }], default: {} };
+  app.state.providers = { models: [{ provider: 'deepseek', model: 'deepseek-flash', context_window: 200000 }], default: {} };
   app.state.selection = { provider: 'deepseek', model: 'deepseek-flash', effort: '' };
   app.state.config = { model: 'deepseek-flash', memory_mode: 'full injection', version: '1.0.0-dev1' };
   app.state.sessions = [{ id: 'sid-lang', title: 'Hello', turns: 2, updated_at: Date.now() / 1000 }];
@@ -5479,6 +5593,10 @@ await scenario('守卫 8：切到 en —— 静态字 / 侧栏 / 占位符 / 当
   const sessionBody = {
     messages: [{ role: 'meta', steps: 3, stop_reason: 'completed', elapsed: 2, usage: { total_tokens: 42 } }],
     usage: { total_tokens: 42 },
+    stats: {
+      turns: 3, elapsed_seconds: 2, context_tokens: 50000,
+      usage: { prompt_tokens: 30, completion_tokens: 12, total_tokens: 42, cached_tokens: 15 },
+    },
   };
   fixture = (url) => (url === '/api/sessions/sid-lang'
     ? { status: 200, body: sessionBody }
@@ -5519,13 +5637,11 @@ await scenario('守卫 8：切到 en —— 静态字 / 侧栏 / 占位符 / 当
     assert.match(shell('session-list').textContent, /just now/);
     assert.match(shell('session-list').textContent, /Hello/);
   });
-  check('品牌行（版本号）与输入框下面那句提示变英文', () => {
-    // 版本号两门语言一样（1.0.0-dev1）—— 这里钉的是"它不再是模型名"。
+  check('品牌行版本号不变，输入区统计条换成英文且数值不变', () => {
     assert.equal(shell('brand-sub').textContent, 'v1.0.0-dev1');
-    assert.match(shell('composer-hint').textContent, /^Memory: full injection$/);
-  });
-  check('输入框附近那句提示（附件区）也变英文', () => {
-    assert.match(shell('attach-hint').textContent, /sent to the model together with the request/);
+    assert.equal(shell('stats-turns').textContent, '3 turns');
+    assert.equal(shell('stats-cache').textContent, 'Cache hit 50%');
+    assert.equal(shell('stats-context').textContent, '25%');
   });
   check('两个开关的提示句（title）变英文', () => {
     assert.match(shell('toggle-web-search').title, /^Web (search|access)/);
@@ -5545,7 +5661,7 @@ await scenario('守卫 8：切到 en —— 静态字 / 侧栏 / 占位符 / 当
     assert.match(shell('chat-meta').textContent, /42 token in this chat/);
   });
   check('英文界面上没有漏替换的占位符（{name} 这种东西不许露出来）', () => {    const leftovers = [];
-    for (const id of ['messages', 'chat-meta', 'brand-sub', 'composer-hint', 'attach-hint',
+    for (const id of ['messages', 'chat-meta', 'brand-sub', 'session-stats',
       'session-list', 'language-body', 'toggle-web-search', 'toggle-multimodal']) {
       const node = shell(id);
       const text = `${node.textContent} ${node.title || ''} ${node.getAttribute('placeholder') || ''}`;

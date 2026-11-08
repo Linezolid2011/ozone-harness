@@ -68,13 +68,16 @@ class ForwardEventTests(unittest.TestCase):
         from harness.loop import TurnOutcome
 
         name, payload = forward_event(
-            "turn_end", {"outcome": TurnOutcome(text="hi", steps=1, user_seq=42)}
+            "turn_end",
+            {"outcome": TurnOutcome(text="hi", steps=1, user_seq=42, context_tokens=123)},
         )
         self.assertEqual(name, "turn_end")
         self.assertEqual(payload["user_seq"], 42)
+        self.assertEqual(payload["context_tokens"], 123)
         # 老构造方式（没有 user_seq）不能炸，给 None 就行
         name, payload = forward_event("turn_end", {"outcome": TurnOutcome(text="hi")})
         self.assertIsNone(payload["user_seq"])
+        self.assertEqual(payload["context_tokens"], 0)
 
 
 class ViewBuilderTests(unittest.TestCase):
@@ -119,6 +122,50 @@ class ViewBuilderTests(unittest.TestCase):
         self.assertEqual(view["messages"][1]["reasoning"], "想想")
         self.assertEqual(view["messages"][2]["display"], "记住 #1")
         self.assertEqual(view["usage"]["total_tokens"], 15)
+        self.assertEqual(view["stats"]["turns"], 1)
+        self.assertEqual(view["stats"]["elapsed_seconds"], 1.2)
+        self.assertEqual(view["stats"]["usage"]["total_tokens"], 15)
+        self.assertEqual(view["stats"]["context_tokens"], 10)
+
+    def test_session_stats_use_the_last_step_context_and_include_summary_usage(self) -> None:
+        """统计条的上下文不是多步输入之和，摘要调用的真实开销也不能漏。"""
+        log = EventLog(self.settings.sessions_dir / "s-stats.jsonl", "s-stats")
+        for step, prompt in ((1, 100), (2, 180)):
+            log.append(
+                "assistant_message",
+                step=step,
+                finish_reason="stop",
+                usage={
+                    "prompt_tokens": prompt,
+                    "completion_tokens": 20,
+                    "total_tokens": prompt + 20,
+                    "cached_tokens": prompt // 2,
+                },
+                message=Message(role="assistant", content="答").to_record(),
+            )
+        log.append(
+            "session_summary",
+            summary="摘要",
+            covered_messages=2,
+            usage={"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50},
+        )
+        log.append(
+            "turn_end",
+            steps=2,
+            stop_reason="completed",
+            elapsed=2.5,
+            usage={},
+        )
+        log.close()
+
+        stats = build_session_view(self.settings, "s-stats")["stats"]
+        self.assertEqual(stats["turns"], 1)
+        self.assertEqual(stats["elapsed_seconds"], 2.5)
+        self.assertEqual(stats["context_tokens"], 180)
+        self.assertEqual(stats["usage"]["prompt_tokens"], 320)
+        self.assertEqual(stats["usage"]["completion_tokens"], 50)
+        self.assertEqual(stats["usage"]["total_tokens"], 370)
+        self.assertEqual(stats["usage"]["cached_tokens"], 140)
 
     def test_meta_line_carries_the_turn_seq_for_the_fork_button(self) -> None:
         """每轮结尾那行统计要带这一轮 user_message 的 seq —— 「分叉」按钮靠它定位。"""
@@ -149,7 +196,7 @@ class ViewBuilderTests(unittest.TestCase):
     def test_memory_view_shape(self) -> None:
         memory = open_memory(self.settings)
         try:
-            memory.create("小林喜欢美式咖啡", "偏好")
+            memory.create("小林喜欢美式咖啡")
         finally:
             memory.close()
 
@@ -269,12 +316,14 @@ class HttpServerTests(unittest.TestCase):
     def test_memory_endpoints(self) -> None:
         from harness.memory import MemoryStore
 
-        store = MemoryStore(self.settings.memory_db_path)
-        memory_id = store.create("小林喜欢美式咖啡", "偏好")["id"]
+        store = MemoryStore(instruction_path=self.settings.memory_instruction_path, cursor_db_path=self.settings.memory_db_path)
+        memory_id = store.create("小林喜欢美式咖啡")["id"]
         store.close()
 
         status, body, _ = self._get("/api/memories")
-        self.assertEqual(json.loads(body)["stats"]["active"], 1)
+        payload = json.loads(body)
+        self.assertEqual(payload["stats"], {"active": 1})
+        self.assertEqual(set(payload["items"][0]), {"id", "content"})
 
         status, result = self._post(
             "/api/memories/update", {"id": memory_id, "content": "小林更喜欢拿铁"}
@@ -427,7 +476,7 @@ class HttpServerTests(unittest.TestCase):
     def test_memory_endpoint_rejects_duplicate(self) -> None:
         from harness.memory import MemoryStore
 
-        store = MemoryStore(self.settings.memory_db_path)
+        store = MemoryStore(instruction_path=self.settings.memory_instruction_path, cursor_db_path=self.settings.memory_db_path)
         first = store.create("小林喜欢美式咖啡")["id"]
         second = store.create("小林喜欢手冲咖啡")["id"]
         store.close()
@@ -784,6 +833,33 @@ class HttpServerTests(unittest.TestCase):
         store.rebuild_generated(today="2026-11-07", last_dream="2026-11-07")
         self.server.settings = settings
         return settings, store
+
+    def test_memory_instruction_has_its_own_window_not_the_dream_tree(self) -> None:
+        memory = MemoryStore(
+            instruction_path=self.settings.memory_instruction_path,
+            cursor_db_path=self.settings.memory_db_path,
+        )
+        try:
+            memory.create("只应出现在记忆页的条目")
+        finally:
+            memory.close()
+
+        view = json.loads(self._get("/api/vault")[1])
+        self.assertNotIn(
+            "memory_instruction.md",
+            [item["path"] for item in view["files"]],
+        )
+
+        def paths(nodes):
+            for node in nodes:
+                if node.get("type") == "file":
+                    yield node["path"]
+                else:
+                    yield from paths(node.get("children") or [])
+
+        self.assertNotIn("memory_instruction.md", list(paths(view["tree"])))
+        memories = json.loads(self._get("/api/memories")[1])
+        self.assertEqual(memories["items"][0]["content"], "只应出现在记忆页的条目")
 
     def test_native_vault_view_tree_nested_and_raw(self) -> None:
         settings, store = self._native_vault()
@@ -1320,7 +1396,7 @@ class HttpServerTests(unittest.TestCase):
         log.close()
         memory = open_memory(self.settings)
         try:
-            memory.create("用户在做记忆系统", "项目")
+            memory.create("用户在做记忆系统")
             memory.advance_cursor("s1", 1, "dream-x")
         finally:
             memory.close()
@@ -2105,8 +2181,8 @@ class HttpServerTests(unittest.TestCase):
         log = EventLog(self.settings.sessions_dir / "s-reset.jsonl", "s-reset")
         log.append("user_message", text="你好")
         log.close()
-        memory = MemoryStore(self.settings.memory_db_path)
-        memory.create("用户爱喝红茶", "偏好")
+        memory = MemoryStore(instruction_path=self.settings.memory_instruction_path, cursor_db_path=self.settings.memory_db_path)
+        memory.create("用户爱喝红茶")
         memory.close()
 
     def test_reset_preview_does_not_delete_anything(self) -> None:
@@ -2259,8 +2335,8 @@ class HttpServerTests(unittest.TestCase):
         doomed = self._make_session("s-doomed", "要被删掉的对话")
         keep = self._make_session("s-keep", "要保留的对话")
 
-        memory = MemoryStore(self.settings.memory_db_path)
-        memory.create("用户爱喝红茶", "偏好")
+        memory = MemoryStore(instruction_path=self.settings.memory_instruction_path, cursor_db_path=self.settings.memory_db_path)
+        memory.create("用户爱喝红茶")
         memory.close()
         providers_path = self.settings.data_dir / "providers.json"
         providers_path.write_text('{"providers": [], "default": {}}', encoding="utf-8")
@@ -2292,13 +2368,13 @@ class HttpServerTests(unittest.TestCase):
         记忆是用户资产，想忘掉请去记忆页删。
         """
         self._make_session("s-mem", "记住我喜欢红茶")
-        memory = MemoryStore(self.settings.memory_db_path)
-        memory.create("用户喜欢红茶", "偏好")
+        memory = MemoryStore(instruction_path=self.settings.memory_instruction_path, cursor_db_path=self.settings.memory_db_path)
+        memory.create("用户喜欢红茶")
         memory.close()
 
         self._post("/api/sessions/s-mem/delete", {})
 
-        memory = MemoryStore(self.settings.memory_db_path)
+        memory = MemoryStore(instruction_path=self.settings.memory_instruction_path, cursor_db_path=self.settings.memory_db_path)
         try:
             items = memory.active_items()
         finally:

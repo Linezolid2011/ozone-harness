@@ -54,7 +54,7 @@ MESSAGES: dict[str, str] = {
         "修改一条**已存在**的记忆。当已有记忆变得不准确、过时或需要补充细节时使用。"
         "必须提供 id —— id 见上下文中形如 [mem:12] 的前缀。"
         "同一主题优先修改已有条目而不是新建，避免记忆重复堆叠。"
-        "content 与 category 至少提供一个。"
+        "必须提供 id 与 content（整条替换），原生记忆不再支持分类字段。"
     ),
     "tool.mem_edit.param.id": "要修改的记忆 id，例如 [mem:12] 中的 12。",
     "tool.mem_edit.param.content": "新的记忆内容（整条替换）。",
@@ -66,7 +66,7 @@ MESSAGES: dict[str, str] = {
         "如果用户只是想**更正**某条记忆，应该用 mem_edit 而不是删除后重建。"
     ),
     "tool.mem_del.param.id": "要删除的记忆 id。",
-    "tool.mem_del.param.reason": "删除原因（可选，仅用于审计）。",
+    "tool.mem_del.param.reason": "删除原因（可选，记录在会话日志中）。",
     "tool.mem_del.display.deleted": "忘记 #{id}：{forgot}",
     "tool.mem_del.display.failed": "未删除：{error}",
     # ── 只读的背景档案工具（vault_tools）──────────────────────────
@@ -312,7 +312,6 @@ MESSAGES: dict[str, str] = {
     ),
     "tool.readme_write.display": "写 README（{tokens}/{budget} token）",
     # ── 共用的句子（不止一个工具说）──────────────────────────────
-    "tool.common.category_hint": "可选分类，建议取值：身份、偏好、项目、关系、约定、其他。默认 general。",
     "tool.common.bad_id": "id 必须是整数，收到：{raw_id!r}",
     "tool.common.bad_id.display": "id 非法",
     "tool.common.path_required": "path 不能为空",

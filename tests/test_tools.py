@@ -36,7 +36,12 @@ class ToolRegistryTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
-        self.store = MemoryStore(self.tmp / "memory.db", max_items=20, max_chars=60)
+        self.store = MemoryStore(
+            instruction_path=self.tmp / "vault" / "memory_instruction.md",
+            cursor_db_path=self.tmp / "memory.db",
+            max_items=20,
+            max_chars=60,
+        )
         self.addCleanup(self.store.close)
         self.registry = ToolRegistry(max_result_chars=200)
         self.registry.register(MemCreateTool(self.store))
@@ -93,7 +98,7 @@ class ToolRegistryTests(unittest.TestCase):
 
     def test_memory_tools_round_trip(self) -> None:
         created = self.registry.call(
-            "mem_create", json.dumps({"content": "用户喜欢美式咖啡", "category": "偏好"})
+            "mem_create", json.dumps({"content": "用户喜欢美式咖啡"})
         )
         self.assertTrue(created.ok)
         memory_id = created.payload["id"]

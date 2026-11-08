@@ -108,11 +108,16 @@ def main() -> int:
     if not data_dir.is_absolute():
         data_dir = root / data_dir
 
-    store = MemoryStore(data_dir / "memory.db", max_items=args.max_items, max_chars=args.max_chars)
+    store = MemoryStore(
+        instruction_path=data_dir / "vault" / "memory_instruction.md",
+        cursor_db_path=data_dir / "memory.db",
+        max_items=args.max_items,
+        max_chars=args.max_chars,
+    )
     try:
         created = skipped = 0
-        for content, category in MEMORIES + filler_memories(args.filler):
-            result = store.create(content, category)
+        for content, _category in MEMORIES + filler_memories(args.filler):
+            result = store.create(content)
             if result.get("ok"):
                 created += 1
             else:

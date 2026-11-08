@@ -33,17 +33,12 @@ class MemCreateTool:
                     "type": "string",
                     "description": t("tool.mem_create.param.content"),
                 },
-                # category 的说明与 mem_edit 共用一条（同一句话只留一位主人）
-                "category": {"type": "string", "description": t("tool.common.category_hint")},
             },
             "required": ["content"],
         }
 
     def run(self, args: dict[str, Any]) -> ToolResult:
-        payload = self._store.create(
-            content=str(args.get("content") or ""),
-            category=args.get("category"),
-        )
+        payload = self._store.create(content=str(args.get("content") or ""))
         if payload.get("ok"):
             display = t(
                 "tool.mem_create.display.created",
@@ -66,10 +61,8 @@ class MemEditTool:
             "properties": {
                 "id": {"type": "integer", "description": t("tool.mem_edit.param.id")},
                 "content": {"type": "string", "description": t("tool.mem_edit.param.content")},
-                # 与 mem_create 共用一条（见那里的注释）
-                "category": {"type": "string", "description": t("tool.common.category_hint")},
             },
-            "required": ["id"],
+            "required": ["id", "content"],
         }
 
     def run(self, args: dict[str, Any]) -> ToolResult:
@@ -82,11 +75,7 @@ class MemEditTool:
                 payload={"error": t("tool.common.bad_id", raw_id=raw_id)},
                 display=t("tool.common.bad_id.display"),
             )
-        payload = self._store.edit(
-            memory_id,
-            content=args.get("content"),
-            category=args.get("category"),
-        )
+        payload = self._store.edit(memory_id, content=args.get("content"))
         if payload.get("ok"):
             display = t(
                 "tool.mem_edit.display.updated",

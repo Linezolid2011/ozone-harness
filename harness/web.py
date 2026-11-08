@@ -28,7 +28,7 @@ ADR-001 定了"不引入第三方包"，M5 继续遵守：用标准库 `http.ser
     GET  /api/sessions/<id>      会话消息（由事件日志重放得到）
     GET  /api/memories           记忆库
     POST /api/memories/update    编辑一条记忆
-    POST /api/memories/delete    删除一条记忆（软删除）
+    POST /api/memories/delete    硬删除一条记忆（从原生文件移除）
     POST /api/memories/limit     改记忆条数上限（ADR-057）
     GET  /api/vault              背景档案：目录树 + README 预算 + 结构校验 + 待整理数
     GET  /api/vault/file?path=…  一个档案的全文 + 元信息 + 邻域（界面上点开看）
@@ -408,6 +408,10 @@ def build_session_view(settings: Settings, session_id: str) -> dict[str, Any]:
 
     messages: list[dict[str, Any]] = []
     usage = Usage()
+    stats_usage = Usage()
+    stats_turns = 0
+    stats_elapsed = 0.0
+    context_tokens = 0
     summary_text, covered = last_summary(path)
     seen = 0  # 已数过的"对话消息"条数，口径与 events._build_messages 一致
     current_turn_seq: Any = None  # 本轮 user_message 的 seq：meta 那一行的「分叉」要用
@@ -421,6 +425,12 @@ def build_session_view(settings: Settings, session_id: str) -> dict[str, Any]:
             # **在 covered 判断之前**记下 seq：被摘要覆盖的那几轮，它们的 turn_end
             # 仍然会画成 meta 行，那一行的分叉点也还是这条 user_message。
             current_turn_seq = record.get("seq")
+        if kind == "assistant_message":
+            # 会话统计包含已被摘要折叠的旧轮次；covered 只控制消息流里画不画，
+            # 不能让历史真实开销与最后一次请求的上下文从统计里消失。
+            stats_step_usage = Usage.from_dict(record.get("usage"))
+            stats_usage.add(stats_step_usage)
+            context_tokens = stats_step_usage.prompt_tokens
         if kind in ("user_message", "assistant_message", "tool_call"):
             if seen < covered:
                 seen += 1
@@ -463,6 +473,9 @@ def build_session_view(settings: Settings, session_id: str) -> dict[str, Any]:
                     }
                 )
             usage.add(Usage.from_dict(record.get("usage")))
+        elif kind == "session_summary":
+            # 摘要调用也是会话真实开销，与 session_usage() / turn_end 的口径一致。
+            stats_usage.add(Usage.from_dict(record.get("usage")))
         elif kind == "tool_call":
             messages.append(
                 {
@@ -484,6 +497,12 @@ def build_session_view(settings: Settings, session_id: str) -> dict[str, Any]:
                 }
             )
         elif kind == "turn_end":
+            stats_turns += 1
+            try:
+                stats_elapsed += max(0.0, float(record.get("elapsed") or 0.0))
+            except (TypeError, ValueError):
+                # 手改/损坏日志里的坏耗时不能拖垮整份会话视图；用量仍照常显示。
+                pass
             messages.append(
                 {
                     "role": "meta",
@@ -500,6 +519,14 @@ def build_session_view(settings: Settings, session_id: str) -> dict[str, Any]:
         "session_id": session_id,
         "messages": messages,
         "usage": usage.to_dict(),
+        # 输入区下方的会话统计条。usage 取 assistant + 摘要调用（含全部真实开销），
+        # context_tokens 只取最后一次请求输入；前端按当前选中模型的窗口算百分比。
+        "stats": {
+            "turns": stats_turns,
+            "elapsed_seconds": round(stats_elapsed, 2),
+            "usage": stats_usage.to_dict(),
+            "context_tokens": context_tokens,
+        },
         "generation": _session_generation(path),
         "tools": {
             "web_search": bool(session_switches.get("web_search", False)),
@@ -544,18 +571,8 @@ def build_memory_view(settings: Settings) -> dict[str, Any]:
                 "omitted": omitted,
                 "token_budget": settings.memory_token_budget,
             },
-            "items": [
-                {
-                    "id": item.id,
-                    "content": item.content,
-                    "category": item.category,
-                    "status": item.status,
-                    "revision": item.revision,
-                    "created_at": item.created_at,
-                    "updated_at": item.updated_at,
-                }
-                for item in memory.all_items()
-            ],
+            # 原生 memory_instruction.md 只有 id 与正文；不虚构分类、版本或时间戳。
+            "items": [{"id": item.id, "content": item.content} for item in memory.active_items()],
         }
     finally:
         memory.close()
@@ -594,6 +611,9 @@ def _vault_tree(
     for entry in entries:
         if str(entry.path) == README_NAME:
             continue  # README 由下面显式加（它要带 is_readme 标记与固定位置）
+        if str(entry.path) == MEMORY_INSTRUCTION_NAME:
+            # memory_instruction 有独立的「设置 → 记忆」窗口，不在 Dream 档案里重复展示。
+            continue
         node = root
         parts = str(entry.path).split("/")
         for part in parts[:-1]:
@@ -692,14 +712,17 @@ def build_vault_view(settings: Settings) -> dict[str, Any]:
     # （它是索引、是投影）。`list_files()` 会把 README 一起列出来，所以在这里滤掉 ——
     # 否则界面上"档案 5 份"和这个列表的长度会对不上（这种"一个东西两个数字"
     # 已经栽过一次：见 reset.py 的 vault_files）。
-    entries = [entry for entry in store.list_files() if entry.path != README_NAME]
+    # memory_instruction 由「设置 → 记忆」独立管理，不在 Dream 档案清单里重复出现。
+    entries = [
+        entry
+        for entry in store.list_files()
+        if entry.path not in (README_NAME, MEMORY_INSTRUCTION_NAME)
+    ]
     existing_paths = {entry.path for entry in entries}
-    # 原生 vault 的根级文件（index/log/observations/memory_instruction）也要能点开看。
-    # observations 已经由 list_files 带出来；这里补上其余几个。
+    # 原生 vault 的根级 index/log 文件可以点开看；observations 已由 list_files 带出来。
     for rel, title, kind in (
         (INDEX_NAME, "index", "generated"),
         (LOG_NAME, "log", "log"),
-        (MEMORY_INSTRUCTION_NAME, "memory_instruction", "aux"),
     ):
         if rel in existing_paths:
             continue
@@ -1101,6 +1124,7 @@ def forward_event(kind: str, data: dict[str, Any]) -> tuple[str, dict[str, Any]]
                 "error": outcome.error,
                 "elapsed": round(outcome.elapsed, 2),
                 "usage": outcome.usage.to_dict(),
+                "context_tokens": getattr(outcome, "context_tokens", 0),
                 # 实时流这一侧的「分叉」按钮靠它定位分叉点（历史回放走 turn_seq）
                 "user_seq": getattr(outcome, "user_seq", None),
             },
@@ -2243,11 +2267,7 @@ class HarnessHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": _t("web.error.memory_id_not_int")}, 400)
                     return
                 if path.endswith("/update"):
-                    result = memory.edit(
-                        memory_id,
-                        content=payload.get("content"),
-                        category=payload.get("category"),
-                    )
+                    result = memory.edit(memory_id, content=payload.get("content"))
                 else:
                     result = memory.delete(
                         memory_id, reason=_t("web.memory.delete_reason")

@@ -8,6 +8,10 @@
          主区 = 对话视图 / 设置视图（设置里再分子页：记忆 Dream 用量 接口 主题） */
 
 const PANES = ['memory', 'dream', 'usage', 'api', 'tools', 'prompts', 'general', 'reset'];
+const SESSION_USAGE_FIELDS = [
+  'prompt_tokens', 'completion_tokens', 'total_tokens',
+  'reasoning_tokens', 'cached_tokens', 'cache_miss_tokens',
+];
 
 const state = {
   view: 'chat',          // chat | settings
@@ -24,6 +28,9 @@ const state = {
   maxOutputTokens: 5000,
   sessionId: null,
   sessions: [],
+  // 输入区下方的统计只属于当前会话。切会话时先清零，再用该会话自己的
+  // 事件日志快照替换，避免慢响应期间把上一个会话的数字展示成新会话的。
+  sessionStats: emptySessionStats(),
   config: null,
   providers: null,
   tools: null,           // 联网工具配置（设置 → 工具）
@@ -500,6 +507,8 @@ async function forkSession(seq) {
   if (state.busy) { toast(t("toast.busy_running")); return; }
   try {
     const result = await postJSON(`/api/sessions/${encodeURIComponent(id)}/fork`, { seq });
+    // 分叉已经创建，源会话的统计不再属于屏幕上的新会话；打开新日志前显示零态。
+    setSessionStats(null);
     toast(t("toast.forked"));
     await loadSessions();
     navigate('chat', result.session_id);
@@ -515,6 +524,8 @@ async function openSession(id) {
   // （点的是当前这个会话就不丢 —— 那只是重看一遍，没道理把图扔了。）
   if (id !== state.sessionId) clearAttachments();
   state.sessionId = id;
+  // 立即撤掉上一个会话的统计；真正的快照回来后由 setSessionStats 替换。
+  setSessionStats(null);
   showChat();
   renderSessions();
   $('messages').innerHTML = '';
@@ -542,7 +553,8 @@ async function openSession(id) {
   state.multimodal = boolDefaultOn((data.tools || {}).multimodal);
   renderMultimodalToggle();
   for (const message of data.messages || []) renderStoredMessage(message);
-  updateUsageHint(data.usage);
+  setSessionStats(data.stats);
+  updateUsageHint(data.stats ? state.sessionStats.usage : data.usage);
   state.stick = true;
   scrollToBottom();
 }
@@ -585,6 +597,7 @@ function emptyChatHtml() {
 function newChat() {
   if (state.busy) { toast(t("toast.busy_running")); return; }
   state.sessionId = null;
+  setSessionStats(null);
   // 待发附件属于刚才那个（服务端已经给了 id 的）会话目录，新对话用不上它们
   clearAttachments();
   navigate('chat');
@@ -638,6 +651,7 @@ function renderPickers() {
     // （providers.json 被删了），而下一次请求会拿一个**已不存在的 provider** 发出去。
     state.selection = { provider: '', model: '', effort: '' };
     renderEffortPicker();
+    renderSessionStats();
     return;
   }
   const groups = new Map();
@@ -667,6 +681,7 @@ function renderPickers() {
   }
   modelSelect.value = wanted;
   renderEffortPicker();
+  renderSessionStats();
 }
 
 function renderEffortPicker() {
@@ -744,10 +759,8 @@ async function setWebSearch(on) {
        400 的事，不是开关的事），所以这个按钮**永远可点**。
        busy 时也能切 —— 切了影响的是**下一条**消息（与联网开关一致）。 */
 
-/* 这三句（外加下面那句 OCR 标注）都写成**函数**而不是常量：语言是运行期可变的，
+/* 缩略图徽标与 OCR 标注写成**函数**而不是常量：语言是运行期可变的，
    常量会在加载时就被冻成当时的语言，切完语言这里会继续吐旧语言。 */
-function multimodalOffText() { return t('multimodal.off_text'); }
-function multimodalOffBold() { return t('multimodal.off_bold'); }
 function multimodalBadgeText() { return t('multimodal.badge'); }
 /* §13.7 第 3 句的那句标注。它现在是折叠标题的**前半段**（后半段是状态摘要），
    所以只写一处 —— 抄两遍迟早有一遍走样。 */
@@ -770,7 +783,7 @@ function renderMultimodalToggle() {
   button.title = on
     ? t("toggle.multimodal.on_title")
     : t("toggle.multimodal.off_title");
-  // 开关一变，待发条上的标注与输入框附近那句提示都要跟着变
+  // 开关一变，每张待发缩略图上的模态标注也要跟着变。
   renderAttachments();
 }
 
@@ -1165,6 +1178,124 @@ function updateUsageHint(usage) {
   $('chat-meta').textContent = usage ? t("usage.this_chat", { total: usage.total_tokens || 0 }) : '';
 }
 
+/* ── 当前会话统计条 ─────────────────────────────────────
+   轮数与累计用量来自事件日志；速度 = 全部输出 token / 各轮实际耗时之和。
+   上下文占用只取最后一次模型请求的 prompt_tokens，不能把多步请求的输入相加。 */
+function emptySessionStats() {
+  return {
+    turns: 0,
+    elapsedSeconds: 0,
+    contextTokens: 0,
+    usage: Object.fromEntries(SESSION_USAGE_FIELDS.map((key) => [key, 0])),
+  };
+}
+
+function statNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, number) : 0;
+}
+
+function normalizeSessionStats(raw) {
+  const source = raw || {};
+  const usage = source.usage || {};
+  const normalized = emptySessionStats();
+  normalized.turns = Math.floor(statNumber(source.turns));
+  normalized.elapsedSeconds = statNumber(source.elapsed_seconds);
+  normalized.contextTokens = Math.floor(statNumber(source.context_tokens));
+  for (const key of SESSION_USAGE_FIELDS) normalized.usage[key] = statNumber(usage[key]);
+  return normalized;
+}
+
+function formatCompactTokens(value) {
+  const number = statNumber(value);
+  if (number < 1000) return String(Math.round(number));
+  const units = ['k', 'M', 'B', 'T'];
+  let scaled = number;
+  let unit = '';
+  for (const candidate of units) {
+    if (scaled < 1000) break;
+    scaled /= 1000;
+    unit = candidate;
+  }
+  return `${Math.round(scaled * 10) / 10}${unit}`;
+}
+
+function formatStatRate(value) {
+  return String(Math.round(statNumber(value) * 10) / 10);
+}
+
+function formatContextPercent(value) {
+  const number = statNumber(value);
+  // 有模型且有少量上下文时不能四舍五入成 0%：0% 专门表示未选模型/没有占用。
+  return number > 0 && number < 1 ? '<1' : String(Math.round(number));
+}
+
+function selectedModelContextWindow() {
+  const selected = state.selection || {};
+  if (!selected.provider || !selected.model) return 0;
+  const entry = ((state.providers && state.providers.models) || []).find((item) => (
+    item.provider === selected.provider && item.model === selected.model
+  ));
+  return entry ? statNumber(entry.context_window) : 0;
+}
+
+function renderSessionStats() {
+  const bar = $('session-stats');
+  if (!bar) return;
+  const stats = state.sessionStats || emptySessionStats();
+  const usage = stats.usage || {};
+  const speed = stats.elapsedSeconds > 0
+    ? statNumber(usage.completion_tokens) / stats.elapsedSeconds : 0;
+  const cachePercent = statNumber(usage.prompt_tokens) > 0
+    ? statNumber(usage.cached_tokens) / statNumber(usage.prompt_tokens) * 100 : 0;
+  const contextWindow = selectedModelContextWindow();
+  const contextPercent = contextWindow > 0
+    ? statNumber(stats.contextTokens) / contextWindow * 100 : 0;
+
+  $('stats-turns').textContent = t('stats.turns', { n: stats.turns });
+  $('stats-speed').textContent = t('stats.speed', { value: formatStatRate(speed) });
+  $('stats-tokens').textContent = t('stats.tokens', { value: formatCompactTokens(usage.total_tokens) });
+  $('stats-tokens').title = t('stats.tokens_title', { value: statNumber(usage.total_tokens) });
+  $('stats-cache').textContent = t('stats.cache', { value: Math.round(cachePercent) });
+  $('stats-context').textContent = t('stats.context', { value: formatContextPercent(contextPercent) });
+  $('stats-context-wrap').title = contextWindow > 0
+    ? t('stats.context_title', {
+      used: statNumber(stats.contextTokens), window: contextWindow,
+    })
+    : t('stats.context_none');
+  $('context-meter-fill').style.width = `${Math.max(0, Math.min(100, contextPercent))}%`;
+}
+
+function setSessionStats(raw) {
+  state.sessionStats = normalizeSessionStats(raw);
+  renderSessionStats();
+}
+
+function recordTurnStats(payload) {
+  const frame = payload || {};
+  const stats = normalizeSessionStats({
+    turns: state.sessionStats.turns,
+    elapsed_seconds: state.sessionStats.elapsedSeconds,
+    context_tokens: state.sessionStats.contextTokens,
+    usage: state.sessionStats.usage,
+  });
+  const usage = frame.usage || {};
+  stats.turns += 1;
+  stats.elapsedSeconds += statNumber(frame.elapsed);
+  for (const key of SESSION_USAGE_FIELDS) stats.usage[key] += statNumber(usage[key]);
+  // 新后端明确给最后一次请求的输入；老后端只有单步用量时才用它兜底。
+  // 两者都没有时归零，不能把上一轮的上下文占用冒充成这一轮的。
+  if (Object.prototype.hasOwnProperty.call(frame, 'context_tokens')) {
+    stats.contextTokens = statNumber(frame.context_tokens);
+  } else if (Object.prototype.hasOwnProperty.call(usage, 'prompt_tokens')) {
+    stats.contextTokens = statNumber(usage.prompt_tokens);
+  } else {
+    stats.contextTokens = 0;
+  }
+  state.sessionStats = stats;
+  renderSessionStats();
+}
+
 /* ── 图片附件（接口契约见 docs/11-attachments.md）─────────────
    三条入口：📎 选择文件 / 把图片拖到输入区 / 在输入框里 Ctrl+V 粘贴截图。
    选中之后**立刻**上传（POST /api/attachments）：缩略图 src 用的是服务端
@@ -1322,21 +1453,6 @@ function renderAttachments() {
     host.appendChild(box);
   }
   syncAttachEntry();
-  syncMultimodalHint();
-}
-
-/* 契约 §13.7 第 1 句：开关关着**且有待发图片**时，输入框附近常驻一句。
-   前提两条缺一不可 —— 没有待发图片时它只是在冲着没有图片的输入框喊话。
-   文案在这里拼（常量只写一处），DOM 节点是 index.html 里那个占位 div。 */
-function syncMultimodalHint() {
-  const host = $('multimodal-hint');
-  if (!host) return;
-  const show = multimodalTextOnly() && state.attachments.length > 0;
-  host.classList.toggle('hidden', !show);
-  clearNode(host);
-  if (!show) return;
-  host.appendChild(el('span', null, multimodalOffText()));
-  host.appendChild(el('strong', null, multimodalOffBold()));
 }
 
 /* 移除只是从**待发列表**里拿掉：磁盘上的那份还在（别的消息可能引用着同一个
@@ -1502,28 +1618,11 @@ function wireComposerAttachments() {
   syncAttachEntry();
 }
 
-/* busy 时 📎 禁用，提示也换成"现在不能再加"（拖放 / 粘贴在各自的处理函数里挡）。 */
+/* busy 时 📎 禁用；拖放 / 粘贴在各自的处理函数里挡住并用 toast 明说。 */
 function syncAttachEntry() {
   const button = $('attach');
   if (button) button.disabled = !!state.busy;
   if (state.busy) $('composer-drop').classList.remove('dragover');
-  const hint = $('attach-hint');
-  if (!hint) return;
-  // 原句就是当前语言的那条文案。**不从 DOM 里取**：切语言时 DOM 会被 applyStaticTexts
-  // 重填，缓存下来的旧句子会让"多模态关着"时那句提示留在上一种语言。
-  if (hint.dataset.base === undefined || hint.dataset.lang !== current()) {
-    hint.dataset.base = t('static.attach_hint');
-    hint.dataset.lang = current();
-  }
-  hint.classList.toggle('busy', !!state.busy);
-  hint.textContent = state.busy ? t("attachment.busy_hint") : hint.dataset.base;
-  // 这一句说的是"图片会随请求发给模型"。**只要开关关着它就是假话** —— 那时图片
-  // 恰恰不会发出去（旁边那句 #multimodal-hint 才是对的，两句并排会互相抵消）。
-  // 判据只能是开关本身：上一版写成"关着**且有待发图片**"，可发送之后待发图片就
-  // 清空了，这句假话又冒出来 —— 屏幕上于是同时出现"多模态：关"、"图片本身没有
-  // 发出去"和"图片会发给模型接口"，自相矛盾。busy 时不让位：那时用户需要知道的
-  // 是"现在不能再加图"。
-  hint.classList.toggle('hidden', !state.busy && multimodalTextOnly());
 }
 
 /* ── 发送 ─────────────────────────────────────────────── */
@@ -1590,6 +1689,7 @@ async function send() {
         if (typeof frame.session_id === 'string' && frame.session_id) {
           state.sessionId = frame.session_id;
           if (wasNew) {
+            setSessionStats(null);
             $('chat-title').textContent = text
               ? text.slice(0, 40)   // 与侧栏 session_display_title 的 40 字保持一致
               : (pending.length ? t("chat.images_only") : t("chat.new_title"));
@@ -1621,7 +1721,8 @@ async function send() {
         // `user_seq` 是后端在 turn_end 帧里带回来的这一轮分叉点（老后端没有它 → 不给按钮）
         addMeta(t("meta.steps_line", { steps: payload.steps, reason: payload.stop_reason, elapsed: payload.elapsed })
           + usageText(usage), payload && payload.user_seq);
-        updateUsageHint(usage && usage.total_tokens ? usage : null);
+        recordTurnStats(payload);
+        updateUsageHint(state.sessionStats.usage.total_tokens ? state.sessionStats.usage : null);
       },
       // 某一帧的处理函数抛异常时：只报一次，然后继续读后面的帧
       // （见 streamPost 里那条注释）。
@@ -1719,8 +1820,7 @@ function renderMemories() {
   const active = stats.active || 0;
   const cap = limit.max_items ?? 50;
 
-  $('memory-stats').textContent =
-    t("memory.stats", { active: active, cap: cap, deleted: stats.deleted || 0, ops: stats.ops || 0 });
+  $('memory-stats').textContent = t("memory.stats", { active: active, cap: cap });
 
   // 上限控件：值、可设范围、以及"现在最低能设到多少"（不能低于已有条数）
   const field = $('memory-limit');
@@ -1744,15 +1844,12 @@ function renderMemories() {
   }
 
   const keyword = $('memory-search').value.trim().toLowerCase();
-  const showDeleted = $('memory-show-deleted').checked;
   const list = $('memory-list');
   list.innerHTML = '';
 
   const items = (data.items || []).filter((item) => {
-    if (!showDeleted && item.status !== 'active') return false;
     if (!keyword) return true;
-    const haystack = [item.content, item.category].join(' ').toLowerCase();
-    return haystack.includes(keyword);
+    return String(item.content || '').toLowerCase().includes(keyword);
   });
 
   if (!items.length) {
@@ -1762,10 +1859,9 @@ function renderMemories() {
 
   for (const item of items) {
     const card = document.createElement('div');
-    card.className = 'mem-card' + (item.status === 'active' ? '' : ' deleted');
-    // 记忆条目只有对话模型写得进来，来源与"整理过没有"都由 dream 那边管，
-    // 所以这里不再有 sources / dreamed_at 这类字段可显示。
-    card.innerHTML = t("memory.card_html", { id: escapeHtml(item.id), cls: item.category === '洞察' ? 'insight' : '', category: escapeHtml(item.category), deleted: item.status === 'active' ? '' : t("memory.deleted_chip"), content: escapeHtml(item.content), actions: item.status === 'active' ? t("memory.delete_btn") : '' });
+    card.className = 'mem-card';
+    // 原生 memory_instruction.md 只有 id 与正文，没有可展示的分类/状态/时间戳。
+    card.innerHTML = t("memory.card_html", { id: escapeHtml(item.id), content: escapeHtml(item.content), actions: t("memory.delete_btn") });
     card.querySelector('[data-act="edit"]').onclick = () => editMemory(card, item);
     const del = card.querySelector('[data-act="del"]');
     if (del) del.onclick = () => deleteMemory(item);
@@ -4734,6 +4830,7 @@ async function rerenderMessages() {
   if (!sessionId) {
     host.innerHTML = emptyChatHtml();
     $('chat-title').textContent = t('chat.new_title');
+    setSessionStats(null);
     return;
   }
   let data;
@@ -4746,10 +4843,11 @@ async function rerenderMessages() {
   // 等待期间用户可能已经切到 B：A 的慢响应不能清空或覆盖 B 的消息流。
   if (state.sessionId !== sessionId) return;
   host.innerHTML = '';
+  setSessionStats(data && data.stats);
   const messages = (data && data.messages) || [];
   if (!messages.length) { host.innerHTML = emptyChatHtml(); return; }
   for (const message of messages) renderStoredMessage(message);
-  updateUsageHint((data && data.usage) || null);
+  updateUsageHint(data && data.stats ? state.sessionStats.usage : (data && data.usage) || null);
   state.stick = true;
   scrollToBottom();
 }
@@ -5675,9 +5773,7 @@ function resetSummaryRows(data) {
   const size = formatByteSize(data.bytes);
   return [
     [t("reset.row_chats"), t("usage.chat_count", { n: data.sessions || 0 })],
-    [t("reset.row_memories"), t("reset.unit_active", { n: data.memories || 0 })
-      + (data.deleted_memories ? t("reset.unit_deleted", { n: data.deleted_memories }) : '')
-      + (data.memory_ops ? t("reset.unit_ops", { n: data.memory_ops }) : '')],
+    [t("reset.row_memories"), t("reset.unit_active", { n: data.memories || 0 })],
     ['Dream', t("reset.unit_dream_runs", { n: data.dream_runs || 0 })],
     [t("vault.browser_title"), t("reset.unit_files", { n: data.vault_files || 0 })],
     [t("reset.row_attachments"), t("reset.unit_files", { n: data.attachment_files || 0 })
@@ -5749,10 +5845,8 @@ async function refreshAfterFactoryReset() {
   newChat();
 }
 
-/* 顶部品牌行 + 输入框下面那句提示。`init()` 与"重置之后"共用同一份判断 ——
-   抄成两份迟早有一份忘了改（典型形态：重置后还写着"记忆：全量注入"）。
-   返回值是"有没有可用模型"：`init()` 拿它决定要不要把接口页推到眼前，
-   这里顺手算好，免得同一个判据在调用方再写一遍。 */
+/* 顶部品牌行。`init()` 与"重置之后"共用；返回值是"有没有可用模型"，
+   供 init() 决定全新机器要不要直接打开接口设置。输入区旧提示已整体移除。 */
 function renderBrandAndHint() {
   const config = state.config || {};
   // 侧栏第二行显示**版本号**（ADR-096）。它来自 `/api/config` 的 `version`，
@@ -5762,11 +5856,7 @@ function renderBrandAndHint() {
   $('brand-sub').textContent = version
     ? t("brand.version", { version })
     : t("brand.version_unknown");
-  const usable = ((state.providers && state.providers.models) || []).length;
-  $('composer-hint').textContent = usable
-    ? t("brand.memory", { mode: config.memory_mode || t("brand.memory_mode_default") })
-    : t("brand.no_provider_hint");
-  return usable;
+  return ((state.providers && state.providers.models) || []).length;
 }
 
 async function loadResetPane() {
@@ -6042,6 +6132,7 @@ async function init() {
     state.selection.provider = provider;
     state.selection.model = model;
     renderEffortPicker();
+    renderSessionStats();
     persistSelection();
   };
   $('pick-effort').onchange = () => {
@@ -6052,7 +6143,6 @@ async function init() {
   // busy 时也让它可切：切了影响的是**下一条**消息（与联网开关同一个语义，契约 §13.7-6）
   $('toggle-multimodal').onclick = toggleMultimodal;
   $('memory-search').addEventListener('input', renderMemories);
-  $('memory-show-deleted').addEventListener('change', renderMemories);
   $('memory-reload').onclick = loadMemories;
   $('memory-limit-save').onclick = saveMemoryLimit;
   $('memory-limit').addEventListener('keydown', (event) => {

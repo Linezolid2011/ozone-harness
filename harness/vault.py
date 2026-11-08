@@ -6,8 +6,9 @@
     dream vault（本模块）       后台自动巩固 → 只有 README 每轮注入，
                               细节靠模型用工具进来读 → 可信度次之
 
-两套东西**必须是两个存储**：把整理者的写权限伸进"用户明确要求记住"的那张表，
-等于让记录者随时能重写历史。所以 vault 是目录，memory 是 SQLite，互不相干。
+两套东西即使同在 `data/vault/` 也**必须分所有权**：整理者的写权限不能伸进
+"用户明确要求记住"的 `memory_instruction.md`，那等于让记录者随时能重写历史。
+独立记忆由 MemoryStore 写，Dream 档案由 VaultStore 写，互不改写。
 
 ## README 是投影，原始记录才是真相来源
 
@@ -24,7 +25,7 @@ vault 里的东西全是从会话记录（append-only JSONL）压缩出来的**�
 ## 一条贯穿全模块的规则：路径必须自己归一化，并且 fail-closed
 
 与 ADR-052 同源：**不要指望平台替你检查。** 这里是模型第一次能写"文件路径"
-（以前它只能写 SQLite 里的行，每次写入都过 `MemoryStore` 的校验函数），
+（原生 memory_instruction.md 则由 MemoryStore 单独校验与写入），
 而我们在 Windows 上，于是多出一整类平台特有的坑：
 
 * `NUL` / `CON` / `COM1` 这些**设备名**：`open()` 打开的不是文件而是设备，
@@ -1285,12 +1286,14 @@ class VaultStore:
         return True
 
     def _assert_editable(self, canonical: str) -> None:
-        """原生模式下，生成物/清单/日志/观察层一律不许直接写或删。"""
+        """Dream 的生成物只读；memory_instruction 在两种模式下都归独立记忆页管。"""
+        if canonical == MEMORY_INSTRUCTION_NAME:
+            raise VaultPathError(t("ui.vault.generated_readonly", path=canonical))
         if not self.is_native():
             return
         if (
             canonical in GENERATED_RELS
-            or canonical in (SECTIONS_CONFIG, LOG_NAME, OBSERVATIONS_NAME, MEMORY_INSTRUCTION_NAME)
+            or canonical in (SECTIONS_CONFIG, LOG_NAME, OBSERVATIONS_NAME)
             or canonical.startswith(f"{SECTION_DIR}/{ARCHIVE_DIR}/")
         ):
             raise VaultPathError(t("ui.vault.generated_readonly", path=canonical))
@@ -1505,6 +1508,10 @@ class VaultStore:
         原子改名。
         """
         canonical = normalize_rel_path(rel, name_max_chars=self.name_max_chars)
+        # memory_instruction 只能由 MemoryStore 写；低层原子写接口也不能绕过所有权。
+        # Dream 自己的 README/index 等生成物仍可由 harness 写，不能在这里一刀切。
+        if canonical == MEMORY_INSTRUCTION_NAME:
+            raise VaultPathError(t("ui.vault.generated_readonly", path=canonical))
         path = self._resolve_canonical(canonical)
         payload = text if text.endswith("\n") else text + "\n"
         if len(payload) > self.write_max_chars:

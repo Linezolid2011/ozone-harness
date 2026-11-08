@@ -37,6 +37,8 @@
 完整就直接进入聊天；缺失或损坏时会先问你是否下载。你可以填一个 PyPI 镜像，留空则用官方
 `https://pypi.org/simple`；下载时有进度、暂停/继续和退出按钮。拒绝或退出会删除本次下载内容并
 继续进入不使用完整 venv 的聊天界面，**不会记住这个选择**，下次启动仍会重新检查。
+这个检查是**所有 Web 入口的默认行为**（含 `run.cmd --web` / `run.ps1 --web`）；只有明确加
+`--no-guided-venv` 才会跳过它。启动门不会自行消失：完整环境通过检查，或由你明确选择继续，才进入应用。
 
 ```bat
 run.cmd --web                            :: 打开 Web 界面（默认 http://127.0.0.1:8787）
@@ -104,8 +106,8 @@ run.cmd --web
 
 | 工具 | 作用 |
 |---|---|
-| `mem_create(content, category?)` | 新建记忆 |
-| `mem_edit(id, content?, category?)` | 修改已有记忆 |
+| `mem_create(content)` | 新建记忆 |
+| `mem_edit(id, content)` | 修改已有记忆 |
 | `mem_del(id, reason?)` | 删除记忆 |
 
 对话历史的保存、上下文的读取、记忆的注入与渲染，**全部由 harness 服务端完成**，
@@ -120,14 +122,14 @@ run.cmd --web
       │  emit(kind, **data) 回调
 [ AgentLoop ]   ← 心脏：多步循环 + 四道熔断（对话与 dream 共用）
       ├─ ContextBuilder   上下文组装（记忆注入 + 按组裁剪 + 缓存友好排序）
-      ├─ MemoryStore      SQLite 记忆库（软删除 + 可调上限）+ 整理游标
+      ├─ MemoryStore      原生 Markdown 记忆（可调上限）+ SQLite 整理游标
       ├─ VaultStore       背景档案（路径安全 + README 预算 + 结构校验）
       ├─ ToolRegistry     工具注册表（异常永不外泄）
       └─ EventLog         事件溯源 JSONL（对话历史的唯一真相来源）
       │  LLMProvider 抽象
 [ OpenAICompatProvider ]   ← 一个客户端覆盖 DeepSeek / Kimi / 智谱 / 通义 / OpenAI / 本地 Ollama…
       │
-[ 本地存储: data/memory.db + data/sessions/*.jsonl + data/vault/*.md + data/dreams/* ]
+[ 本地存储: data/vault/memory_instruction.md + data/memory.db（游标）+ data/sessions/*.jsonl + data/vault/*.md + data/dreams/* ]
 ```
 
 ### 三条贯穿性设计
@@ -146,7 +148,25 @@ run.cmd --web
 
 ---
 
-## 记忆：全量注入 + 可调硬上限（ADR-057 / 058）
+## 记忆：全量注入 + 可调硬上限（ADR-057 / 058 / 109）
+
+逐条记忆以 Kimi 原生形式存在 `data/vault/memory_instruction.md`：文件头
+`# Memory instructions`，每条是 `## <数字 id>` 加正文。**只保存 id 与正文**；
+分类、版本、时间戳与软删除副本都不属于原生格式。删除就是从这个文件中移除。
+
+```md
+# Memory instructions
+
+## 1
+
+用户喜欢美式咖啡。
+```
+
+> **破坏性变化（ADR-109）**：旧 SQLite 的 `memories` / `memory_ops` **不读取、不迁移、
+> 不提供兼容层**。`data/memory.db` 现在只负责 Dream 整理游标。设置 → Dream 不再把
+> `memory_instruction.md` 当成档案显示；设置 → 记忆是它的独立窗口。Dream 格式化会清掉
+> 可重建的档案/运行/游标，但保留这份独立记忆的原始字节。原生 zip 导入会先校验格式，
+> 只有显式覆盖时才同时替换现有记忆。
 
 记忆**没有检索**：每条都在上下文里。约束它的不是"挑相关的几条"，而是一条**硬上限**
 （默认 50，可在 设置 → 记忆 里改成 0–100）：
@@ -190,7 +210,7 @@ run.cmd --memory-limit 80           :: 改上限（0-100；不能低于已有条
 | | 记忆条目 | 背景档案（dream vault） |
 |---|---|---|
 | 谁写 | **只有**对话模型（你明确要求它记住的） | **只有**后台整理流程 |
-| 存在哪 | `data/memory.db` | `data/vault/**.md`（人可读、可直接编辑） |
+| 存在哪 | `data/vault/memory_instruction.md`（原生 Markdown，只由记忆页/工具写） | `data/vault/**.md`（人可读、可直接编辑） |
 | 注什么 | 条目本身（全量注入） | **只有一份 README** |
 | 细节怎么拿 | 它本来就在上下文里 | **模型自己调 `dream_list/read/search` 去读** |
 | 可信度 | 最高 | 次之（压缩过的投影） |
@@ -297,12 +317,14 @@ Dream 页的目录树里点开一份档案之后，可以直接**新建 / 编辑
 它们装在自己的 `.venv` 里，见上面的 `--setup`。）
 
 - **对话**：流式正文 + 可折叠的深度思考 + 工具调用卡片 + 结尾用量；
-  右上角可直接切**模型**、**thinking 档位**与**联网搜索开关**（都跟着会话存）
+  右上角可直接切**模型**、**thinking 档位**与**联网搜索开关**（都跟着会话存）；
+  输入框下方显示**当前会话**的轮数、平均输出速度、累计 token、缓存命中与当前模型上下文百分比，
+  新建/分叉时按新会话重建，每轮结束更新（ADR-108）
 - **会话管理**：侧栏每条对话悬停可**重命名**（✎）与**删除**（✕）。
   **删除只删这一条对话** —— 记忆、接口配置和其他对话一个字节都不动
 - **设置**（左下角）：记忆 / Dream / 用量 / 接口 / 工具 / **提示词** / **常规**（主题、语言、时区、单轮最大输出）/ 重置
 - **接口**：11 个供应商预设，填 key 即可；模型列表用「获取模型列表」自动发现
-- **记忆**：搜索 / 分类 / 上限设置 / 内联编辑 / 删除
+- **记忆**：搜索 / 上限设置 / 内联编辑 / 硬删除（原生文件只存 id 与正文，不再有分类或软删除副本）
 - **提示词**（**可编辑**，ADR-086 / ADR-088）：把"我们到底跟模型说了什么"摊开 ——
   当前语言下的**全部 22 条提示词**（含自动压缩与后台整理用的那两条）与**全部 16 个工具定义**
   （名字、描述、参数 schema），每条都标着现在**生效 / 未注册 / 会话级**以及为什么；
@@ -312,7 +334,7 @@ Dream 页的目录树里点开一份档案之后，可以直接**新建 / 编辑
   **恢复出厂设置会把两门一起复原**（它就在 `data/` 里，所以重置预览会报出会失去几条）。
   保存时会挡住"保存时不报错、发请求时才炸"的那一类（例如自己编一个占位符），
   而"删掉了某个占位符"这类只**警告**（那条内容就不会再被注入）。
-  看一眼不会在 `data/` 里留下任何东西（连 `memory.db` 都不会被建出来）。
+  看一眼不会在 `data/` 里留下任何东西（连 `memory.db` 或 `memory_instruction.md` 都不会被建出来）。
 - **Dream**：待整理状态；**可逐层点开的目录树，点开就能读档案**（类 markdown 渲染、
   frontmatter 属性、`[[双链]]` 与反链可以直接点着走）；**也能在界面上新建 / 编辑 / 删除**
   （详见下面「背景档案」一节的安全说明）；编辑器里有**「插入链接」**（列出已有档案，
@@ -356,8 +378,8 @@ Dream 页长这样（左边是档案树，右边是正文；最下面是那个�
 
 对话窗口里可以直接把图片发给模型，**三种入口**：输入框的 📎 按钮（可多选）、
 把图片**拖进输入框**、以及 **Ctrl+V 直接粘贴截图**（截图不用先存成文件）。
-这些图片会**真的随请求发给模型接口**，不是只留在本地 —— 输入框下方那句常驻提示
-就是为了不让人误会这一点。`deepseek-flash` 是原生多模态，图片按官方格式进请求
+这些图片会**真的随请求发给模型接口**，不是只留在本地。`deepseek-flash` 是原生多模态，
+图片按官方格式进请求
 （OpenAI 线是 `image_url` + data URL，Anthropic 线是 `image` 块）。
 
 ![对话里的图片附件](docs/screenshots/chat-attachments.png)
@@ -625,7 +647,7 @@ harness/
   providers/openai_compat.py  一个客户端覆盖绝大多数供应商
   providers/store.py     接口档案、预设、模型发现（**不预置任何 key**）
   providers/anthropic_compat.py  Anthropic 格式客户端（Kimi Code、Claude）
-  memory.py              SQLite 记忆库（软删除 + 可调上限）+ 整理游标
+  memory.py              原生 memory_instruction.md（id + 正文）+ SQLite 整理游标
   memory_limit.py        记忆条数上限（data/memory.json，0-100）
   textsim.py             文本相似度（二元组/dice/覆盖率），供档案检索
   vault.py               背景档案：路径安全、frontmatter、README 预算、结构校验
@@ -668,7 +690,7 @@ run.cmd --test
 .venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -t .
 ```
 
-- **当前基线 1124 条**（2026-11-07，venv，`OK (skipped=2)`）。**这个数字只在这里记一处** ——
+- **当前基线 1125 条**（2026-11-08，venv，`OK (skipped=2)`）。**这个数字只在这里记一处** ——
   它会跟着代码变；`docs/00-scope.md` 的验收标准只写结论、不抄条数。
   （那 2 条跳过是**本机环境**：建符号链接要特权、以及"大小写敏感才能构造撞名"。）
 - 全部离线（模型后端被 `FakeProvider` 替换），可以放心反复运行。
