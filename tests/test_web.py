@@ -567,7 +567,7 @@ class HttpServerTests(unittest.TestCase):
         self.assertIn("application/json", ctype)
         view = json.loads(body)
         self.assertEqual(view["summary"]["prompts"], 22)
-        self.assertEqual(view["summary"]["tools"], 16)
+        self.assertEqual(view["summary"]["tools"], 20)
         self.assertEqual([g["id"] for g in view["groups"]], ["system", "tail", "compact", "render", "dream"])
         self.assertEqual([g["id"] for g in view["tools"]], ["chat", "dream"])
         # 全新的数据目录：看一眼不许种出任何东西（连 memory.db 都不许）

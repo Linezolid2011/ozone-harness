@@ -242,6 +242,10 @@ MESSAGES: dict[str, str] = {
         "{path} and the existing {clash} are the same file on a **case-insensitive "
         "filesystem**, so writing it would silently overwrite that one. Pick another name"
     ),
+    "ui.vault.ambiguous_name": (
+        "{name} refers to multiple archives: {paths}; a bare name cannot safely choose one. "
+        "Use a full directory path, or ask the user to disambiguate the files manually"
+    ),
     "ui.vault.exists": "There is already a {path}",
     "ui.vault.readme_placeholder": (
         "README cannot be marked as a placeholder — that marker is meant for the empty "
@@ -256,6 +260,18 @@ MESSAGES: dict[str, str] = {
     "ui.vault.section_no_delete": (
         "{path} is a fixed section from sections.yaml and cannot be deleted; "
         "to empty it, set its body to an empty string"
+    ),
+    "ui.vault.session_readonly": (
+        "{path} is maintained by the harness or the separate memory system and cannot be "
+        "changed by session tools; edit an archive under sections / entities or observations.md"
+    ),
+    "ui.vault.dir_markdown_suffix": "A directory name cannot end in .md (it would be ambiguous with an archive): {path}",
+    "ui.vault.dir_too_deep": "Directories can be nested at most 8 levels: {path}",
+    "ui.vault.dir_no_delete": "{path} is a top-level archive directory and cannot be deleted as a whole",
+    "ui.vault.dir_target_file": "{path} is already a file and cannot be changed into a directory",
+    "ui.vault.dir_contains_link": "{path} contains a symbolic link; deletion was refused. Ask the user to handle the link manually",
+    "ui.vault.dir_not_empty": (
+        "Directory {path} is not empty; to delete its contents too, explicitly use recursive=true"
     ),
     "ui.vault.manifest_read_failed": "sections.yaml could not be read: {error}",
     "ui.vault.manifest_not_a_note": "sections.yaml is a manifest, not a readable note",
@@ -744,7 +760,6 @@ MESSAGES: dict[str, str] = {
     "ui.prompts.cond.vault_no_readme": "the background vault has no README yet (one consolidation run creates it)",
     "ui.prompts.cond.vault_ready": "archives already exist, so different variants are in use",
     "ui.prompts.cond.vault_has_readme": "a README already exists (this one is only used when there is none)",
-    "ui.prompts.cond.vault_empty": "the background vault is still empty — these three tools are not registered right now",
     "ui.prompts.cond.web_off": "web tools are switched off in Settings → Tools",
     "ui.prompts.cond.web_enabled": "web tools are on, so different variants are in use",
     "ui.prompts.cond.web_search_off": "web access is on, but search is off (or no search backend is configured)",

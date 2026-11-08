@@ -30,14 +30,15 @@
 
 | | memory instructions | dream vault |
 |---|---|---|
-| 谁写 | **只有**对话模型（`mem_create/edit/del`） | **只有** dream 整理流程 |
+| 谁写 | **只有**对话模型（`mem_create/edit/del`） | dream 整理流程；对话模型也可用受约束工具直接维护 |
 | 存在哪 | `data/vault/memory_instruction.md`（原生 Markdown） | `data/vault/**.md` |
 | 注什么 | 条目本身（**全部**，有硬上限） | **只有 README** |
 | 怎么取更多 | 不需要：都在上下文里 | 模型自己调 `dream_list / dream_read / dream_search` |
 | 可信度 | 最高（用户明说） | 次之（压缩推断，可能失真） |
 
-提示词里把这条分层**写出来**了（见 `harness/context.py` 的 system 提示），
-并且工具层面也成立：**对话模型没有任何写 vault 的能力**。
+提示词里把这条分层**写出来**了（见 `harness/context.py` 的 system 提示），工具层面也成立：
+`memory_instruction.md` 始终由 MemoryStore 独占写。ADR-111 起对话模型可以写**背景档案**，
+但这没有给它独立记忆或通用文件系统权限，具体禁区见下文。
 
 ### 同目录不等于同所有权（ADR-109）
 
@@ -80,11 +81,13 @@ data/vault/
   memory_instruction.md   ← 独立逐条记忆；由「设置 → 记忆」管理，不在 Dream 树展示
 ```
 
-**旧模式（没有 `sections.yaml`）**：仍然只有 `README.md` + `sections/<名字>.md` +
-`entities/<名字>.md`，README 由模型写。路径校验的统一规则是：目录名小写、深度恰好为 2；
+**旧模式（没有 `sections.yaml`）**：仍然是 `README.md` + `sections/` + `entities/`，
+README 由模型写。整理器与导入器默认沿用"目录名小写、深度恰好为 2"的路径合同；
 原生模式额外允许 `sections/archived_month/<YYYY-MM>/this_month.md` 与
-`raw/source_<数字>/<图片>`（或 `.meta.json`）。`sections.yaml` 存在与否就是模式开关，
-**不会**因为一次整理把旧 vault 迁成原生（ADR-104）。
+`raw/source_<数字>/<图片>`（或 `.meta.json`）。ADR-111 的**会话编辑入口**另可用
+`allow_nested=True` 在 sections/entities、自定义目录与根级建非保护 Markdown，读/检索/索引
+都会识别它们；这个扩权不改变整理器与导入器的默认写法。`sections.yaml` 存在与否仍是模式开关，
+**不会**因为一次整理或会话编辑把旧 vault 迁成原生。
 
 frontmatter 是我们自己实现的**一个刻意做小的 YAML 子集**（标量 + 字符串列表，
 原生还用到**列表套映射**与**嵌套映射**），不引入 PyYAML —— frontmatter 的内容有一半是
@@ -164,6 +167,36 @@ vault 整个删掉可以重建，README 写错也不会污染历史。
 告诉模型这次拿到了多少 —— 只报截断后的长度，模型就无法判断"这个文件到底多大、
 我还差多少没看到"。
 
+## 会话直接维护：四个受约束写工具（ADR-111）
+
+| 工具 | 作用 |
+|---|---|
+| `dream_create(path, body, ...)` | 只新建；path 已存在就失败，不覆盖 |
+| `dream_edit(path, body, ...)` | 只更新；path 不存在就失败。body 整体替换，未给元信息保留 |
+| `dream_mkdir(path)` | 在 vault 内创建目录，可一次创建多级，也允许自定义顶层目录 |
+| `dream_delete(path, reason?, recursive?)` | 删档案或目录；目录默认只能空删 |
+
+用户明确要求维护档案时可以用，模型判断新建、修正或清理值得做时也可以主动用。写之前应先读
+相关档案，优先改已有内容而不是制造重复。所有写操作与 dream 一样**不可回滚**。
+
+允许写入的是 vault 内非保护位置的 Markdown：sections/、entities/、自定义目录与根级均可；
+旧 vault 的 README 也可用 `dream_edit` 改。以下禁区由 `VaultStore` 而不是提示词自觉执行：
+
+* `index.md`、`sections.yaml`、`log.md`、`memory_instruction.md`；
+* 原生 README、`sections/earlier_months.md`、`sections/archived_month/` 与整个 `raw/`；
+* README 在两种模式下都不可删除，原生固定 section 也不可删除；
+* 顶层 `sections/`、`entities/` 不可作为目录整体删除。
+
+每次成功改动后，原生模式自动重建 README/index/earlier_months 并同步 sections.yaml：
+新自定义 section 会加入清单，删除后会从清单移除；旧模式只重建 index，不接管 README。
+自定义根级/目录 Markdown 会进入 index 的 Other Files 与检索，但不会混进 sections.yaml 或
+原生 README 的 section 投影。裸 `name.md` 仍优先解析既有 entities/sections；根级与 canonical
+同名时裸名字会拒绝歧义操作，可分别用 `./name.md` 与 `entities/name.md` 明确指定。CLI 是长驻进程，因此每轮开始会重读 README；轮内保持不变，
+避免多步工具循环丢失缓存前缀。
+
+非空目录必须显式 `recursive=true`。递归删除会先检查整棵树：只要有受保护文件、非 Markdown
+文件或符号链接，就在删除任何内容之前拒绝，不能通过删父目录绕过单文件禁区。
+
 ## 路径安全（本期最要紧的部分）
 
 模型第一次能写"文件路径"，而我们在 Windows 上（ADR-054 有完整清单）：
@@ -174,7 +207,7 @@ vault 整个删掉可以重建，README 写错也不会污染历史。
 拒绝  entities/nul.x.md      判第一个点之前那一段，同样是设备
 拒绝  entities/X.MD          大小写不敏感的系统上会和 x.md 撞成同一个文件
 拒绝  entities/X.md          ← 与已存在的 x.md 撞名（会静默覆盖掉那份档案）
-拒绝  entities/sub/x.md      只允许两层（原生例外：sections/archived_month/<YYYY-MM>/this_month.md）
+拒绝  entities/sub/x.md      整理器/导入器默认只允许两层；会话工具显式 allow_nested 后可写
 拒绝  Entities/x.md          目录名必须小写
 拒绝  raw/source_x/a.png     raw 只允许 raw/source_<数字>/<图片> 或同名 .meta.json
 拒绝  穿越（点点斜杠）、POSIX 绝对路径、盘符路径、UNC 共享路径、波浪号开头

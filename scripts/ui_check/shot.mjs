@@ -27,7 +27,7 @@
  * ＋深色 `prompts-page-dark.png`（两张都是**分组默认全折**的样子）
  * ＋`prompts-page-group-open.png`（展开第一个分组之后），落在**项目根的
  * `.tmp-shots/`**（不写 docs/），尺寸与 `chat-light.png` 同档（1440×900）。
- * 它不依赖任何模型调用，拍之前会先断言"22 条提示词 + 16 个工具都画出来了、
+ * 它不依赖任何模型调用，拍之前会先断言"22 条提示词 + 20 个工具都画出来了、
  * 7 个分组默认都不带 open、原文默认折叠、页面零报错"，断言不过就不写文件。
  * 只拍这五张：设 `SHOT_PROMPTS_ONLY=1`。
  *
@@ -713,7 +713,7 @@ async function captureProviderPane(dataDir) {
    （`seed-vault.ps1` 造出来的那份：联网没配 → 三种状态都能看到）。
 
    拍之前**先把这一页验一遍**（README 那条规矩：断言不过就不写文件）。
-   验的是"图里真的会有东西"：22 条提示词 + 16 个工具、**7 个分组默认全折**、
+   验的是"图里真的会有东西"：22 条提示词 + 20 个工具、**7 个分组默认全折**、
    原文默认折叠、页面上零 JS 报错。前两张（浅色 / 深色）拍的就是这个**默认态**
    —— 用户报的问题正是"折起来之前整页太长"，所以图必须是折着的；
    第三张 `prompts-page-group-open` 才展开第一个分组（连同它里面第一条的原文），
@@ -728,7 +728,7 @@ async function captureProviderPane(dataDir) {
    并且**把种下去的那条覆盖复原回去**（夹具不留状态）。 */
 
 /* 说明：既有那套消息处理只管 `message.id`，**不记页面报错**。
-   这一页比其它几张更依赖"JS 一路上没炸"（22+16 个节点都是脚本建出来的），
+   这一页比其它几张更依赖"JS 一路上没炸"（22+20 个节点都是脚本建出来的），
    所以这里自己挂一个监听，把报错收进这个数组，每次截图前断言它还是空的。
    写在函数外面：断言那一步是**另一个函数**（assertPromptsPage），
    收在 capturePromptsShots 里它看不见（第一版就这么写，当场 ReferenceError）。 */
@@ -1062,11 +1062,11 @@ async function assertFirstPromptExpanded() {
   }
 }
 
-/** 等这一页的骨架齐了（22 条提示词 + 16 个工具都是脚本建出来的，慢机器上要多等）。 */
+/** 等这一页的骨架齐了（22 条提示词 + 20 个工具都是脚本建出来的，慢机器上要多等）。 */
 async function preparePromptsPage() {
   await waitFor(`document.querySelectorAll('[data-prompt-id]').length === 22
-    && document.querySelectorAll('[data-tool-id]').length === 16`, 25000,
-  '提示词页画完（22 条提示词 + 16 个工具）');
+    && document.querySelectorAll('[data-tool-id]').length === 20`, 25000,
+  '提示词页画完（22 条提示词 + 20 个工具）');
 }
 
 /** 截图前的断言：**不过就不写文件**。返回一份"图里会有什么"的形状，顺手打到日志里。 */
@@ -1109,7 +1109,7 @@ async function assertPromptsPage(theme) {
   if (state.hidden) bad.push('提示词那一页还藏着（路由没生效）');
   if (state.dialogOpen) bad.push('有一个对话框还开着，会盖住这一页');
   if (state.promptCards !== 22) bad.push(`data-prompt-id 应有 22 个，实际 ${state.promptCards}`);
-  if (state.toolCards !== 16) bad.push(`data-tool-id 应有 16 个，实际 ${state.toolCards}`);
+  if (state.toolCards !== 20) bad.push(`data-tool-id 应有 20 个，实际 ${state.toolCards}`);
   if (state.groups !== 7) bad.push(`分组应有 7 个，实际 ${state.groups}`);
   // 这两张拍的是**默认的折叠态**（契约 §5 第 2 条）：有任何一个分组带着 open 就说明
   // 拍到的不是默认样子 —— 而这正是用户要看的那件事（折起来之后整页有多短）。

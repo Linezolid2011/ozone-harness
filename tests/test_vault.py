@@ -725,7 +725,7 @@ class VaultToolTests(TempCase):
         self.assertEqual(
             self.registry.names(), ["dream_list", "dream_read", "dream_search"]
         )
-        # 只有读工具：写 vault 的能力不给对话模型（ADR-002 的边界没动）
+        # 本模块仍只有读工具；ADR-111 的会话写工具在 vault_edit_tools.py。
         self.assertNotIn("mem_forget", self.registry.names())
 
     def test_list_on_empty_vault_says_so(self) -> None:
@@ -766,7 +766,7 @@ class VaultToolTests(TempCase):
 
     def test_read_refuses_traversal_and_missing_files(self) -> None:
         for raw, expected in (
-            ("../../etc/passwd", "两层"),
+            ("../../etc/passwd", "不能是"),
             ("/etc/passwd", "绝对路径"),
             ("C:/x.md", "盘符"),
             ("entities/NUL.md", "保留设备名"),
@@ -928,7 +928,12 @@ class VaultRuntimeTests(TempCase):
     def test_empty_vault_registers_no_extra_tools_and_creates_nothing(self) -> None:
         with self._runtime() as runtime:
             self.assertEqual(
-                runtime.registry.names(), ["mem_create", "mem_del", "mem_edit", "time"]
+                runtime.registry.names(),
+                [
+                    "dream_create", "dream_delete", "dream_edit", "dream_list",
+                    "dream_mkdir", "dream_read", "dream_search",
+                    "mem_create", "mem_del", "mem_edit", "time",
+                ]
             )
             self.assertEqual(runtime.vault_text, "")
         self.assertFalse(
@@ -945,7 +950,12 @@ class VaultRuntimeTests(TempCase):
         self.assertFalse(store.has_content())
         with self._runtime() as runtime:
             self.assertEqual(
-                runtime.registry.names(), ["mem_create", "mem_del", "mem_edit", "time"]
+                runtime.registry.names(),
+                [
+                    "dream_create", "dream_delete", "dream_edit", "dream_list",
+                    "dream_mkdir", "dream_read", "dream_search",
+                    "mem_create", "mem_del", "mem_edit", "time",
+                ]
             )
             self.assertEqual(runtime.vault_text, "")
 
@@ -963,7 +973,11 @@ class VaultRuntimeTests(TempCase):
             self.assertEqual(
                 runtime.registry.names(),
                 [
+                    "dream_create",
+                    "dream_delete",
+                    "dream_edit",
                     "dream_list",
+                    "dream_mkdir",
                     "dream_read",
                     "dream_search",
                     "mem_create",

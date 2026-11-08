@@ -50,7 +50,7 @@ harness/
   dream_records.py  会话事件 → 可读记录（渲染/分页/游标只认连续区间）
   providers/        供应商档案（providers.json）、OpenAI/Anthropic 兼容客户端
   net/              联网工具：抓取（SSRF fail-closed）、搜索后端、工具设置
-  tools/            工具注册表 + 对话侧工具（记忆三件套、档案只读三件套）+ 整理侧工具
+  tools/            工具注册表 + 对话侧工具（记忆三件套、档案读写七件套）+ 整理侧工具
   web.py            零依赖 HTTP + SSE（所有路由都在这里，含安全闸）
   venv_setup.py     start.cmd 引导门：完整性探针、事务安装、暂停/取消与恢复
   cli.py            命令行入口
@@ -75,9 +75,12 @@ scripts/ui_check/   前端自检（自写 DOM stub 跑真 app.js）、截图、�
 * **完整 API key 永不出现在任何响应里**（只给掩码）。
 * **"只看一眼"的接口不落盘**（预览、`GET /api/reset`、`prompt_view`）。
 * **README 注入有硬上限**（ADR-056）：由 harness 截断，不靠提示词自觉。
-* **原生 vault 的生成物只读**（ADR-104）：有 `sections.yaml` 时，README / index /
-  earlier_months / 清单 / archived_month 由 harness 维护；模型只写 sections/entities。
+* **原生 vault 的生成物只读**（ADR-104/111）：有 `sections.yaml` 时，README / index /
+  earlier_months / 清单 / archived_month 由 harness 维护；整理器只写 sections/entities，
+  会话工具可写其它非保护 Markdown 与自定义目录，但不能写独立记忆、生成物或 raw。
   模式开关是**已有文件** `sections.yaml`，不是新设置项；旧 vault 不自动迁移。
+* **会话递归删目录必须先验证整棵树**：符号链接、Windows junction/reparse point、
+  非 Markdown 与受保护文件一律在删除前拒绝；不能借父目录或大小写别名绕过禁区。
 * **原生 zip 导入只写空 vault**（ADR-104）：逐条校验路径/符号链接/大小/图片内容，
   全过才从暂存搬入；非空要 `--yes`。
 * **SSRF 判据要自己归一化、fail-closed**（ADR-052）：不认的输入一律拒。

@@ -23,7 +23,7 @@
 
 * 记忆三件套用一个 `:memory:` 的 `MemoryStore` 当替身 —— 工具的 `__init__`
   只把 store 存起来，真正碰存储的是 `run()`，而这一页从不 `run`；
-* 档案三件套用只读的 `VaultStore`（读操作不创建目录）；
+* 档案读/写七件套用同一个 `VaultStore` 构造定义（构造与读操作不创建目录）；
 * 联网配置走只读的 `ToolStore`（构造时不写文件，实测过）。
 
 `tests/test_prompt_view.py` 里有一条断言守着"在全新数据目录上跑一遍，
@@ -32,7 +32,8 @@
 ## "当前状态"必须标出来
 
 一部分提示词与工具是**有条件**的：联网关着就没有 `web_*` 工具；
-档案还空着就没有档案三件套；`OPEN_ONLY_PROMPT` 与 `WEB_TOOLS_PROMPT` 二选一。
+`OPEN_ONLY_PROMPT` 与 `WEB_TOOLS_PROMPT` 二选一。档案七个工具始终注册，
+因为空 vault 也需要能创建第一份档案；只有 README 的注入随内容状态变化。
 只列定义会让人以为模型一直看得到它们，所以每一项都带：
 
 * `state`：`"on"` / `"off"` / `"session"`。
@@ -64,6 +65,7 @@ from .net.config import TOOLS_FILE, ToolStore, WebToolsConfig
 from .tools.dream_tools import build_dream_tools
 from .tools.memory_tools import MemCreateTool, MemDeleteTool, MemEditTool
 from .tools.time_tool import TimeTool
+from .tools.vault_edit_tools import build_session_vault_edit_tools
 from .tools.vault_tools import VaultListTool, VaultReadTool, VaultSearchTool
 from .tools.web_tools import WebOpenUrlTool, WebSearchTool
 from .vault import VaultStore
@@ -245,14 +247,16 @@ def _chat_specs(cond: _Conditions, settings: Settings) -> list[dict[str, Any]]:
     # 时间工具：无条件在线，只读、不花钱。
     rows.append(_spec(TimeTool(), state="on"))
 
-    vault_state = "on" if cond.vault_available else "off"
-    vault_condition = "" if cond.vault_available else "ui.prompts.cond.vault_empty"
+    # 档案工具始终在线：空 vault 也需要能创建第一份档案，再立刻读回确认。
+    # 构造工具不读盘、不落盘；只有真正 run() 写工具才会改变数据。
     for tool in (
         VaultListTool(cond.vault, max_result_chars=cap),
         VaultReadTool(cond.vault, max_result_chars=cap),
         VaultSearchTool(cond.vault, max_result_chars=cap),
     ):
-        rows.append(_spec(tool, state=vault_state, condition_key=vault_condition))
+        rows.append(_spec(tool, state="on"))
+    for tool in build_session_vault_edit_tools(cond.vault):
+        rows.append(_spec(tool, state="on"))
 
     rows.append(
         _spec(

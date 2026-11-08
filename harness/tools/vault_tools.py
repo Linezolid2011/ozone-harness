@@ -6,8 +6,8 @@ Kimi 的原话是"如果它不在注入块里、而且我这个会话里没有�
 
 三条设计约束：
 
-1. **只读**。模型改变世界的唯一手段仍然是记忆三件套（ADR-002 的那条边界没有动）。
-   vault 由 dream agent 写，对话 agent 只能看 —— 这样"用户明说的"与"后台推断的"
+1. **本模块只读**。ADR-111 的会话写工具在 `vault_edit_tools.py`，与这里分开；
+   独立记忆仍只由 mem_* 写。这样"用户明说的记忆"与"后台推断/会话维护的档案"
    在**权限层面**也是分开的，不只是提示词里的一句话。
 2. **路径校验在 `VaultStore` 里**，不在这里。工具层只负责把异常翻译成
    模型看得懂的一句话，所以将来多一个写入口也不会绕过那套校验。
@@ -83,12 +83,11 @@ class VaultListTool:
 
     def run(self, args: dict[str, Any]) -> ToolResult:
         prefix = str(args.get("prefix") or "")
-        # 只列 canonical 档案（sections/ 含归档月份 + entities/）。
-        # README / observations / index / log 不是"档案"，而且 README 本来就在上下文里。
+        # README 本来就在上下文里，不重复列；observations、自定义 Markdown、
+        # sections（含归档月份）与 entities 都是会话可发现的档案。index/log/memory
+        # 根本不进 VaultStore 的档案枚举。
         entries = [
-            entry
-            for entry in self._store.list_files(prefix)
-            if entry.path.startswith(("sections/", "entities/"))
+            entry for entry in self._store.list_files(prefix) if entry.path != README_NAME
         ]
         payload: dict[str, Any] = {"count": len(entries), "files": []}
         for entry in entries:

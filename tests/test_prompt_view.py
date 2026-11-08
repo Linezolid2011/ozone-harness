@@ -3,7 +3,7 @@
 这一页的价值全在**照实**两个字上：它说"我们跟模型说了这些、模型手里有这些工具"，
 那就必须与真正发出去的那一份一致。所以这里的测试分三类：
 
-1. **一个不少**（22 条提示词 / 16 个工具）—— 分组表与 prompts 模块严格互补，
+1. **一个不少**（22 条提示词 / 20 个工具）—— 分组表与 prompts 模块严格互补，
    少一条就抛异常（这条比"断言列表相等"更强：它防的是**以后**新增提示词时漏展示）；
 2. **不许说谎** —— 对话侧工具的 `description` / `parameters` 必须与 `Runtime`
    真正注册的那一份逐字相同；
@@ -44,6 +44,10 @@ CHAT_TOOL_NAMES = {
     "dream_list",
     "dream_read",
     "dream_search",
+    "dream_create",
+    "dream_edit",
+    "dream_mkdir",
+    "dream_delete",
     "web_search",
     "web_open_url",
 }
@@ -106,7 +110,7 @@ class PromptCompletenessTests(unittest.TestCase):
         self.assertEqual(set(by_group["chat"]), CHAT_TOOL_NAMES)
         self.assertEqual(set(by_group["dream"]), DREAM_TOOL_NAMES)
         self.assertEqual(
-            len(by_group["chat"]) + len(by_group["dream"]), 16, "工具总数变了"
+            len(by_group["chat"]) + len(by_group["dream"]), 20, "工具总数变了"
         )
         for group in data["tools"]:
             for item in group["items"]:
@@ -374,8 +378,8 @@ class PromptReadOnlyTests(unittest.TestCase):
         """记忆库不存在时也要能用（这正是"零落盘"要的效果）。"""
         _tmp, settings = self._fresh_settings()
         data = describe_prompts(settings)
-        self.assertEqual(data["summary"]["tools"], 16)
-        # 档案为空 → 那三个工具标成未注册
+        self.assertEqual(data["summary"]["tools"], 20)
+        # 档案为空也要能创建第一份并读回：七个 dream_* 工具全部在线。
         vault_tools = [
             item
             for group in data["tools"]
@@ -383,9 +387,8 @@ class PromptReadOnlyTests(unittest.TestCase):
             for item in group["items"]
             if item["name"].startswith("dream_")
         ]
-        self.assertEqual(len(vault_tools), 3)
-        self.assertTrue(all(item["state"] == "off" for item in vault_tools))
-        self.assertTrue(all(item["condition"] for item in vault_tools))
+        self.assertEqual(len(vault_tools), 7)
+        self.assertTrue(all(item["state"] == "on" for item in vault_tools))
 
     def test_broken_config_files_do_not_break_the_page(self) -> None:
         """`tools.json` 坏掉、`vault/sections` 被换成一个文件 —— 这一页都不许 500。
@@ -396,7 +399,7 @@ class PromptReadOnlyTests(unittest.TestCase):
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         (settings.data_dir / "tools.json").write_text("{ 这不是 JSON", encoding="utf-8")
         data = describe_prompts(settings)
-        self.assertEqual(data["summary"]["tools"], 16)
+        self.assertEqual(data["summary"]["tools"], 20)
 
         settings.vault_dir.mkdir(parents=True, exist_ok=True)
         (settings.vault_dir / "sections").write_text("我是文件不是目录", encoding="utf-8")

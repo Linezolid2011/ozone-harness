@@ -32,6 +32,7 @@ from .session_ids import session_log_path, validate_session_id
 from .tools.memory_tools import MemCreateTool, MemDeleteTool, MemEditTool
 from .tools.registry import ToolRegistry
 from .tools.time_tool import TimeTool
+from .tools.vault_edit_tools import build_session_vault_edit_tools
 from .tools.vault_tools import VaultListTool, VaultReadTool, VaultSearchTool
 from .tools.web_tools import WebOpenUrlTool, WebSearchTool
 from .vault import VaultStore
@@ -251,8 +252,8 @@ class Runtime:
         try:
             self.tool_store = ToolStore(settings.data_dir / TOOLS_FILE)
             self.web_config = self.tool_store.web()
-            # 背景档案（dream memory）：**只读**地接进来。
-            # 读操作不会创建目录，所以"全新机器上看一眼"不会在 data/ 里留下空壳。
+            # 背景档案（dream memory）：读工具与受约束的会话编辑工具共用同一个 store。
+            # 构造与读取不会创建目录，所以"全新机器上看一眼"不会在 data/ 里留下空壳。
             self.vault = VaultStore(
                 settings.vault_dir,
                 read_max_chars=settings.vault_read_max_chars,
@@ -261,16 +262,11 @@ class Runtime:
                 name_max_chars=settings.vault_name_max_chars,
                 readme_token_budget=settings.vault_readme_token_budget,
             )
-            # 一处判断，两处使用：**注册工具**与**提示词里说不说有这回事**
-            # 必须完全一致（见 context.vault_prompt_text）。
-            # 空 vault 就什么都不注册：全新机器上不该凭空多出三个用不到的工具定义。
-            self.vault_available = self.vault.has_content()
-            readme, _ = self.vault.readme_text() if self.vault_available else ("", False)
-            self.vault_text = (
-                vault_prompt_text(readme, available=True)
-                if self.vault_available
-                else ""
-            )
+            # README 是否注入仍取决于有没有真档案；但工具始终注册，模型才能在
+            # 空 vault 里创建第一份档案。只有写操作会落盘，注册本身零副作用。
+            self.vault_available = False
+            self.vault_text = ""
+            self._refresh_vault_text()
             self.registry = ToolRegistry(max_result_chars=settings.max_tool_result_chars)
             for tool in (
                 MemCreateTool(self.memory),
@@ -281,19 +277,19 @@ class Runtime:
                 TimeTool(offset_hours=timezone_for(settings.data_dir)),
             ):
                 self.registry.register(tool)
-            if self.vault_available:
-                for tool in (
-                    VaultListTool(
-                        self.vault, max_result_chars=settings.max_tool_result_chars
-                    ),
-                    VaultReadTool(
-                        self.vault, max_result_chars=settings.max_tool_result_chars
-                    ),
-                    VaultSearchTool(
-                        self.vault, max_result_chars=settings.max_tool_result_chars
-                    ),
-                ):
-                    self.registry.register(tool)
+            for tool in (
+                VaultListTool(
+                    self.vault, max_result_chars=settings.max_tool_result_chars
+                ),
+                VaultReadTool(
+                    self.vault, max_result_chars=settings.max_tool_result_chars
+                ),
+                VaultSearchTool(
+                    self.vault, max_result_chars=settings.max_tool_result_chars
+                ),
+                *build_session_vault_edit_tools(self.vault),
+            ):
+                self.registry.register(tool)
             # 联网工具只给**对话** agent。dream 是离线巩固，让它上网既没必要也更危险
             # （它会拿着网页内容去改写记忆库）。
             #
@@ -326,6 +322,15 @@ class Runtime:
             self.memory.close()
             raise
 
+    def _refresh_vault_text(self) -> str:
+        """每轮开始重读 README：CLI 的 Runtime 长驻，会话编辑后下一轮必须看到新值。"""
+        self.vault_available = self.vault.has_content()
+        readme, _ = self.vault.readme_text() if self.vault_available else ("", False)
+        self.vault_text = (
+            vault_prompt_text(readme, available=True) if self.vault_available else ""
+        )
+        return self.vault_text
+
     def open_session(self, session_id: str | None = None) -> None:
         candidate_id = new_session_id() if session_id is None else session_id
         # 必须先于关闭旧日志和 EventLog 构造完成校验；坏 id 不能拼路径或碰磁盘。
@@ -357,6 +362,7 @@ class Runtime:
                 else ""
             ),
             vault_text=self.vault_text,
+            vault_text_provider=self._refresh_vault_text,
         )
 
     def close(self) -> None:

@@ -148,6 +148,54 @@ MESSAGES: dict[str, str] = {
         "or use dream_list to see which archives there are."
     ),
     "tool.dream_search.display": "archive search \"{query}\": {count} hits",
+    # ── Session-writable background archives (vault_edit_tools, ADR-111) ──
+    "tool.dream_edit.path_hint": (
+        "A relative vault path: a .md file under sections/, entities/ or a custom directory, "
+        "or a custom root-level .md / observations.md (use ./name.md for an explicit root path); README.md is also editable in a legacy vault. "
+        "index.md, sections.yaml, log.md, memory_instruction.md, native README, "
+        "earlier_months, archived_month and raw/ are not writable."
+    ),
+    "tool.dream_create.desc": (
+        "Create a background archive. Use when the user explicitly asks to organise or save "
+        "something in the archives, or when you judge stable information worth keeping "
+        "long-term. path must be new; use dream_edit for an existing archive. Markdown anywhere "
+        "in the vault is writable except protected locations, including custom root/subdirectories. After success "
+        "the program rebuilds index, and for a native vault also sections.yaml, README and "
+        "earlier_months; never edit those generated files, log.md or memory_instruction.md."
+    ),
+    "tool.dream_create.display": "Created background archive {path} ({chars} characters)",
+    "tool.dream_edit.desc": (
+        "Edit an existing background archive: body is the complete replacement body and "
+        "metadata fields you omit are preserved. A missing path fails rather than silently "
+        "creating a file. Use when the user asks to change or clean an archive, or when you "
+        "judge one stale and worth correcting. Vault-local Markdown outside protected locations and "
+        "a legacy vault README are editable; native README and other generated files rebuild "
+        "from content, and log.md and memory_instruction.md are never writable."
+    ),
+    "tool.dream_edit.display": "Updated background archive {path} ({chars} characters)",
+    "tool.dream_mkdir.desc": (
+        "Create a vault-local directory (multiple levels at once, including custom top-level "
+        "directories) to organise background archives. Directory names cannot end in .md; "
+        "raw/ and sections/archived_month cannot be created."
+    ),
+    "tool.dream_mkdir.display.created": "Created archive directory {path}",
+    "tool.dream_mkdir.display.existing": "Archive directory already exists {path}",
+    "tool.dream_delete.desc": (
+        "Delete an editable background archive or an editable vault-local directory, including custom directories. "
+        "A directory can be deleted only when empty by default; to delete its archives too, "
+        "explicitly set recursive=true. Recursive deletion validates the whole tree first and "
+        "refuses everything if it finds a protected file, non-Markdown file or symbolic link. "
+        "README cannot be deleted; nor can index.md, sections.yaml, log.md, "
+        "memory_instruction.md, built-in sections, monthly archives, raw/, or the top-level "
+        "sections/entities directories."
+    ),
+    "tool.dream_delete.param.reason": "Optional reason for deletion, retained in this turn's tool trace.",
+    "tool.dream_delete.param.recursive": "Whether to delete directory contents recursively; default false, meaningful only for directories.",
+    "tool.dream_delete.bad_recursive": "recursive must be the boolean true or false",
+    "tool.dream_delete.bad_recursive.display": "invalid recursive",
+    "tool.dream_delete.rejected.display": "deletion rejected",
+    "tool.dream_delete.display.file": "Deleted background archive {path}",
+    "tool.dream_delete.display.directory": "Deleted archive directory {path} ({count} files)",
     # ── Web tools (web_tools) ─────────────────────────────────────
     "tool.web_search.desc": (
         "Look things up with a keyword search engine; returns the title, link and snippet of "

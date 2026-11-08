@@ -4,7 +4,20 @@
 > 界面侧栏与 `run.cmd --version` 都从那里取）。发布前先改它，再在这里补一节 ——
 > `tests/test_release.py` 会检查这一节里有没有出现那个版本号。
 
-## 未发布
+## 1.1.1-rc1（2026-11-08）
+
+会话 agent 可维护背景档案（ADR-111），逐条记忆对齐 Kimi 原生格式（ADR-109），
+全部 Web 入口默认过 venv 引导门（ADR-110）。离线回归基线 1151 条（venv，2 条本机环境跳过）。
+
+### 新增
+
+* **会话 agent 可直接维护背景档案（ADR-111）**：新增 `dream_create`、`dream_edit`、
+  `dream_mkdir`、`dream_delete`，加上原有三个读工具在空 vault 也注册。可写 vault 内非保护位置的
+  Markdown（含根级、自定义与嵌套目录）；旧 README 可改不可删。index 与原生 README/清单等生成物
+  在每次成功改动后自动重建，自定义 section 删除会同步移出清单；长驻 CLI 下一轮立即重读 README。
+* **写权限在 store 层强制**：index、sections.yaml、log、memory_instruction、原生生成物、
+  固定 section、月份归档与 raw 均受保护。目录默认只能空删，递归删除须显式开启并先验证整棵树；
+  符号链接、Windows junction/reparse point、大小写别名与内部链接均不能绕过禁区。
 
 ### 破坏性变化
 

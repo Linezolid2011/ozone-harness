@@ -18,9 +18,10 @@ vault 里的东西全是从会话记录（append-only JSONL）压缩出来的**�
 
 ## 写入口只有一个，而且校验在 store 层
 
-本模块给对话 agent 的只有"读"（`tools/vault_tools.py`）。
-写 vault 的只有 dream agent，但它也必须走 `VaultStore.write_file()` ——
-**路径校验在 store 层实现，不在工具层**，所以将来任何新增的写入口都不可能绕过它。
+对话 agent 的读取在 `tools/vault_tools.py`，ADR-111 的受约束编辑在
+`tools/vault_edit_tools.py`；dream agent 走 `tools/dream_tools.py`。三者最终都必须走
+`VaultStore` 的写入口 —— **路径与权限校验在 store 层实现，不在工具层**，
+所以新增调用方不可能只靠工具描述绕过它。
 
 ## 一条贯穿全模块的规则：路径必须自己归一化，并且 fail-closed
 
@@ -42,6 +43,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import sys
 import time
 import unicodedata
@@ -87,6 +89,41 @@ GENERATED_RELS: frozenset[str] = frozenset(
     }
 )
 
+# 会话编辑工具的固定禁区（ADR-111）。与 dream 整理器分开：会话可以维护
+# observations 与旧 vault 的 README，但永远不能直接改清单、索引、整理日志或独立记忆。
+# raw/ 与月份归档由 _assert_editable / _assert_session_directory 排除。
+SESSION_READONLY_RELS: frozenset[str] = frozenset(
+    {INDEX_NAME, LOG_NAME, MEMORY_INSTRUCTION_NAME, SECTIONS_CONFIG}
+)
+
+
+def _path_key(path: str) -> str:
+    """路径保护的比较键：大小写不敏感文件系统上必须按实际等价关系比较。"""
+    return path.casefold() if _CASE_INSENSITIVE_FS else path
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    """是否是不能安全当作普通文件/目录遍历的节点。
+
+    Windows junction 的 `os.path.islink()` 是 False，但递归遍历会真的走进目标目录。
+    因此同时识别 pathlib junction 与 Win32 reparse point；无法 lstat 时 fail-closed。
+    """
+    if os.path.islink(path):
+        return True
+    if os.name != "nt":
+        return False
+    try:
+        is_junction = getattr(path, "is_junction", None)
+        if is_junction is not None and is_junction():
+            return True
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse and getattr(info, "st_file_attributes", 0) & reparse)
+
 # 原生 section 的固定清单（顺序 = README 注入顺序，ADR-104）。
 # 标题保持原生英文：这些是**内容里的结构标题**，不是界面文案；中英界面下都一样，
 # 免得同一份档案在切语言时被改名。
@@ -116,8 +153,8 @@ PLACEHOLDER_STATUS = "placeholder"
 # Linux 上 `Foo.md` 与 `foo.md` 可以合法并存，所以那边的撞名检查要关掉，否则是误伤。
 _CASE_INSENSITIVE_FS = os.name == "nt" or sys.platform == "darwin"
 
-# 只允许这两层，而且**只允许这两个名字**（小写）。
-# 扁平结构和"深度恰好为 2"一起，顺手灭掉了嵌套目录带来的大半路径问题。
+# 原生/整理器的两个 canonical 顶层目录（小写）。会话另可用自定义目录，
+# 但这两个名字仍有固定 section、归档与禁止整体删除等特殊规则。
 _TOP_DIRS = (SECTION_DIR, ENTITY_DIR)
 
 # Windows 保留设备名。**判断的是第一个点之前的那一段**：
@@ -161,16 +198,21 @@ class VaultExistsError(VaultPathError):
 # --------------------------------------------------------------------------
 
 
-def normalize_rel_path(raw: str, *, name_max_chars: int = 40) -> str:
+def normalize_rel_path(
+    raw: str, *, name_max_chars: int = 40, allow_nested: bool = False
+) -> str:
     """把模型给的一个路径字符串，规范化成 vault 内的相对路径；不合法就抛异常。
 
-    接受且只接受这些形式（ADR-104）：
+    默认仍只接受原生/旧 vault 的规范形式（ADR-104）。会话编辑工具传入
+    `allow_nested=True` 时，额外接受根级与自定义目录下的非保护 Markdown，以及
+    sections/entities 的嵌套 Markdown；这是**会话工具的显式能力扩展**，
+    不会改变整理器与导入器的既有路径合同。
 
         README.md / index.md / log.md / observations.md / memory_instruction.md
         sections.yaml
-        sections/<名字>.md
+        sections/<名字>.md（会话模式允许中间目录）
         sections/archived_month/<YYYY-MM>/this_month.md
-        entities/<名字>.md
+        entities/<名字>.md（会话模式允许中间目录）
 
     图片素材走 `normalize_raw_path()`（`raw/source_<ref>/...`），不在这里。
     这个函数**不碰文件系统**，所以它的每一条规则都能被离线测试逐条钉住。
@@ -187,6 +229,10 @@ def normalize_rel_path(raw: str, *, name_max_chars: int = 40) -> str:
     # 这一步是"友好"而不是"放水"：`\` 与 `/` 在这里都只是分隔符，
     # 归一化之后仍然要过下面每一条规则。
     text = text.replace("\\", "/")
+    # `./name.md` 是显式根级写法；归一化时去掉前缀，权限永远只看 canonical，
+    # 因此 `./memory_instruction.md` 不会变成绕过所有权的另一条路径。
+    while text.startswith("./"):
+        text = text[2:]
 
     if text.startswith("/"):
         raise VaultPathError(t("ui.vault.path_absolute", raw=repr(raw)))
@@ -208,6 +254,11 @@ def normalize_rel_path(raw: str, *, name_max_chars: int = 40) -> str:
         for known in (*ROOT_MD_FILES, SECTIONS_CONFIG):
             if lowered == known.lower():
                 return known
+        if allow_nested:
+            # 会话模式允许根级自定义 Markdown；固定的原生/记忆文件上面已归一化，
+            # 权限清单会在 store 层再次拦截，而不是靠这里放行即拥有写权限。
+            _check_name(parts[0], name_max_chars=name_max_chars, raw=raw)
+            return parts[0]
         raise VaultPathError(
             t(
                 "ui.vault.path_unknown_location",
@@ -226,6 +277,38 @@ def normalize_rel_path(raw: str, *, name_max_chars: int = 40) -> str:
                 dir=repr(directory),
             )
         )
+
+    if allow_nested and directory not in _TOP_DIRS:
+        # 第一段也必须检查：`./memory_instruction.md` 这类别名若在归一化时
+        # 留下 `./`，后续按 canonical 字符串做的保护清单就会被绕过。
+        _check_dir_name(directory, name_max_chars=name_max_chars, raw=raw)
+        for segment in parts[1:-1]:
+            _check_dir_name(segment, name_max_chars=name_max_chars, raw=raw)
+        _check_name(parts[-1], name_max_chars=name_max_chars, raw=raw)
+        return "/".join(parts)
+
+    if allow_nested and directory in _TOP_DIRS:
+        # 先保留原生月份归档的精确校验；其它嵌套路径逐段检查，不能只查文件名。
+        # 否则 `entities/NUL/x.md` 会在 Windows 上穿过一个设备名目录。
+        if directory == SECTION_DIR and len(parts) > 2 and parts[1] == ARCHIVE_DIR:
+            if (
+                len(parts) == 4
+                and _ARCHIVE_MONTH_RE.match(parts[2])
+                and parts[3] == ARCHIVE_FILE
+            ):
+                return f"{SECTION_DIR}/{ARCHIVE_DIR}/{parts[2]}/{ARCHIVE_FILE}"
+            raise VaultPathError(
+                t(
+                    "ui.vault.path_bad_archive",
+                    raw=repr(raw),
+                    archive_dir=ARCHIVE_DIR,
+                    file=ARCHIVE_FILE,
+                )
+            )
+        for segment in parts[1:-1]:
+            _check_dir_name(segment, name_max_chars=name_max_chars, raw=raw)
+        _check_name(parts[-1], name_max_chars=name_max_chars, raw=raw)
+        return "/".join(parts)
 
     if directory == SECTION_DIR:
         if len(parts) == 2:
@@ -363,6 +446,70 @@ def _check_name(name: str, *, name_max_chars: int, raw: str) -> None:
         )
 
 
+def _check_dir_name(name: str, *, name_max_chars: int, raw: str) -> None:
+    """会话可建目录的单段名称。与文件名共用 Windows 的 fail-closed 规则。"""
+    if name in (".", ".."):
+        raise VaultPathError(t("ui.vault.name_dot", name=repr(name)))
+    if name != name.strip():
+        raise VaultPathError(t("ui.vault.name_whitespace", name=repr(name)))
+    if any(ch in _ILLEGAL_CHARS or ord(ch) < 32 for ch in name):
+        raise VaultPathError(t("ui.vault.name_illegal_chars", name=repr(name)))
+    if name.endswith("."):
+        raise VaultPathError(t("ui.vault.name_dot_suffix", name=repr(name)))
+    if name.lower().endswith(".md"):
+        # 目录也叫 `x.md` 会让删除入口分不清"文件还是目录"，没有实际收益。
+        raise VaultPathError(t("ui.vault.dir_markdown_suffix", path=repr(raw)))
+    if name.split(".")[0].rstrip(" .").lower() in _RESERVED_NAMES:
+        raise VaultPathError(
+            t("ui.vault.name_reserved", stem=repr(name.split(".")[0]))
+        )
+    if len(name) > name_max_chars:
+        raise VaultPathError(
+            t(
+                "ui.vault.name_too_long",
+                length=len(name),
+                limit=name_max_chars,
+                name=repr(name),
+            )
+        )
+
+
+def normalize_session_dir_path(raw: str, *, name_max_chars: int = 40) -> str:
+    """会话工具可操作的 vault 内目录，包括自定义顶层目录与嵌套目录。
+
+    这是独立于 Markdown 文件白名单的入口：目录没有扩展名，且允许一个末尾 `/`。
+    raw/、月份归档与顶层 sections/entities 的删除保护由 store 层执行。
+    """
+    if not isinstance(raw, str):
+        raise VaultPathError(t("ui.vault.path_not_string", type=type(raw).__name__))
+    text = raw.strip().lstrip("\ufeff")
+    if not text:
+        raise VaultPathError(t("ui.vault.path_empty"))
+    if "\x00" in text:
+        raise VaultPathError(t("ui.vault.path_nul"))
+    text = text.replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    if text.endswith("/"):
+        text = text[:-1]
+    if text.startswith("/") or re.match(r"^[A-Za-z]:", text) or text.startswith("~"):
+        raise VaultPathError(t("ui.vault.path_absolute", raw=repr(raw)))
+    parts = text.split("/")
+    if any(part == "" for part in parts):
+        raise VaultPathError(t("ui.vault.path_empty_segment", raw=repr(raw)))
+    if parts[0] != parts[0].lower():
+        raise VaultPathError(
+            t("ui.vault.path_bad_top", top_dirs=" / ".join(_TOP_DIRS), dir=repr(parts[0]))
+        )
+    if len(parts) > 8:
+        # 目录深度也要有界：这是模型可调用的写工具，不是通用文件系统。
+        raise VaultPathError(t("ui.vault.dir_too_deep", path=repr(raw)))
+    segments = parts if parts[0] not in _TOP_DIRS else parts[1:]
+    for segment in segments:
+        _check_dir_name(segment, name_max_chars=name_max_chars, raw=raw)
+    return "/".join(parts)
+
+
 def normalize_name(raw: str, *, name_max_chars: int = 40) -> str:
     """把实体名规范化（NFC），用于**比较**（反链、撞名检查）。
 
@@ -478,7 +625,7 @@ def parse_sections_manifest(text: str) -> tuple[SectionsManifest, list[str]]:
             warnings.append(t("ui.vault.manifest_bad", line="(missing path)"))
             continue
         try:
-            canonical = normalize_rel_path(raw_path)
+            canonical = normalize_rel_path(raw_path, allow_nested=True)
         except VaultPathError as exc:
             warnings.append(t("ui.vault.manifest_bad", line=f"{raw_path}: {exc}"[:90]))
             continue
@@ -1122,9 +1269,11 @@ class VaultStore:
         归一化已经挡住了 `..` 与绝对路径；这一次是防**符号链接**：
         `vault/entities/x.md` 本身合法，但如果 `entities` 是指向别处的链接，
         归一化看不出来，只有 resolve 之后比较真实前缀才发现得了。
-        兜底永远 fail-closed —— 宁可报错，也不要写出去。
+        兜底永远 fail-closed —— 宁可报错，也不要写出去。会话创建的嵌套档案也可读。
         """
-        canonical = normalize_rel_path(rel, name_max_chars=self.name_max_chars)
+        canonical = normalize_rel_path(
+            rel, name_max_chars=self.name_max_chars, allow_nested=True
+        )
         return self._resolve_canonical(canonical)
 
     def _resolve_canonical(self, canonical: str) -> Path:
@@ -1140,19 +1289,52 @@ class VaultStore:
             )
         return real_target
 
-    def resolve_friendly(self, raw: str) -> str:
+    def _resolve_session_path(self, canonical: str) -> Path:
+        """会话写/删路径：拒绝任一层的链接、junction 或 reparse point。
+
+        仅检查"最后有没有逃出 root"不够：vault 内的链接也可能把合法别名指向
+        memory_instruction / 固定 section。模型不能创建链接，但用户手工放入的链接
+        也不能成为权限绕过入口。
+        """
+        current = self.root
+        for part in canonical.split("/"):
+            current = current / part
+            if _is_link_or_reparse(current):
+                raise VaultPathError(t("ui.vault.dir_contains_link", path=canonical))
+        return self._resolve_canonical(canonical)
+
+    def resolve_friendly(self, raw: str, *, allow_nested: bool = False) -> str:
         """宽松一点地理解模型给的路径，但**最终仍然只产出规范形式**。
 
         模型很自然会写 `dream_read("小林")`。这里按固定顺序补目录：
         先根级文件、再 entities、再 sections，最后按原样（README 等）。
         顺序固定 = 结果可预测；每次都返回规范路径，所以模型能学到正确写法。
+        `allow_nested` 只由会话编辑与档案读取打开，整理器的写合同保持不变。
         """
+        cleaned = str(raw).strip().lstrip("\ufeff").replace("\\", "/")
+        explicit_root = cleaned.startswith("./")
+        root_request = ""
         try:
-            return normalize_rel_path(raw, name_max_chars=self.name_max_chars)
+            canonical = normalize_rel_path(
+                raw, name_max_chars=self.name_max_chars, allow_nested=allow_nested
+            )
+            if (
+                allow_nested
+                and "/" not in canonical
+                and canonical.endswith(".md")
+                and canonical not in ROOT_MD_FILES
+            ):
+                if explicit_root:
+                    # `./same.md` 是根级档案的显式地址，与 entities/same.md 不歧义。
+                    return canonical
+                # 普通 `foo.md` 先保持 entities/sections 的既有友好解析；
+                # 只有都没有时才把它当成一个自定义根级路径。
+                root_request = canonical
+            else:
+                return canonical
         except VaultPathError:
             pass
 
-        cleaned = str(raw).strip().lstrip("\ufeff").replace("\\", "/")
         lowered = cleaned.lower()
         for known in (*ROOT_MD_FILES, SECTIONS_CONFIG):
             if lowered in (known.lower(), Path(known).stem.lower()):
@@ -1163,32 +1345,59 @@ class VaultStore:
         if "/" in cleaned and not cleaned.lower().endswith(".md"):
             try:
                 return normalize_rel_path(
-                    f"{cleaned}.md", name_max_chars=self.name_max_chars
+                    f"{cleaned}.md",
+                    name_max_chars=self.name_max_chars,
+                    allow_nested=allow_nested,
                 )
             except VaultPathError:
                 pass
         if "/" in cleaned:
-            return normalize_rel_path(raw, name_max_chars=self.name_max_chars)
+            return normalize_rel_path(
+                raw, name_max_chars=self.name_max_chars, allow_nested=allow_nested
+            )
 
         base = cleaned if cleaned.lower().endswith(".md") else f"{cleaned}.md"
         # 扩展名统一成小写：`Foo.MD` 在 Windows 上就是 `Foo.md`，
         # 不归一化的话会拼出 `entities/Foo.MD.md` 这个根本不存在的路径
         # （然后模型得到"没有这个档案"，而它要找的文件其实就在那儿）。
         base = base[:-3] + ".md"
+        root_candidate = ""
+        root_resolved: Path | None = None
+        if allow_nested:
+            root_candidate = normalize_rel_path(
+                base, name_max_chars=self.name_max_chars, allow_nested=True
+            )
+            root_resolved = self._resolve_canonical(root_candidate)
         for candidate in (f"{ENTITY_DIR}/{base}", f"{SECTION_DIR}/{base}"):
             try:
                 canonical = normalize_rel_path(
-                    candidate, name_max_chars=self.name_max_chars
+                    candidate,
+                    name_max_chars=self.name_max_chars,
+                    allow_nested=allow_nested,
                 )
             except VaultPathError:
                 continue
             resolved = self._resolve_canonical(canonical)
             if resolved.is_file():
+                if root_resolved is not None and root_resolved.is_file():
+                    # 手工放入的同名根级/canonical 档案不能让裸名字删除"猜一个"。
+                    raise VaultPathError(
+                        t(
+                            "ui.vault.ambiguous_name",
+                            name=base,
+                            paths=f"{root_candidate}, {canonical}",
+                        )
+                    )
                 # 返回**磁盘上的名字**而不是模型写的那个：大小写不敏感的系统上
                 # 它们指向同一个文件，但报给模型的名字应当是真实存在的那个
                 # （否则模型会把 `entities/FOO.md` 当成规范写法记下来）。
                 directory = canonical.rpartition("/")[0]
                 return f"{directory}/{resolved.name}"
+        if root_resolved is not None and root_resolved.is_file():
+            return root_resolved.name
+        if root_request:
+            # 明确的 `new-name.md` 且没有任何 canonical 同名档案时，才新建根级档案。
+            return root_request
         # 都不存在：返回 entities 下的规范形式，让上层的"没有这个文件"更具体
         return normalize_rel_path(
             f"{ENTITY_DIR}/{base}", name_max_chars=self.name_max_chars
@@ -1204,7 +1413,7 @@ class VaultStore:
     def has_content(self) -> bool:
         """有没有**可读的档案**？**只读判断，不创建任何东西**。
 
-        判据是"sections/ 或 entities/ 里至少有一个**真实**档案"，而**不是**
+        判据是"vault 里至少有一个**真实**档案（含自定义根级/目录）"，而**不是**
         "README 在不在"或"生成物在不在"。`sections/earlier_months.md` 是投影，
         空 vault 跑一次 `--vault-rebuild` 会把它写出来；把它算成"有档案"会让
         `runtime` 给模型注入一段只有 "No Earlier Months yet" 的 README。
@@ -1285,17 +1494,30 @@ class VaultStore:
         self.write_manifest(default_manifest())
         return True
 
-    def _assert_editable(self, canonical: str) -> None:
-        """Dream 的生成物只读；memory_instruction 在两种模式下都归独立记忆页管。"""
-        if canonical == MEMORY_INSTRUCTION_NAME:
+    def _assert_editable(self, canonical: str, *, session: bool = False) -> None:
+        """写权限在 store 层收口；会话与 dream 的允许范围**刻意不同**。
+
+        会话可以维护 observations，也可以重写旧 vault 的 README，但不能碰
+        index / sections.yaml / log / memory_instruction。原生 README 与其他
+        生成物、月份归档仍然只读。dream 保持 ADR-104 的既有权限，不随会话扩权。
+        """
+        key = _path_key(canonical)
+        if key == _path_key(MEMORY_INSTRUCTION_NAME):
             raise VaultPathError(t("ui.vault.generated_readonly", path=canonical))
+        if session and key in {_path_key(path) for path in SESSION_READONLY_RELS}:
+            raise VaultPathError(t("ui.vault.session_readonly", path=canonical))
+        if session and (key == _path_key(RAW_DIR) or key.startswith(_path_key(RAW_DIR + "/"))):
+            raise VaultPathError(t("ui.vault.session_readonly", path=canonical))
         if not self.is_native():
             return
-        if (
-            canonical in GENERATED_RELS
-            or canonical in (SECTIONS_CONFIG, LOG_NAME, OBSERVATIONS_NAME)
-            or canonical.startswith(f"{SECTION_DIR}/{ARCHIVE_DIR}/")
-        ):
+        generated = (
+            key in {_path_key(path) for path in GENERATED_RELS}
+            or key.startswith(_path_key(f"{SECTION_DIR}/{ARCHIVE_DIR}/"))
+        )
+        dream_only = key in {
+            _path_key(path) for path in (SECTIONS_CONFIG, LOG_NAME, OBSERVATIONS_NAME)
+        }
+        if generated or (dream_only and not session):
             raise VaultPathError(t("ui.vault.generated_readonly", path=canonical))
 
 
@@ -1341,7 +1563,7 @@ class VaultStore:
 
     def read(self, rel: str, *, max_chars: int | None = None) -> VaultFile:
         """读一个 md 文件。`max_chars` 只管正文，元信息永远完整给出。"""
-        canonical = self.resolve_friendly(rel)
+        canonical = self.resolve_friendly(rel, allow_nested=True)
         if canonical == SECTIONS_CONFIG:
             raise VaultPathError(t("ui.vault.manifest_not_a_note"))
         path = self._resolve_canonical(canonical)
@@ -1415,7 +1637,7 @@ class VaultStore:
         不像索引那样会和文件内容脱节。代价是 O(文件数)，可接受，而且
         换来的是"用户手改一个文件，邻域立刻正确"。
         """
-        canonical = self.resolve_friendly(rel)
+        canonical = self.resolve_friendly(rel, allow_nested=True)
         index = self._link_index(limit=self.max_files)
         mine = index.get(canonical, {})
         my_links = mine.get("links", [])
@@ -1496,10 +1718,17 @@ class VaultStore:
         return _fit_tokens(body.strip(), budget)
 
     # ------------------------------------------------------------------
-    # 写（只有 dream agent 与 --vault-init 会用到）
+    # 写（dream、会话编辑工具、网页界面与 --vault-init 共用底层入口）
     # ------------------------------------------------------------------
 
-    def write_file(self, rel: str, text: str) -> str:
+    def write_file(
+        self,
+        rel: str,
+        text: str,
+        *,
+        allow_nested: bool = False,
+        generated: bool = False,
+    ) -> str:
         """原子写入。返回规范化的相对路径。
 
         "先写临时文件再 `os.replace`"不是为了并发（本机单用户），而是为了
@@ -1507,14 +1736,18 @@ class VaultStore:
         半个文件。临时文件放在同一个目录里，所以 `os.replace` 是同一卷内的
         原子改名。
         """
-        canonical = normalize_rel_path(rel, name_max_chars=self.name_max_chars)
+        canonical = normalize_rel_path(
+            rel, name_max_chars=self.name_max_chars, allow_nested=allow_nested
+        )
         # memory_instruction 只能由 MemoryStore 写；低层原子写接口也不能绕过所有权。
         # Dream 自己的 README/index 等生成物仍可由 harness 写，不能在这里一刀切。
         if canonical == MEMORY_INSTRUCTION_NAME:
             raise VaultPathError(t("ui.vault.generated_readonly", path=canonical))
         path = self._resolve_canonical(canonical)
         payload = text if text.endswith("\n") else text + "\n"
-        if len(payload) > self.write_max_chars:
+        # write_max_chars 是"模型单份档案"的上限，不该卡住由多份合法档案
+        # 汇总出来的 README/index/清单；生成物总量仍受 max_files × 单档案上限约束。
+        if not generated and len(payload) > self.write_max_chars:
             raise VaultPathError(
                 t(
                     "ui.vault.file_too_long",
@@ -1535,7 +1768,7 @@ class VaultStore:
         if clash:
             raise VaultPathError(t("ui.vault.case_clash", path=canonical, clash=clash))
         creating = not path.is_file()
-        if creating and self.count_files() >= self.max_files:
+        if not generated and creating and self.count_files() >= self.max_files:
             raise VaultPathError(t("ui.vault.too_many_files", limit=self.max_files))
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex[:6]}")
@@ -1559,6 +1792,7 @@ class VaultStore:
         today: str = "",
         mode: str = "auto",
         clear: Sequence[str] = (),
+        session: bool = False,
     ) -> dict[str, Any]:
         """把"正文 + 元信息"写成一份档案。**档案写入的唯一入口。**
 
@@ -1581,10 +1815,26 @@ class VaultStore:
         而模型下一轮还会读到那个旧值。**只有 `True` 的字段会被清空**，
         没列进来的字段一律保持（与模型侧的行为一致：它不提就是不改）。
         """
-        canonical = self.resolve_friendly(rel)
-        self._assert_editable(canonical)
-        path = self._resolve_canonical(canonical)
+        canonical = self.resolve_friendly(rel, allow_nested=session)
+        self._assert_editable(canonical, session=session)
+        path = (
+            self._resolve_session_path(canonical)
+            if session
+            else self._resolve_canonical(canonical)
+        )
         exists = path.is_file()
+        if session and mode == "create" and canonical.startswith(
+            (f"{ENTITY_DIR}/", f"{SECTION_DIR}/")
+        ):
+            root_name = Path(canonical).name
+            if self._resolve_session_path(root_name).is_file():
+                raise VaultPathError(
+                    t(
+                        "ui.vault.ambiguous_name",
+                        name=root_name,
+                        paths=f"{root_name}, {canonical}",
+                    )
+                )
         # 顺序有讲究：**先**查"只差大小写的兄弟"，再查"已经存在"。
         # 因为 `path.is_file()` 在大小写不敏感的系统上对 `Foo.md`/`foo.md` 都为真，
         # 先报"已经有一份"就把"这跟已有的 foo.md 是同一个文件"这条更有用的信息盖掉了。
@@ -1619,7 +1869,9 @@ class VaultStore:
         if canonical == README_NAME and merged.status.strip().lower() == PLACEHOLDER_STATUS:
             raise VaultPathError(t("ui.vault.readme_placeholder"))
         written = self.write_file(
-            canonical, dump_frontmatter(merged) + "\n\n" + body.strip() + "\n"
+            canonical,
+            dump_frontmatter(merged) + "\n\n" + body.strip() + "\n",
+            allow_nested=session,
         )
         return {
             "path": written,
@@ -1628,7 +1880,7 @@ class VaultStore:
             "body_chars": len(body.strip()),
         }
 
-    def delete_file(self, rel: str) -> str:
+    def delete_file(self, rel: str, *, session: bool = False) -> str:
         """删一份档案，返回规范路径。**档案删除的唯一入口。**
 
         README 不能删（它是索引，应当重写）—— 这条在工具与界面两边都要一样，
@@ -1638,17 +1890,214 @@ class VaultStore:
         原生模式还额外保护：生成物、清单、归档月份、固定 section 不能删
         （删了 README 就会缺一块，而且没有"重建"以外的恢复路径）。
         """
-        canonical = self.resolve_friendly(rel)
-        self._assert_editable(canonical)
-        if canonical == README_NAME:
+        canonical = self.resolve_friendly(rel, allow_nested=session)
+        self._assert_editable(canonical, session=session)
+        if _path_key(canonical) == _path_key(README_NAME):
             raise VaultPathError(t("ui.vault.readme_no_delete"))
-        if self.is_native() and canonical in self.manifest().paths():
+        protected_sections = (
+            {path for path, _title in DEFAULT_SECTION_SPECS}
+            if session
+            else set(self.manifest().paths())
+        )
+        if self.is_native() and _path_key(canonical) in {
+            _path_key(path) for path in protected_sections
+        }:
             raise VaultPathError(t("ui.vault.section_no_delete", path=canonical))
-        path = self._resolve_canonical(canonical)
+        path = (
+            self._resolve_session_path(canonical)
+            if session
+            else self._resolve_canonical(canonical)
+        )
         if not path.is_file():
             raise FileNotFoundError(canonical)
         path.unlink()
         return canonical
+
+    # ------------------------------------------------------------------
+    # 会话编辑（ADR-111）：与 dream 写入共用底层校验，但权限清单独立
+    # ------------------------------------------------------------------
+
+    def _rebuild_after_session_edit(self) -> dict[str, Any]:
+        """会话每次变更后重建生成物；旧 vault 只重建 index，不接管 README。"""
+        if self.is_native():
+            return self.rebuild_generated()
+        self.write_file(INDEX_NAME, self.render_index(), generated=True)
+        return {"rebuilt": True, "index_only": True}
+
+    def save_session_note(
+        self,
+        rel: str,
+        body: str,
+        front: Frontmatter | None = None,
+        *,
+        today: str = "",
+        mode: str,
+    ) -> dict[str, Any]:
+        """会话的新建/编辑入口。`mode` 必须是 create 或 update，不接受静默覆盖。"""
+        if mode not in ("create", "update"):
+            raise ValueError("session vault mode must be create or update")
+        result = self.save_note(
+            rel, body, front, today=today, mode=mode, session=True
+        )
+        result["generated"] = self._rebuild_after_session_edit()
+        return result
+
+    def _assert_session_directory(self, canonical: str, *, deleting: bool) -> None:
+        key = _path_key(canonical)
+        archive = _path_key(f"{SECTION_DIR}/{ARCHIVE_DIR}")
+        raw = _path_key(RAW_DIR)
+        if key == raw or key.startswith(raw + "/"):
+            raise VaultPathError(t("ui.vault.session_readonly", path=canonical + "/"))
+        if key == archive or key.startswith(archive + "/"):
+            raise VaultPathError(t("ui.vault.generated_readonly", path=canonical + "/"))
+        if deleting and key in {_path_key(path) for path in _TOP_DIRS}:
+            raise VaultPathError(t("ui.vault.dir_no_delete", path=canonical + "/"))
+
+    def create_session_directory(self, rel: str) -> dict[str, Any]:
+        """建一个 vault 内目录；已存在就明确返回 existing，不伪装成新建。"""
+        canonical = normalize_session_dir_path(rel, name_max_chars=self.name_max_chars)
+        self._assert_session_directory(canonical, deleting=False)
+        path = self._resolve_session_path(canonical)
+        if path.exists() and not path.is_dir():
+            raise VaultPathError(t("ui.vault.dir_target_file", path=canonical))
+        clash = self._case_clash(canonical)
+        if clash:
+            raise VaultPathError(
+                t("ui.vault.case_clash_no_suffix", path=canonical, clash=clash)
+            )
+        created = not path.is_dir()
+        path.mkdir(parents=True, exist_ok=True)
+        return {
+            "path": canonical + "/",
+            "action": "created" if created else "existing",
+            "generated": self._rebuild_after_session_edit() if created else {"rebuilt": False},
+        }
+
+    def delete_session_path(self, rel: str, *, recursive: bool = False) -> dict[str, Any]:
+        """删除会话可写的文件或目录；精确存在的目录优先于友好文件名解析。
+
+        这样 `entities` 不会被误解成 `entities/entities.md`。递归删除先验证整棵树，
+        再动第一个字节，父目录不能成为 README/固定 section/归档保护的旁路。
+        """
+        raw = str(rel or "").strip()
+        canonical_dir = ""
+        dir_error: VaultPathError | None = None
+        try:
+            canonical_dir = normalize_session_dir_path(
+                raw, name_max_chars=self.name_max_chars
+            )
+        except VaultPathError as exc:
+            dir_error = exc
+        else:
+            directory = self._resolve_session_path(canonical_dir)
+            if directory.is_dir() or raw.replace("\\", "/").endswith("/"):
+                return self._delete_session_directory(
+                    canonical_dir, directory, recursive=recursive
+                )
+
+        file_error: VaultPathError | None = None
+        canonical_file = ""
+        try:
+            canonical_file = self.resolve_friendly(raw, allow_nested=True)
+        except VaultPathError as exc:
+            file_error = exc
+        else:
+            # 即使目标不存在，也要先报"这个路径禁止删"，而不是含混地说不存在。
+            self._assert_editable(canonical_file, session=True)
+            if _path_key(canonical_file) == _path_key(README_NAME):
+                raise VaultPathError(t("ui.vault.readme_no_delete"))
+            if self.is_native() and _path_key(canonical_file) in {
+                _path_key(path) for path, _title in DEFAULT_SECTION_SPECS
+            }:
+                raise VaultPathError(
+                    t("ui.vault.section_no_delete", path=canonical_file)
+                )
+            file_path = self._resolve_session_path(canonical_file)
+            if file_path.is_file():
+                removed = self.delete_file(canonical_file, session=True)
+                generated = self._rebuild_after_session_edit()
+                return {
+                    "path": removed,
+                    "kind": "file",
+                    "files": 1,
+                    "recursive": False,
+                    "generated": generated,
+                }
+
+        if canonical_dir:
+            directory = self._resolve_session_path(canonical_dir)
+            return self._delete_session_directory(
+                canonical_dir, directory, recursive=recursive
+            )
+        if canonical_file:
+            raise FileNotFoundError(canonical_file)
+        raise file_error or dir_error or FileNotFoundError(raw)
+
+    def _delete_session_directory(
+        self, canonical_dir: str, directory: Path, *, recursive: bool
+    ) -> dict[str, Any]:
+        self._assert_session_directory(canonical_dir, deleting=True)
+        if not directory.is_dir():
+            raise FileNotFoundError(canonical_dir)
+
+        files: list[tuple[Path, str]] = []
+        directories: list[Path] = []
+        real_root = self.root.resolve()
+        if recursive:
+            def visit(current: Path) -> None:
+                """显式遍历，绝不下入链接/junction；所有检查先于任何 unlink。"""
+                for path in sorted(current.iterdir(), key=lambda item: item.name):
+                    rel = path.relative_to(real_root).as_posix()
+                    if _is_link_or_reparse(path):
+                        raise VaultPathError(t("ui.vault.dir_contains_link", path=rel))
+                    # 每个节点都再过一次真实路径 containment；即使将来换了遍历
+                    # 实现，也不能把 vault 外面的对象列进待删清单。
+                    resolved = path.resolve()
+                    if resolved != real_root and not resolved.is_relative_to(real_root):
+                        raise VaultPathError(t("ui.vault.resolved_outside", path=rel))
+                    if path.is_dir():
+                        canonical_subdir = normalize_session_dir_path(
+                            rel, name_max_chars=self.name_max_chars
+                        )
+                        self._assert_session_directory(canonical_subdir, deleting=True)
+                        visit(path)
+                        directories.append(path)  # 子目录先入列，删除时才能先深后浅
+                        continue
+                    canonical = normalize_rel_path(
+                        rel, name_max_chars=self.name_max_chars, allow_nested=True
+                    )
+                    self._assert_editable(canonical, session=True)
+                    if _path_key(canonical) == _path_key(README_NAME):
+                        raise VaultPathError(t("ui.vault.readme_no_delete"))
+                    if self.is_native() and _path_key(canonical) in {
+                        _path_key(section) for section, _title in DEFAULT_SECTION_SPECS
+                    }:
+                        raise VaultPathError(
+                            t("ui.vault.section_no_delete", path=canonical)
+                        )
+                    files.append((path, canonical))
+
+            visit(directory)
+            for path, _rel in files:
+                path.unlink()
+            for path in directories:
+                path.rmdir()
+            directory.rmdir()
+        else:
+            try:
+                directory.rmdir()
+            except OSError as exc:
+                raise VaultPathError(
+                    t("ui.vault.dir_not_empty", path=canonical_dir)
+                ) from exc
+        generated = self._rebuild_after_session_edit()
+        return {
+            "path": canonical_dir + "/",
+            "kind": "directory",
+            "files": len(files),
+            "recursive": bool(recursive),
+            "generated": generated,
+        }
 
     def _case_clash(self, canonical: str) -> str:
         """同一个目录里有没有"只差大小写"的兄弟**档案**？
@@ -1746,7 +2195,7 @@ class VaultStore:
 
     def _front_of(self, rel: str) -> Frontmatter:
         try:
-            path = self._resolve_canonical(normalize_rel_path(rel, name_max_chars=120))
+            path = self._resolve_canonical(normalize_rel_path(rel, name_max_chars=120, allow_nested=True))
             text = path.read_text(encoding="utf-8")
         except (VaultPathError, OSError, UnicodeDecodeError):
             return Frontmatter()
@@ -1756,7 +2205,7 @@ class VaultStore:
     def _section_body(self, rel: str) -> str:
         """读一个 section 的正文，去掉开头的单个 H1（README 用 `## 标题`）。"""
         try:
-            path = self._resolve_canonical(normalize_rel_path(rel, name_max_chars=120))
+            path = self._resolve_canonical(normalize_rel_path(rel, name_max_chars=120, allow_nested=True))
             text = path.read_text(encoding="utf-8")
         except (VaultPathError, OSError, UnicodeDecodeError):
             return ""
@@ -1866,6 +2315,7 @@ class VaultStore:
         titles = {spec.path: spec.title for spec in manifest.sections}
         section_rows: list[tuple[str, str]] = []
         entity_rows: list[tuple[str, str]] = []
+        other_rows: list[tuple[str, str]] = []
         for rel in self._iter_rels():
             if rel.startswith(f"{SECTION_DIR}/"):
                 if rel.startswith(f"{SECTION_DIR}/{ARCHIVE_DIR}/"):
@@ -1876,6 +2326,9 @@ class VaultStore:
             elif rel.startswith(f"{ENTITY_DIR}/"):
                 front = self._front_of(rel)
                 entity_rows.append((rel, front.name or front.title or Path(rel).stem))
+            else:
+                front = self._front_of(rel)
+                other_rows.append((rel, front.title or front.name or Path(rel).stem))
         lines = [
             "# Vault Index",
             "",
@@ -1890,7 +2343,11 @@ class VaultStore:
         for rel, title in sorted(entity_rows):
             lines.append(f"- [[{rel[:-3]}|{title}]]")
         if (self.root / OBSERVATIONS_NAME).is_file():
-            lines.extend(["", "## Other Files", "", f"- [[observations|Observations]]"])
+            other_rows.append((OBSERVATIONS_NAME, "Observations"))
+        if other_rows:
+            lines.extend(["", "## Other Files", ""])
+            for rel, title in sorted(other_rows):
+                lines.append(f"- [[{rel[:-3]}|{title}]]")
         return "\n".join(lines) + "\n"
 
     def rebuild_generated(
@@ -1903,9 +2360,20 @@ class VaultStore:
         """
         if not self.is_native():
             return {"rebuilt": False, "reason": "legacy"}
-        manifest = self.manifest()
-        known = set(manifest.paths())
+        original_manifest = self.manifest()
         earlier_rel = f"{SECTION_DIR}/earlier_months.md"
+        required = {path for path, _title in DEFAULT_SECTION_SPECS}
+        kept_specs: list[SectionSpec] = []
+        for spec in original_manifest.sections:
+            try:
+                exists = self._resolve_canonical(spec.path).is_file()
+            except VaultPathError:
+                exists = False
+            # 固定 section 缺失要留给 check() 报出来；自定义 section 已被会话
+            # 删除时则要从清单移除，否则每次重建都会制造一条永久 stale 记录。
+            if exists or spec.path in required or spec.path == earlier_rel:
+                kept_specs.append(spec)
+        known = {spec.path for spec in kept_specs}
         extra: list[SectionSpec] = []
         for rel in self._iter_rels():
             if (
@@ -1916,29 +2384,24 @@ class VaultStore:
             ):
                 extra.append(SectionSpec(rel, Path(rel).stem))
                 known.add(rel)
-        if extra:
-            manifest = replace(
-                manifest, sections=(*manifest.sections, *extra)
-            )
-            self.write_manifest(manifest)
         # `earlier_months` 是原生合同里固定的一项；自定义清单漏了它时补上，
         # 否则第一次 rebuild 写了文件、却要等下一次才进 README。
         if earlier_rel not in known:
-            manifest = replace(
-                manifest,
-                sections=(
-                    *manifest.sections,
-                    SectionSpec(earlier_rel, "Earlier Months"),
-                ),
-            )
+            extra.append(SectionSpec(earlier_rel, "Earlier Months"))
             known.add(earlier_rel)
-            self.write_manifest(manifest)
+        manifest = replace(original_manifest, sections=(*kept_specs, *extra))
+        if manifest.sections != original_manifest.sections:
+            self.write_file(
+                SECTIONS_CONFIG, dump_sections_manifest(manifest), generated=True
+            )
         earlier = self.render_earlier_months() + "\n"
-        self.write_file(f"{SECTION_DIR}/earlier_months.md", earlier)
+        self.write_file(
+            f"{SECTION_DIR}/earlier_months.md", earlier, generated=True
+        )
         readme = self.render_readme(today=today, last_dream=last_dream)
-        self.write_file(README_NAME, readme)
+        self.write_file(README_NAME, readme, generated=True)
         index = self.render_index()
-        self.write_file(INDEX_NAME, index)
+        self.write_file(INDEX_NAME, index, generated=True)
         return {
             "rebuilt": True,
             "readme_chars": len(readme),
@@ -2014,7 +2477,9 @@ class VaultStore:
                     if rel in archives:
                         continue
                     try:
-                        normalize_rel_path(rel, name_max_chars=self.name_max_chars)
+                        normalize_rel_path(
+                            rel, name_max_chars=self.name_max_chars, allow_nested=True
+                        )
                     except VaultPathError as exc:
                         problems.append(
                             t("ui.vault.bad_file_name", path=rel, error=exc)
@@ -2232,9 +2697,9 @@ class VaultStore:
     def _iter_rels(self) -> list[str]:
         """枚举 vault 里**确实位于 vault 内**的档案（全局排序，结果稳定）。
 
-        ADR-104 起 `sections/` 允许一个特例：`archived_month/<YYYY-MM>/this_month.md`。
-        所有条目仍然过 `_resolve_canonical` —— 符号链接/junction 走出 vault 的一律
-        跳过（四个扫描 list / search / neighborhood / check 都走这里）。
+        ADR-104 的月份归档与 ADR-111 的会话嵌套目录都支持。所有条目仍然过
+        `_resolve_canonical` —— 符号链接/junction 走出 vault 的一律跳过
+        （四个扫描 list / search / neighborhood / check 都走这里）。
         """
         rels: list[str] = []
         if not self.root.is_dir():
@@ -2242,30 +2707,39 @@ class VaultStore:
 
         def add(rel: str) -> None:
             try:
-                normalize_rel_path(rel, name_max_chars=self.name_max_chars)
-                self._resolve_canonical(rel)  # 与写入同一道闸
+                canonical = normalize_rel_path(
+                    rel, name_max_chars=self.name_max_chars, allow_nested=True
+                )
+                self._resolve_canonical(canonical)  # 与写入同一道闸
             except VaultPathError:
                 return
-            rels.append(rel)
+            rels.append(canonical)
 
-        sections = self.root / SECTION_DIR
-        if sections.is_dir():
-            for path in sorted(sections.glob("*.md")):
-                if path.is_file():
-                    add(f"{SECTION_DIR}/{path.name}")
-            archive = sections / ARCHIVE_DIR
-            if archive.is_dir():
-                for month in sorted(archive.iterdir()):
-                    if not month.is_dir() or not _ARCHIVE_MONTH_RE.match(month.name):
-                        continue
-                    if (month / ARCHIVE_FILE).is_file():
-                        add(f"{SECTION_DIR}/{ARCHIVE_DIR}/{month.name}/{ARCHIVE_FILE}")
-
-        entities = self.root / ENTITY_DIR
-        if entities.is_dir():
-            for path in sorted(entities.glob("*.md")):
-                if path.is_file():
-                    add(f"{ENTITY_DIR}/{path.name}")
+        # 显式排除链接/junction/reparse point；raw 是素材区，不把其中的文本当档案。
+        # 根级 README/index/log/observations/memory 由各自通道负责，自定义根级 Markdown
+        # 与自定义目录则和 sections/entities 一样进入列表、检索和索引。
+        protected_roots = {
+            _path_key(path) for path in (*ROOT_MD_FILES, SECTIONS_CONFIG)
+        }
+        for current, dirs, files in os.walk(self.root, followlinks=False):
+            current_path = Path(current)
+            dirs[:] = sorted(
+                name
+                for name in dirs
+                if not _is_link_or_reparse(current_path / name)
+                and not (
+                    current_path == self.root
+                    and _path_key(name) == _path_key(RAW_DIR)
+                )
+            )
+            for name in sorted(files):
+                path = current_path / name
+                if not name.endswith(".md") or _is_link_or_reparse(path) or not path.is_file():
+                    continue
+                rel = path.relative_to(self.root).as_posix()
+                if "/" not in rel and _path_key(rel) in protected_roots:
+                    continue
+                add(rel)
 
         rels.sort()
         # 硬上限只为"别让一次扫描把机器拖死"存在，比展示上限宽 4 倍；
@@ -2339,7 +2813,9 @@ class VaultStore:
         if "/" in raw:
             candidate = raw if raw.lower().endswith(".md") else f"{raw}.md"
             try:
-                canonical = normalize_rel_path(candidate, name_max_chars=120)
+                canonical = normalize_rel_path(
+                    candidate, name_max_chars=120, allow_nested=True
+                )
             except VaultPathError:
                 return ""
             return canonical if canonical in index else ""

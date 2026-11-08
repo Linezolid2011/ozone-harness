@@ -96,9 +96,10 @@ GET /api/prompts          → 200 JSON（不需要配置任何接口；不调模
 ### 2.3 覆盖范围（有测试钉着）
 
 * 提示词：`harness/prompts/{zh,en}.py` 里**全部**公开常量，`LANG` 除外（22 条）；
-* 工具：**全部 16 个** —— 对话侧 9 个（`mem_create`/`mem_edit`/`mem_del`、`time`、
-  `dream_list`/`dream_read`/`dream_search`、`web_search`/`web_open_url`）
-  ＋ 整理侧 7 个。**即使现在不会注册的也列出来**（否则你没法回答"它到底有没有这个工具"）。
+* 工具：**全部 20 个** —— 对话侧 13 个（`mem_create`/`mem_edit`/`mem_del`、`time`、
+  `dream_list`/`dream_read`/`dream_search`、`dream_create`/`dream_edit`/`dream_mkdir`/`dream_delete`、
+  `web_search`/`web_open_url`）＋ 整理侧 7 个。即使现在不会注册的也列出来；
+  ADR-111 起七个 dream_* 对话工具始终注册，空 vault 也能创建第一份档案。
 
 ## 3. 内容从哪来（供排查用，前端不需要关心）
 
@@ -165,7 +166,7 @@ GET /api/prompts          → 200 JSON（不需要配置任何接口；不调模
    ＋ 参数表（属性名 / 类型 / 是否必填 / 说明）＋ 可折叠的原始 `parameters` JSON；
 5. **DOM 上留好钩子**（下一步要做可编辑，靠它定位）：
    每条提示词的外层元素带 `data-prompt-id="<id>"`，每条工具带 `data-tool-id="<name>"`；
-   **折叠不影响它们的数量**（22 / 16 个元素始终在 DOM 里 —— 断言数的是元素，不是可见性）；
+   **折叠不影响它们的数量**（22 / 20 个元素始终在 DOM 里 —— 断言数的是元素，不是可见性）；
 6. 复制按钮：`navigator.clipboard` 在非安全上下文/受限环境可能不可用 ——
    失败必须**说一句人话**，不能静默；
 7. 切语言时这一页要能**原地重渲染**（ADR-085 的四号岔路口：不刷新页面）——
@@ -176,14 +177,14 @@ GET /api/prompts          → 200 JSON（不需要配置任何接口；不调模
 
 ## 6. 不变量（测试在钉）
 
-* Python：`tests/test_prompt_view.py` —— 22 条提示词与 16 个工具**一个不少**、
+* Python：`tests/test_prompt_view.py` —— 22 条提示词与 20 个工具**一个不少**、
   分组表与 prompts 模块严格互补、`state` 三值合法、**全新数据目录上零落盘**、
   `en` 模式下所有服务端文案里没有汉字、接口在**没有配置任何接口**时也能 200
   （`tests/test_web.py`）；
 * i18n：两个 catalog 的 key 集合一致（`tests/test_i18n.py`，自动覆盖新加的 key）；
 * 前端：`scripts/ui_check/dom-stub.test.mjs`（**437 条断言**）与
   `scripts/ui_check/e2e-live.mjs`（**78 条断言**，真 `/api/prompts` → 真 `app.js`）
-  —— 覆盖：侧栏项与顺序、22 条提示词与 16 个工具全画出来、`data-prompt-id` /
+  —— 覆盖：侧栏项与顺序、22 条提示词与 20 个工具全画出来、`data-prompt-id` /
   `data-tool-id` 与真 id 集合逐一相同、三种徽标文案、原文默认折叠且与真响应**逐字相同**、
   **7 个分组默认全折**、参数表按真 schema 逐行、切 en 整页变英文且不刷新、
   接口 500 / 缺字段 / 空数组都不崩。

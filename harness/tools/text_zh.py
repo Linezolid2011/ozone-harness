@@ -128,6 +128,48 @@ MESSAGES: dict[str, str] = {
         "或者用 dream_list 看看都有哪些档案。"
     ),
     "tool.dream_search.display": "档案检索「{query}」命中 {count} 个",
+    # ── 会话可写的背景档案工具（vault_edit_tools，ADR-111）────────────
+    "tool.dream_edit.path_hint": (
+        "vault 内相对路径：sections/、entities/ 或自定义目录下的 .md，"
+        "也可以是根级自定义 .md / observations.md（./name.md 可显式指根级）；旧 vault 还可编辑 README。"
+        "index.md、sections.yaml、log.md、memory_instruction.md、原生 README、"
+        "earlier_months、archived_month 与 raw/ 不可写。"
+    ),
+    "tool.dream_create.desc": (
+        "新建一份背景档案。用户明确要求整理/记录到背景档案时，或你判断某段稳定信息"
+        "值得长期保存时使用。path 必须是新路径；要改已有档案用 dream_edit。"
+        "可写 vault 内任意非保护位置的 Markdown（含根级与自定义子目录）。"
+        "程序会在成功后自动重建 index，原生 vault 还会更新 sections.yaml、README 与 "
+        "earlier_months；不要直接改这些生成物，也不能改 log.md 或 memory_instruction.md。"
+    ),
+    "tool.dream_create.display": "新建背景档案 {path}（{chars} 字）",
+    "tool.dream_edit.desc": (
+        "编辑一份已经存在的背景档案：body 是新的完整正文，未提供的元信息字段会保留。"
+        "path 不存在会失败，不会悄悄新建。用户要求修改/清理档案，或你判断档案已过时、"
+        "值得修正时使用。可改 vault 内非保护位置的 Markdown 与旧 vault 的 README；"
+        "原生 README 和其它生成物由程序重建，log.md 与 memory_instruction.md 永远不可写。"
+    ),
+    "tool.dream_edit.display": "更新背景档案 {path}（{chars} 字）",
+    "tool.dream_mkdir.desc": (
+        "在 vault 内创建目录（可一次创建多级，也允许自定义顶层目录），用于组织背景档案。"
+        "目录名不能以 .md 结尾；不能创建 raw/ 或 sections/archived_month。"
+    ),
+    "tool.dream_mkdir.display.created": "新建档案目录 {path}",
+    "tool.dream_mkdir.display.existing": "档案目录已存在 {path}",
+    "tool.dream_delete.desc": (
+        "删除一份允许编辑的背景档案，或删除 vault 内允许编辑的目录（含自定义目录）。"
+        "目录默认仅在不包含内容时可删；确认要连其中的档案一起删时必须显式 recursive=true。"
+        "递归删除会先检查整棵树，遇到受保护文件、非 Markdown 或符号链接就整体拒绝。"
+        "README 不能删；index.md、sections.yaml、log.md、memory_instruction.md、"
+        "固定 section、月份归档、raw/ 及顶层 sections/entities 也不能删。"
+    ),
+    "tool.dream_delete.param.reason": "可选，为什么删除；会留在本轮会话的工具轨迹里。",
+    "tool.dream_delete.param.recursive": "是否递归删除目录内容；默认 false，只对目录有意义。",
+    "tool.dream_delete.bad_recursive": "recursive 必须是布尔值 true 或 false",
+    "tool.dream_delete.bad_recursive.display": "recursive 非法",
+    "tool.dream_delete.rejected.display": "删除被拒",
+    "tool.dream_delete.display.file": "删除背景档案 {path}",
+    "tool.dream_delete.display.directory": "删除档案目录 {path}（含 {count} 个文件）",
     # ── 联网工具（web_tools）────────────────────────────────────
     "tool.web_search.desc": (
         "用关键词搜索引擎查资料，返回若干条结果的标题、链接与摘要。"

@@ -202,6 +202,10 @@ MESSAGES: dict[str, str] = {
         "{path} 与已有的 {clash} 在**大小写不敏感的文件系统**上是同一个"
         "文件，写下去会把那一份静默覆盖掉。请换一个名字"
     ),
+    "ui.vault.ambiguous_name": (
+        "{name} 同时指向多份档案：{paths}；裸名字不能安全选择。"
+        "请用带目录的完整路径，或先由用户手工整理重名档案"
+    ),
     "ui.vault.exists": "已经有一份 {path} 了",
     "ui.vault.readme_placeholder": (
         "README 不能标成 placeholder —— 那是程序给空骨架用的标记，"
@@ -214,6 +218,18 @@ MESSAGES: dict[str, str] = {
     ),
     "ui.vault.section_no_delete": (
         "{path} 是 sections.yaml 里的固定 section，不能删；要清空就把正文改成空字符串"
+    ),
+    "ui.vault.session_readonly": (
+        "{path} 由 harness 或独立记忆系统维护，会话工具不能改；"
+        "请改 sections / entities 里的档案或 observations.md"
+    ),
+    "ui.vault.dir_markdown_suffix": "目录名不能以 .md 结尾（会和档案文件混淆）：{path}",
+    "ui.vault.dir_too_deep": "目录嵌套最多 8 层：{path}",
+    "ui.vault.dir_no_delete": "{path} 是 vault 的顶层档案目录，不能整体删除",
+    "ui.vault.dir_target_file": "{path} 已经是一个文件，不能改成目录",
+    "ui.vault.dir_contains_link": "{path} 含有符号链接，拒绝删除；请先由用户手工处理链接",
+    "ui.vault.dir_not_empty": (
+        "目录 {path} 不是空目录；确认要连内容一起删时，显式使用 recursive=true"
     ),
     "ui.vault.manifest_read_failed": "sections.yaml 读取失败：{error}",
     "ui.vault.manifest_not_a_note": "sections.yaml 是清单配置，不是可读的档案",
@@ -651,7 +667,6 @@ MESSAGES: dict[str, str] = {
     "ui.prompts.cond.vault_no_readme": "背景档案还没有 README（整理一次就有了）",
     "ui.prompts.cond.vault_ready": "已经有档案了，所以用的是另外几条",
     "ui.prompts.cond.vault_has_readme": "已经有 README 了（这条只在没有 README 时用）",
-    "ui.prompts.cond.vault_empty": "背景档案还是空的 —— 这三个工具现在不会被注册",
     "ui.prompts.cond.web_off": "设置 → 工具里的「联网工具」关着",
     "ui.prompts.cond.web_enabled": "联网工具开着，所以用的是另外几条",
     "ui.prompts.cond.web_search_off": "联网开着，但搜索没开（或搜索后端没配好）",

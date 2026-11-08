@@ -111,6 +111,7 @@ class AgentLoop:
         planner: Planner | None = None,
         web_tools_text: str = "",
         vault_text: str = "",
+        vault_text_provider: Callable[[], str] | None = None,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -129,6 +130,8 @@ class AgentLoop:
         # 与 web_tools_text 同样由 Runtime 生成 —— 循环不认识 vault，
         # 只负责把这段字节原样放进 system，这样"什么内容进提示词"只有一个决策点。
         self.vault_text = vault_text
+        # 长驻 CLI 每轮重读一次；轮内仍固定，保住 system 前缀与工具循环的缓存。
+        self._vault_text_provider = vault_text_provider
         # 本轮固定的记忆块（整轮只渲染一次，见 plan_chat_turn）
         self._turn_memory_text: str | None = None
         # 本轮的压缩摘要（如果有）
@@ -450,6 +453,9 @@ class AgentLoop:
         （老日志），所以没有附件时连这个键都不写（写它只是噪音）。
         """
         started = time.monotonic()
+        if self._vault_text_provider is not None:
+            # 上一轮可能通过 dream_edit/dream_create 改过 vault；不要等到重启才注入。
+            self.vault_text = self._vault_text_provider()
         # 归一化成契约规定的两种取值。读端把任何非 "text" 都当 "image"，
         # 所以这里不归一也不会读错，只是会往日志里留一个没人认识的值。
         mode = "text" if str(modality or "").strip().lower() == "text" else "image"

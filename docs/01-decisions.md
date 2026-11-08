@@ -17,7 +17,7 @@
 
 ---
 
-## ADR-002 模型没有文件系统权限，只有记忆三件套
+## ADR-002 模型没有文件系统权限，只有记忆三件套 〔写权限范围已被 ADR-111 扩展〕
 
 **决定**：模型仅暴露 `mem_create` / `mem_edit` / `mem_del`。
 会话历史保存、上下文读取、记忆注入全部由 harness 完成。
@@ -4196,6 +4196,66 @@ ADR-105 的入口对齐与 ADR-106 的双击引导都在这条边界内做了取
 **教训**：只验证"功能所在的那个入口"不等于验证用户会走的所有入口。涉及启动流程时，真实测试矩阵
 至少要覆盖每个公开 launcher；状态接口的 `enabled:false` 也必须被当作一种明确模式，而不能让通用
 前端把它误读成已经完成的检查。
+
+---
+
+## ADR-111 会话 agent 可以通过受约束工具直接维护 dream vault
+
+**背景**：ADR-002 把对话模型的写能力限制为记忆三件套，ADR-053 又把 vault 的写权限只给
+后台整理流程。实际使用中，用户会在当前会话明确指出"把这段整理进档案 / 修正这份档案"，
+模型也可能在读档案后发现一份值得当场修正的过时内容。让这些需求必须再等一次后台整理，
+既不及时，也把"用户明确要求的档案编辑"与"后台自动推断"混成了一件事。此次需求明确允许
+会话 agent 在被要求时、或自行判断值得时维护 vault，但仍不开放通用文件系统。
+
+**决定**：
+
+1. **对话侧新增四个硬编码工具**：`dream_create`（只新建）、`dream_edit`（只更新）、
+   `dream_mkdir`（建目录）、`dream_delete`（删文件或目录）。create 与 update 不合并成
+   自动判断，避免路径拼错时静默新建，或已有档案被无意覆盖。读工具仍是
+   `dream_list/read/search`；七个工具在空 vault 也注册，使模型能创建第一份档案并读回确认。
+2. **可写范围是 vault 内的档案内容，不是通用文件系统**：允许根级、`sections/`、
+   `entities/` 与自定义目录下的非保护 Markdown（含嵌套子目录）；旧 vault 的
+   `README.md` 可编辑。`index.md`、`sections.yaml`、`log.md`、`memory_instruction.md`
+   始终不可由会话写；
+   原生 README、`sections/earlier_months.md`、`sections/archived_month/` 与 `raw/`
+   同样只读。README 在两种模式下都不可删除；原生固定 section 也不可删除，只能编辑正文。
+3. **权限判断仍在 VaultStore**。会话与 dream 共用路径归一化、原子写、大小写撞名、
+   文件大小/数量限制与符号链接 containment，但 `_assert_editable(..., session=True)`
+   使用独立清单，因此会话可写 observations/旧 README 不会顺手扩大 dream 的权限。
+   嵌套路径由 `allow_nested=True` 显式打开；整理器与导入器默认仍走原来的路径合同。
+4. **目录删除默认不递归**。非空目录必须显式 `recursive=true`；递归删除先遍历并验证
+   整棵树，发现受保护文件、非 Markdown、符号链接或 Windows junction/reparse point
+   就在删除任何东西之前拒绝。
+   顶层 `sections/`、`entities/` 与月份归档不能作为目录删除，防止借父目录绕过文件禁区。
+5. **每次成功变更后由 harness 重建生成物**。原生模式重建 README/index/earlier_months，
+   新增自定义 section 进入 `sections.yaml`，删除自定义 section 则从清单移除；固定 section
+   缺失仍保留给结构校验报告。旧模式只重建 index，不接管模型可写的 README，也不自动创建
+   `sections.yaml` 迁移模式。长驻 CLI 在每轮开始重读 README，轮内仍固定以保留缓存前缀。
+6. **两套长期信息的可信度不变**。memory instructions 仍只能由 mem_* / MemoryStore 写，
+   且与 vault 冲突时仍以记忆条目为准。本次扩展是用户要求的本地产品能力，不声称它是
+   Kimi 网页端已确认的事实形态。
+
+**理由**：把权限写成工具描述只能劝模型，不能形成边界；真正的约束必须在 store 层且对
+直接路径与父目录递归同样生效。会话与整理器的目标不同，共享底层安全校验而分开权限清单，
+比复制一套写入实现或让两者互相继承更少漂移。自动重建生成物则消除了"内容改了、索引还旧"
+的半截状态。空 vault 注册读写工具是会话创建能力所必需的，构造与只读查看仍然零落盘。
+
+**验证**：
+
+* `tests/test_vault_session.py`：空/旧/原生 vault 的新建、编辑、读取、检索与索引；
+  create/update 互斥；README 可改不可删；observations 权限；嵌套目录与非递归/递归删除；
+  非 Markdown 预检不产生半截删除；固定 section、生成物、日志、独立记忆、归档、raw、
+  穿越、Windows 设备名、大小写别名与内部/外部 junction 全部拒绝；自定义根级/目录档案
+  进入列表/检索/索引且可安全删除；自定义 section 删除后清单与索引同步；英文结果无中文。
+* `tests/test_vault.py` / `test_vault_native.py`：原有 dream 写合同、生成物只读与原生路径
+  保持；`test_prompt_view.py`：20 个工具全部展示，真实 Runtime 与只读视图定义逐字一致，
+  全新数据目录查看页面仍零落盘。
+* Runtime 回归使用 FakeProvider 验证会话创建档案后，下一轮 CLI system 立即包含重算 README；
+  全部测试离线，临时目录不接触真实 `data/`。
+
+**教训**：给模型增加一种写能力时，不能只看"直接写这个文件"的入口。目录递归、生成物重建、
+空状态注册、长驻进程下一轮注入、提示词自查页与两种 vault 模式都必须一起改。尤其不能用
+"父目录允许删"推导"里面的一切都可删"；先验证整棵树再动手，才不会把权限检查变成半成品。
 
 ---
 

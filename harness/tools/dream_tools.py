@@ -5,12 +5,12 @@
 | | 对话 agent | dream agent |
 |---|---|---|
 | 记忆条目 | `mem_create / mem_edit / mem_del`（可以写） | **一个都没有**（连读都没有） |
-| 背景档案 | `dream_list / dream_read / dream_search`（只读） | `vault_*` / `readme_write`（可以写） |
+| 背景档案 | `dream_list/read/search` + `dream_create/edit/mkdir/delete`（ADR-111） | `vault_*` / `readme_write`（可以写） |
 | 会话记录 | 看不到（它只活在当前会话里） | `records_*`（只读） |
 
-这条边界是 ADR-053 的落地点：**记录者与整理者互不越界**。整理者碰不到
-"用户明确要求记住"的东西，所以它不可能改写历史；记录者碰不到档案文件，
-所以它不可能把一次性的猜测固化进长期档案。
+这条边界是 ADR-053 的落地点：**记忆条目与整理记录互不越界**。整理者碰不到
+"用户明确要求记住"的东西，所以它不可能改写独立记忆。ADR-111 起会话可以主动维护
+背景档案，但仍只能走 store 层的会话权限清单，不能碰 memory_instruction 或通用文件系统。
 
 > 这里以前是记忆手术工具（`mem_merge` / `mem_rewrite` / `mem_forget` /
 > `mem_insight`），随 ADR-059 整体退役 —— 那些工具的共同问题是**作用对象错了**：

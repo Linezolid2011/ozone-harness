@@ -5848,14 +5848,14 @@ await scenario('设置 → 常规 → 单轮最大输出：5000 / 5k / 1M / -1�
    注意：这一页的负载是**跟着语言取的**，所以 /api/prompts 在用例之间会互相干扰 ——
    路由那条路径（showSettings）不 await，一个在飞的旧请求回来时会把 state.prompts
    覆盖成旧的那一份。下面每一组都在组内把这个请求等干净（见各组末尾的 `await app.loadPrompts()`）。
-   契约 §6 要求的那几条：侧栏项存在、渲染出 22 条提示词与 16 个工具、
+   契约 §6 要求的那几条：侧栏项存在、渲染出 22 条提示词与 20 个工具、
    状态徽标三种文案正确、`data-prompt-id` / `data-tool-id` 钩子在、
    切到 en 后这一页也是英文，外加"缺字段 / 空数组不崩"。
 
    夹具照**真响应**的字段手写（字段名与嵌套照抄 `/api/prompts`）：
    22 = system 7 + tail 2 + compact 3 + render 8 + dream 2；
    16 = 对话侧 9 + 整理侧 7。契约 §2.3 的"一个不少"在 Python 那边有测试钉着，
-   这里钉的是"前端把这 22 + 16 全画出来、一条不漏"。 */
+   这里钉的是"前端把这 22 + 20 全画出来、一条不漏"。 */
 
 const PG = (id, title, note, items) => ({ id, title, note, items });
 const P = (id, state, condition, when, text, placeholders = []) => ({
@@ -6042,11 +6042,12 @@ const PROMPT_IDS = ['SYSTEM_PROMPT', 'VAULT_PROMPT', 'VAULT_EMPTY_PROMPT',
   'RENDER_TOOL_RESULT', 'RENDER_IMAGE', 'RENDER_TRUNCATED_SUFFIX', 'WEB_SAFETY',
   'DREAM_SYSTEM_PROMPT', 'DREAM_INSTRUCTION'];
 const TOOL_IDS = ['mem_create', 'mem_edit', 'mem_del', 'time', 'dream_list', 'dream_read',
-  'dream_search', 'web_search', 'web_open_url',
+  'dream_search', 'dream_create', 'dream_edit', 'dream_mkdir', 'dream_delete',
+  'web_search', 'web_open_url',
   'readme_write', 'records_list', 'records_read', 'vault_delete', 'vault_outline',
   'vault_read', 'vault_write'];
 
-/** 把夹具补齐到契约 §2.3 的 **22 + 16**（`promptsFixture` 只逐条写了有断言的那几条，
+/** 把夹具补齐到契约 §2.3 的 **22 + 20**（`promptsFixture` 只逐条写了有断言的那几条，
  *  剩下的按 id 生成空壳 —— 这一页要验的是"一条不漏地画出来"，不是每条的正文）。
  *  **按 id 判重**：`withChars` 会重建条目对象，靠 `includes` 比引用会认不出来，
  *  于是"补齐"反而变成"插一条重复的"（真的踩过一次：22 提示词那条断言红在 23 上）。
@@ -6151,26 +6152,26 @@ const insideGroup = (node) => {
   return false;
 };
 
-check('夹具自检：22 条提示词与 16 个工具，id 与契约 §2.3 逐个对得上', () => {
+check('夹具自检：22 条提示词与 20 个工具，id 与契约 §2.3 逐个对得上', () => {
   const flat = promptsPayload('zh');
   const promptIds = flat.groups.flatMap((group) => group.items.map((item) => item.id));
   const toolIds = flat.tools.flatMap((group) => group.items.map((item) => item.name));
   assert.equal(promptIds.length, 22);
-  assert.equal(toolIds.length, 16);
+  assert.equal(toolIds.length, 20);
   assert.equal(new Set(promptIds).size, 22, `夹具里提示词 id 重复了：${promptIds.join(',')}`);
-  assert.equal(new Set(toolIds).size, 16, `夹具里工具名重复了：${toolIds.join(',')}`);
+  assert.equal(new Set(toolIds).size, 20, `夹具里工具名重复了：${toolIds.join(',')}`);
   // vm 里造出来的数组与这边的字面量**原型不同**，deepStrictEqual 会因此报
   // "结构相同但不等" —— 先摊平成宿主这边的数组再比（与语言清单那条同一个坑）。
   assert.deepEqual([...promptIds].sort(), [...PROMPT_IDS].sort());
   assert.deepEqual([...toolIds].sort(), [...TOOL_IDS].sort());
   // 22 条提示词**全是** on（契约 §2.2：按情形才出现的那些一律 on）；
-  // 16 个工具里 web_search 是 session、其余 15 个是 on —— 所以 tools_on = 15。
+  // 20 个工具里 web_search 是 session、其余 19 个是 on —— 所以 tools_on = 19。
   // `overridden: 0` 是这一轮加的（契约 §4.1 的增量字段）：没给 store 就是没改过。
   assert.deepEqual(flat.summary,
-    { prompts: 22, prompt_groups: 5, tools: 16, tools_on: 15, overridden: 0 });
+    { prompts: 22, prompt_groups: 5, tools: 20, tools_on: 19, overridden: 0 });
 });
 
-await scenario('提示词页：侧栏项、22 条提示词、16 个工具、两个 data-* 钩子', async () => {
+await scenario('提示词页：侧栏项、22 条提示词、20 个工具、两个 data-* 钩子', async () => {
   primePromptsShell();
   app.setLanguageNow('zh');
   app.state.prompts = promptsPayload('zh');
@@ -6226,11 +6227,11 @@ await scenario('提示词页：侧栏项、22 条提示词、16 个工具、两�
     assert.ok(ids.includes('DREAM_INSTRUCTION'));
   });
 
-  check('渲染出 16 个工具，每个都有 data-tool-id', () => {
+  check('渲染出 20 个工具，每个都有 data-tool-id', () => {
     const cards = hasClass(shell('prompts-body'), 'tool-card');
-    assert.equal(cards.length, 16);
+    assert.equal(cards.length, 20);
     const ids = cards.map((node) => node.dataset.toolId);
-    assert.equal(new Set(ids).size, 16);
+    assert.equal(new Set(ids).size, 20);
     assert.ok(ids.includes('web_search'));
     assert.ok(ids.includes('readme_write'));
     // 钩子挂在**工具卡片**上（不是外面那层分组卡片上）
@@ -6348,14 +6349,14 @@ await scenario('提示词页：分组是原生 <details> 且**默认全折**、�
     }
   });
 
-  check('全折叠时 22 / 16 个钩子元素**仍然在 DOM 里**（折的是可见性，不是元素）', () => {
+  check('全折叠时 22 / 20 个钩子元素**仍然在 DOM 里**（折的是可见性，不是元素）', () => {
     const body = shell('prompts-body');
     assert.ok(groupNodes().every((group) => group.getAttribute('open') === null),
       '前置：七组全折着');
     const prompts = walkAll(body).filter((node) => node.dataset && node.dataset.promptId);
     const tools = walkAll(body).filter((node) => node.dataset && node.dataset.toolId);
     assert.equal(prompts.length, 22);
-    assert.equal(tools.length, 16);
+    assert.equal(tools.length, 20);
     // 而且它们真的在某个分组的**折叠体**里，不是被挪到页面上别处
     assert.ok(prompts.every(insideGroup) && tools.every(insideGroup));
   });
@@ -6401,15 +6402,15 @@ await scenario('提示词页：分组是原生 <details> 且**默认全折**、�
     const tallyOf = (group) => findEl(summaryOf(group), (n) => n.classList.contains('pg-tally')).textContent;
     assert.equal(tallyOf(groups[0]), '生效 3 条 · 未注册 4 条');
     assert.ok(!/会话级/.test(summaryOf(groups[0]).textContent), '这一组没有会话级，不该写"会话级 0 条"');
-    assert.equal(tallyOf(groups[5]), '生效 13 条 · 会话级 1 条');
+    assert.equal(tallyOf(groups[5]), '生效 17 条 · 会话级 1 条');
     assert.ok(!/未注册/.test(summaryOf(groups[5]).textContent), '这一组没有未注册，不该写"未注册 0 条"');
     assert.equal(tallyOf(groups[1]), '生效 2 条');
   });
 
   check('页首那行总统计**保留**（全折叠时它是唯一一眼能看全的东西）', () => {
     const text = shell('prompts-body').textContent;
-    assert.match(text, /共 22 条提示词 · 16 个工具定义/);
-    assert.match(text, /其中 15 个工具的当前状态是「生效」/);
+    assert.match(text, /共 22 条提示词 · 20 个工具定义/);
+    assert.match(text, /其中 19 个工具的当前状态是「生效」/);
   });
 });
 
@@ -6440,8 +6441,8 @@ await scenario('提示词页：状态徽标三种文案都正确（生效 / 未�
   });
   check('摘要行说的是"有多少"：数字用的是服务端 summary，不是界面自己数的', () => {
     const text = shell('prompts-body').textContent;
-    assert.match(text, /共 22 条提示词 · 16 个工具定义/);
-    assert.match(text, /其中 15 个工具的当前状态是「生效」/);
+    assert.match(text, /共 22 条提示词 · 20 个工具定义/);
+    assert.match(text, /其中 19 个工具的当前状态是「生效」/);
   });
   check('第二行按三种状态各数一遍（提示词 + 工具一起数）', () => {
     const tally = app.promptTally([
@@ -6590,7 +6591,7 @@ await scenario('提示词页：切到 en 后这一页原地重渲染成英文（
   });
   check('这一页整页变英文：外壳 + 服务端那几句都换了（原地重渲染，没有刷新页面）', () => {
     const text = shell('prompts-body').textContent;
-    assert.match(text, /22 prompts · 16 tool definitions/);
+    assert.match(text, /22 prompts · 20 tool definitions/);
     assert.match(text, /System prompts/);
     assert.match(text, /Search the web\./);
     assert.ok(!/[\u4e00-\u9fff]/.test(text), `英文页面上不该有汉字：${text.slice(0, 400)}`);
@@ -6605,7 +6606,7 @@ await scenario('提示词页：切到 en 后这一页原地重渲染成英文（
   check('钩子还在（重画之后 data-prompt-id / data-tool-id 一个都没丢）', () => {
     assert.equal(hasClass(shell('prompts-body'), 'prompt-card')
       .filter((node) => node.dataset && node.dataset.promptId).length, 22);
-    assert.equal(hasClass(shell('prompts-body'), 'tool-card').length, 16);
+    assert.equal(hasClass(shell('prompts-body'), 'tool-card').length, 20);
   });
   check('切语言**重新拉了一次** /api/prompts（数据是另一种语言了，不能拿旧的画）', () => {
     assert.ok(calls.filter((url) => url === '/api/prompts').length >= 2,
