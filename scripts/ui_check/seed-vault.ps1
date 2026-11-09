@@ -31,9 +31,14 @@ updated: 2026-10-12
 W 'entities\小林.md' @'
 ---
 title: 小林
+# name/created 是**保存时由 harness 盖章**的原生字段（save_note：created 缺了补今天、
+# entities 缺 name 补文件名 stem）。e2e-live 断言属性区里有这两行 —— 手写的旧形状
+# 夹具（没有它们）会让那条断言永远红（c0dd4d3 起），所以夹具按"保存过一次"的形状写。
+name: 小林
 kind: person
 relation: 用户本人
 status: 活跃
+created: "2026-10-10"
 updated: 2026-10-12
 tags: [用户, 前端]
 aliases: [林, 小林同学]
