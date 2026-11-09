@@ -601,7 +601,9 @@ class HttpServerTests(unittest.TestCase):
 
         self.addCleanup(prompt_store.configure, None)
         self.server.settings = self.settings
-        custom = "【我改的】{web_tools_text}{vault_text}{memory_text}"
+        # {version}/{model}（ADR-115）留着：这个用例验的是"改过→复原"的往返，
+        # 不缺占位符才不该有警告；缺了会警告这件事由下面那条用例单独验。
+        custom = "【我改的】{version}{model}{web_tools_text}{vault_text}{memory_text}"
         status, result = self._post(
             "/api/prompts/update",
             {"language": "zh", "id": "SYSTEM_PROMPT", "text": custom},
@@ -621,6 +623,33 @@ class HttpServerTests(unittest.TestCase):
         self.assertTrue(item["overridden"])
         self.assertTrue(item["default_text"].startswith("你是运行在 O₃ᶻᵒⁿᵉ"))
         self.assertEqual(item["warnings"], [])
+
+    def test_prompts_update_warns_when_identity_placeholders_are_dropped(self) -> None:
+        """ADR-115：自报家门的 {version}/{model} 被自定义文本丢掉时只允许警告
+        （不拒绝 —— 那是用户文本的合法选择），但警告必须真的出现。"""
+        from harness import prompts as prompt_store
+
+        self.addCleanup(prompt_store.configure, None)
+        self.server.settings = self.settings
+        status, result = self._post(
+            "/api/prompts/update",
+            {
+                "language": "zh",
+                "id": "SYSTEM_PROMPT",
+                "text": "【我改的】{web_tools_text}{vault_text}{memory_text}",
+            },
+        )
+        self.assertEqual(status, 200, result)
+        _status, body, _ctype = self._get("/api/prompts")
+        item = [
+            i
+            for g in json.loads(body)["groups"]
+            for i in g["items"]
+            if i["id"] == "SYSTEM_PROMPT"
+        ][0]
+        joined = " ".join(item["warnings"])
+        self.assertIn("version", joined)
+        self.assertIn("model", joined)
 
         status, result = self._post(
             "/api/prompts/revert", {"language": "zh", "id": "SYSTEM_PROMPT"}

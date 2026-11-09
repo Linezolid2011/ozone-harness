@@ -27,6 +27,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Sequence
 
+from . import version as harness_version
 from .config import Settings
 from .llm_types import (
     Message,
@@ -90,6 +91,8 @@ def build_system_message(
     变得慢的放前面，缓存前缀才长。
     """
     content = bundle().SYSTEM_PROMPT.format(
+        version=harness_version(),
+        model=settings.model,
         memory_text=memory_text,
         vault_text=vault_text or bundle().VAULT_EMPTY_PROMPT,
         web_tools_text=web_tools or web_tools_text(enabled=False, search_available=False),

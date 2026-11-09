@@ -641,7 +641,7 @@ MESSAGES: dict[str, str] = {
     "ui.prompts.tools.dream.title": "整理 agent 的工具",
     "ui.prompts.tools.dream.note": "只有后台整理能拿到这些。对话里永远看不到它们。",
     # 每条提示词"什么时候出现"（key 里的名字就是条目 id）
-    "ui.prompts.item.SYSTEM_PROMPT.when": "一轮对话的第一条 system 消息，每次请求都发",
+    "ui.prompts.item.SYSTEM_PROMPT.when": "一轮对话的第一条 system 消息，每次请求都发；开头自报 harness 版本与当前驱动模型（ADR-115）",
     "ui.prompts.item.VAULT_PROMPT.when": "背景档案已经有 README 时，填进系统提示里的档案那一段",
     "ui.prompts.item.VAULT_EMPTY_PROMPT.when": "还没有任何档案时顶替上一句（如实告诉模型现在没有档案）",
     "ui.prompts.item.VAULT_NO_README_PROMPT.when": "有档案、但 README 还没写出来时的顶替句",
@@ -717,6 +717,12 @@ MESSAGES: dict[str, str] = {
     "ui.toolconfig.error.unknown": "不认识的工具名：{name}",
     "ui.toolconfig.error.duplicate": "工具名重复：{name}",
     "ui.toolconfig.error.write_failed": "写入后复读校验失败，请重试",
+    # 分组显示名（ADR-115）：组 id 定义在随 harness 发布的 tool_groups.json，
+    # 这里是 id → 显示名 的那一层。id 本身不翻译（稳定契约）。
+    "ui.toolconfig.groups.memory": "记忆",
+    "ui.toolconfig.groups.dream": "Dream",
+    "ui.toolconfig.groups.web": "联网",
+    "ui.toolconfig.groups.general": "通用",
     # 弹窗里每个工具的名字与一句话说明（GET /api/tools/config 按当前语言返回）。
     "ui.toolconfig.names.mem_create": "新建记忆",
     "ui.toolconfig.hints.mem_create": "把用户明确要求记住的事实写入长期记忆",

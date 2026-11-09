@@ -121,6 +121,7 @@ from .reset import UnsafeDataDirError, perform_reset, preview_reset
 from .runtime import Runtime, provider_store, resolve_dream_provider, resolve_provider
 from .session_ids import SESSION_ID_PATTERN, session_log_path
 from .tool_config import CHAT_TOOLS, ToolConfigError, ToolConfigStore
+from .tool_groups import load_groups
 from .venv_setup import SetupError, VenvSetupManager
 from .vault import (
     GENERATED_RELS,
@@ -570,18 +571,30 @@ def build_tool_config_view(settings: Settings, session_id: str = "") -> dict[str
     """
     store = ToolConfigStore(settings.data_dir)
     web = tool_store(settings).web()
+    labels = {
+        name: {
+            "name": name,
+            "label": _t(f"ui.toolconfig.names.{name}"),
+            "hint": _t(f"ui.toolconfig.hints.{name}"),
+        }
+        for name in CHAT_TOOLS
+    }
+    groups = [
+        {
+            "id": group.id,
+            "label": _t(f"ui.toolconfig.groups.{group.id}"),
+            "tools": [labels[name] for name in group.tools],
+        }
+        for group in load_groups()
+    ]
     return {
         # None = 文件缺失/损坏；前端回退为"全部启用"（与 ensure_default 的行为一致）
         "default": store.read_default(),
         "session": store.read_session(session_id) if session_id else None,
-        "all": [
-            {
-                "name": name,
-                "label": _t(f"ui.toolconfig.names.{name}"),
-                "hint": _t(f"ui.toolconfig.hints.{name}"),
-            }
-            for name in CHAT_TOOLS
-        ],
+        # all 是扁平名单（旧前端兼容）；groups 是按 tool_groups.json 分好的
+        # 折叠分组（ADR-115），组显示名按当前语言取。
+        "all": [labels[name] for name in CHAT_TOOLS],
+        "groups": groups,
         "web_enabled": web.enabled,
         "web_search_available": web.search_available,
     }

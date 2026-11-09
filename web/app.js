@@ -44,6 +44,8 @@ const state = {
   toolEnabled: null,
   toolDefault: null,
   toolAll: null,
+  // 工具折叠分组（ADR-115）：最近一次 GET /api/tools/config 的 groups 字段。
+  toolGroups: null,
   // 弹窗工作副本（null = 关着）：打开时 GET 同步进来，关闭时有改动才 POST 回去。
   toolcfg: null,
   // 会话级「多模态」开关（契约 §13）：**默认开**。开 = 图片本身随请求发给模型；
@@ -753,6 +755,9 @@ async function loadToolConfig() {
     ? `?session=${encodeURIComponent(state.sessionId)}` : '';
   const data = await getJSON(`/api/tools/config${sessionPart}`);
   state.toolAll = data.all || state.toolAll;
+  // 折叠分组（ADR-115）：来自随 harness 发布的 tool_groups.json，经后端按
+  // 当前语言附上组名。旧后端没这个字段时回退扁平名单，弹窗照样能用。
+  state.toolGroups = data.groups || null;
   if (data.default) state.toolDefault = data.default;
   if (state.sessionId) {
     state.toolEnabled = data.session || data.default || state.toolEnabled;
@@ -824,6 +829,47 @@ function renderToolConfigCount() {
     { n: cfg.enabled.size, total: cfg.all.length });
 }
 
+/* 一个工具行：复选框 + 显示名 + 内部名 + 一句话说明。
+   分组渲染与扁平渲染（旧后端回退）共用这一条，行的行为只有一个落点。 */
+function toolConfigRow(item, cfg) {
+  const row = document.createElement('label');
+  row.className = 'toolcfg-item';
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = cfg.enabled.has(item.name);
+  box.dataset.tool = item.name;
+  box.onchange = () => {
+    if (box.checked) cfg.enabled.add(item.name);
+    else cfg.enabled.delete(item.name);
+    cfg.dirty = [...cfg.enabled].sort().join() !== cfg.baseline.join();
+    renderToolConfigCount();
+    // 勾一下可能改变了某个分组的 n/total —— 头部计数跟着重画
+    if (cfg.groups) renderToolConfigPopup();
+  };
+  const text = document.createElement('span');
+  const nameEl = document.createElement('span');
+  nameEl.className = 'toolcfg-name';
+  nameEl.textContent = item.label || item.name;
+  const idEl = document.createElement('span');
+  idEl.className = 'toolcfg-id';
+  idEl.textContent = ` ${item.name}`;
+  const hintEl = document.createElement('span');
+  hintEl.className = 'toolcfg-hint';
+  hintEl.textContent = item.hint || '';
+  text.appendChild(nameEl);
+  text.appendChild(idEl);
+  text.appendChild(hintEl);
+  row.appendChild(box);
+  row.appendChild(text);
+  return row;
+}
+
+function matchesToolFilter(item, filter) {
+  return !filter
+    || item.name.toLowerCase().includes(filter)
+    || (item.label || '').toLowerCase().includes(filter);
+}
+
 function renderToolConfigPopup() {
   const cfg = state.toolcfg;
   if (!cfg) return;
@@ -835,39 +881,53 @@ function renderToolConfigPopup() {
   const list = $('toolcfg-list');
   clearNode(list);
   let shown = 0;
-  for (const item of cfg.all) {
-    if (filter && !item.name.toLowerCase().includes(filter)
-        && !(item.label || '').toLowerCase().includes(filter)) continue;
-    shown += 1;
-    const row = document.createElement('label');
-    row.className = 'toolcfg-item';
-    const box = document.createElement('input');
-    box.type = 'checkbox';
-    box.checked = cfg.enabled.has(item.name);
-    box.dataset.tool = item.name;
-    box.onchange = () => {
-      if (box.checked) cfg.enabled.add(item.name);
-      else cfg.enabled.delete(item.name);
-      cfg.dirty = [...cfg.enabled].sort().join() !== cfg.baseline.join();
-      renderToolConfigCount();
-    };
-    const text = document.createElement('span');
-    const nameEl = document.createElement('span');
-    nameEl.className = 'toolcfg-name';
-    nameEl.textContent = item.label || item.name;
-    const idEl = document.createElement('span');
-    idEl.className = 'toolcfg-id';
-    idEl.textContent = ` ${item.name}`;
-    const hintEl = document.createElement('span');
-    hintEl.className = 'toolcfg-hint';
-    hintEl.textContent = item.hint || '';
-    text.appendChild(nameEl);
-    text.appendChild(idEl);
-    text.appendChild(hintEl);
-    row.appendChild(box);
-    row.appendChild(text);
-    list.appendChild(row);
+
+  if (cfg.groups && cfg.groups.length) {
+    /* 分组渲染（ADR-115）：组默认折叠；正在搜索时强制全部展开 ——
+       否则"搜到了但折着"等于没搜到。组头点击开合，只动 openGroups
+       这一份状态，不碰勾选。 */
+    for (const group of cfg.groups) {
+      const visible = group.tools.filter((item) => matchesToolFilter(item, filter));
+      if (!visible.length) continue;
+      shown += visible.length;
+      const open = filter ? true : cfg.openGroups.has(group.id);
+      const totalOn = group.tools.filter((item) => cfg.enabled.has(item.name)).length;
+      const head = document.createElement('button');
+      head.type = 'button';
+      head.className = 'toolcfg-group-head';
+      const chev = document.createElement('span');
+      chev.className = 'toolcfg-chev';
+      chev.textContent = open ? '▾' : '▸';
+      const label = document.createElement('span');
+      label.className = 'toolcfg-group-label';
+      label.textContent = group.label || group.id;
+      const count = document.createElement('span');
+      count.className = 'toolcfg-group-count';
+      count.textContent = `${totalOn}/${group.tools.length}`;
+      head.appendChild(chev);
+      head.appendChild(label);
+      head.appendChild(count);
+      head.onclick = () => {
+        if (cfg.openGroups.has(group.id)) cfg.openGroups.delete(group.id);
+        else cfg.openGroups.add(group.id);
+        renderToolConfigPopup();
+      };
+      list.appendChild(head);
+      if (open) {
+        const body = document.createElement('div');
+        body.className = 'toolcfg-group-body';
+        for (const item of visible) body.appendChild(toolConfigRow(item, cfg));
+        list.appendChild(body);
+      }
+    }
+  } else {
+    for (const item of cfg.all) {
+      if (!matchesToolFilter(item, filter)) continue;
+      shown += 1;
+      list.appendChild(toolConfigRow(item, cfg));
+    }
   }
+
   if (!shown) {
     const empty = document.createElement('div');
     empty.className = 'toolcfg-empty';
@@ -890,11 +950,13 @@ async function openToolConfig() {
   const base = currentToolBase() || [];
   state.toolcfg = {
     all: state.toolAll || [],
+    groups: state.toolGroups || null,
     enabled: new Set(base),
     baseline: [...base].sort(),
     target: state.sessionId ? 'session' : 'default',
     dirty: false,
     filter: '',
+    openGroups: new Set(),   // 折叠分组（ADR-115）：默认全折，点开哪个记哪个
   };
   $('toolcfg-search').value = '';
   renderToolConfigPopup();

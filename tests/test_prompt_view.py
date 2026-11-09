@@ -293,11 +293,12 @@ class PromptCompletenessTests(unittest.TestCase):
     def test_placeholders_are_extracted_in_order(self) -> None:
         data = describe_prompts(self.settings)
         by_id = {item["id"]: item for group in data["groups"] for item in group["items"]}
-        # 顺序 = **在原文里出现的顺序**（三个坑的先后就是 system 提示里的先后：
-        # 联网 → 档案 → 记忆条目，与 ADR-012/044/056 的"稳定在前"一致）
+        # 顺序 = **在原文里出现的顺序**。开头自报家门的 version/model（ADR-115）
+        # 在最前；三个坑的先后就是 system 提示里的先后：联网 → 档案 → 记忆条目，
+        # 与 ADR-012/044/056 的"稳定在前"一致。
         self.assertEqual(
             by_id["SYSTEM_PROMPT"]["placeholders"],
-            ["web_tools_text", "vault_text", "memory_text"],
+            ["version", "model", "web_tools_text", "vault_text", "memory_text"],
         )
         self.assertEqual(by_id["TAIL_NOW"]["placeholders"], ["stamp", "weekday", "offset"])
         # 没有占位符的那些应当是空列表，而不是 None

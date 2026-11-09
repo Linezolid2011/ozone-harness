@@ -734,7 +734,7 @@ MESSAGES: dict[str, str] = {
         "Only background consolidation gets these. A conversation never sees them."
     ),
     # When each prompt appears (the name inside the key is the item id)
-    "ui.prompts.item.SYSTEM_PROMPT.when": "first system message of a chat turn; sent with every request",
+    "ui.prompts.item.SYSTEM_PROMPT.when": "first system message of a chat turn; sent with every request; opens by naming the harness version and the driving model (ADR-115)",
     "ui.prompts.item.VAULT_PROMPT.when": "fills the archive slot of the system prompt once a README exists",
     "ui.prompts.item.VAULT_EMPTY_PROMPT.when": "stands in for the line above while there are no archives yet (tells the model so honestly)",
     "ui.prompts.item.VAULT_NO_README_PROMPT.when": "stand-in used when archives exist but no README has been written yet",
@@ -822,6 +822,12 @@ MESSAGES: dict[str, str] = {
     "ui.toolconfig.error.unknown": "unknown tool name: {name}",
     "ui.toolconfig.error.duplicate": "duplicate tool name: {name}",
     "ui.toolconfig.error.write_failed": "re-reading the written config failed validation; please retry",
+    # Group display names (ADR-115): group ids are defined in the shipped
+    # tool_groups.json; this is the id -> label layer. Ids themselves are not translated.
+    "ui.toolconfig.groups.memory": "Memory",
+    "ui.toolconfig.groups.dream": "Dream",
+    "ui.toolconfig.groups.web": "Web",
+    "ui.toolconfig.groups.general": "General",
     # Per-tool name + one-line hint for the picker popup
     # (GET /api/tools/config returns these in the current language).
     "ui.toolconfig.names.mem_create": "Create memory",

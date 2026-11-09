@@ -118,6 +118,26 @@ class GetConfigTests(ToolConfigWebCase):
         self.assertFalse((self.settings.data_dir / "tool_config.json").exists())
         self.assertFalse((self.settings.data_dir / "tool_config").exists())
 
+    def test_get_groups_partition_all_tools(self) -> None:
+        """ADR-115：groups 按 tool_groups.json 返回，组带本地化显示名，
+        组内工具恰好划分全工具名单（不重复、不遗漏）。"""
+        from harness.tool_groups import load_groups
+
+        status, body = self._get("/api/tools/config")
+        self.assertEqual(status, 200)
+        groups = body["groups"]
+        expected = [(g.id, list(g.tools)) for g in load_groups(quiet=True)]
+        actual = [
+            (group["id"], [item["name"] for item in group["tools"]])
+            for group in groups
+        ]
+        self.assertEqual(actual, expected)
+        for group in groups:
+            self.assertTrue(group["label"], f"组 {group['id']} 缺显示名")
+            for item in group["tools"]:
+                self.assertTrue(item["label"])
+                self.assertTrue(item["hint"])
+
     def test_get_with_session_is_read_only(self) -> None:
         status, body = self._get("/api/tools/config?session=ghost-session")
         self.assertEqual(status, 200)

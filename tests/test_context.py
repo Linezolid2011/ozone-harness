@@ -48,6 +48,24 @@ class SystemMessageTests(unittest.TestCase):
         # 放进去等于每跨一分钟就把那些内容的缓存全部作废（命中价是未命中的 1/50）。
         self.assertNotIn("当前时间", message.content)
 
+    def test_identity_line_names_harness_version_and_model(self) -> None:
+        """ADR-115：system 开头自报家门 —— harness 版本 + 驱动模型。
+
+        模型问"你是谁/你在哪运行"时该答得上来；占位符必须真的被填掉，
+        漏填（"{version}" 原样出现在正文里）就是这条测试存在的理由。
+        """
+        from harness import version
+
+        chosen = "some-model-id-42"
+        message = build_system_message(
+            test_settings(Path(self._tmp.name), model=chosen),
+            "",
+        )
+        self.assertIn(version(), message.content)
+        self.assertIn(chosen, message.content)
+        self.assertNotIn("{version}", message.content)
+        self.assertNotIn("{model}", message.content)
+
     def test_time_is_the_last_message(self) -> None:
         now = datetime(2026, 10, 4, 21, 0, tzinfo=timezone.utc)
         messages, _ = build_messages(

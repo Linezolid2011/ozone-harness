@@ -7541,12 +7541,21 @@ const TOOLCFG_ALL = [
   { name: 'web_search', label: '联网搜索', hint: '用搜索引擎自己找资料' },
 ];
 
-await scenario('工具配置弹窗（ADR-114）：打开 GET 回填 / 搜索过滤 / 关闭 POST 同步', async () => {
+/* ADR-115 的折叠分组夹具：组 id / 显示名 / 成员照抄 GET /api/tools/config 的 groups 字段。 */
+const TOOLCFG_GROUPS = [
+  { id: 'memory', label: '记忆', tools: TOOLCFG_ALL.filter((i) => i.name.startsWith('mem_')) },
+  { id: 'dream', label: 'Dream', tools: TOOLCFG_ALL.filter((i) => i.name.startsWith('dream_')) },
+  { id: 'web', label: '联网', tools: TOOLCFG_ALL.filter((i) => i.name.startsWith('web_')) },
+  { id: 'general', label: '通用', tools: TOOLCFG_ALL.filter((i) => i.name === 'time') },
+];
+
+await scenario('工具配置弹窗（ADR-114/115）：分组折叠 / 打开回填 / 搜索过滤 / 关闭 POST 同步', async () => {
   app.setLanguageNow('zh');
   app.state.sessionId = 's-toolcfg';
   app.state.toolEnabled = null;
   app.state.toolDefault = null;
   app.state.toolAll = null;
+  app.state.toolGroups = null;
   posts = {
     '/api/tools/config': (payload) => ({ status: 200, body: { ok: true, tools: payload.tools } }),
   };
@@ -7558,6 +7567,7 @@ await scenario('工具配置弹窗（ADR-114）：打开 GET 回填 / 搜索过�
           default: ['mem_create', 'mem_del', 'time'],
           session: ['mem_create', 'time'],
           all: TOOLCFG_ALL,
+          groups: TOOLCFG_GROUPS,
           web_enabled: true,
           web_search_available: true,
         },
@@ -7567,31 +7577,46 @@ await scenario('工具配置弹窗（ADR-114）：打开 GET 回填 / 搜索过�
   };
   await app.openToolConfig();
   const rows = () => shell('toolcfg-list').children;
-  const boxOf = (name) => rows().map((row) => row.children[0]).find((box) => box.dataset.tool === name);
+  const heads = () => rows().filter((row) => row.classList.contains('toolcfg-group-head'));
+  const bodies = () => rows().filter((row) => row.classList.contains('toolcfg-group-body'));
+  const boxes = () => bodies().flatMap((body) => body.children.map((row) => row.children[0]));
+  const boxOf = (name) => boxes().find((box) => box.dataset.tool === name);
   check('打开即 GET 同步：弹窗可见、标题说的是**当前会话**', () => {
     assert.equal(shell('toolcfg').classList.contains('hidden'), false);
     assert.ok(shell('toolcfg-title').textContent.includes('这个会话'));
     assert.ok(shell('toolcfg-target').textContent.includes('当前会话'));
   });
-  check('按会话配置回填勾选（mem_create + time），其余不勾', () => {
-    assert.equal(rows().length, TOOLCFG_ALL.length);
-    const checked = rows().map((row) => row.children[0]).filter((box) => box.checked)
-      .map((box) => box.dataset.tool);
-    assert.deepEqual(checked.sort(), ['mem_create', 'time']);
+  check('分组：四个组头（记忆/Dream/联网/通用），默认全部折叠，组头带 n/total', () => {
+    assert.equal(heads().length, 4);
+    assert.equal(bodies().length, 0, '默认折叠 = 一个组体都不渲染');
+    const text = (i) => heads()[i].textContent;
+    assert.ok(text(0).includes('记忆') && text(0).includes('1/3'), text(0));
+    assert.ok(text(1).includes('Dream') && text(1).includes('0/7'), text(1));
+    assert.ok(text(2).includes('联网') && text(2).includes('0/2'), text(2));
+    assert.ok(text(3).includes('通用') && text(3).includes('1/1'), text(3));
   });
-  check('计数行显示 n/total', () => {
+  heads()[0].onclick();
+  check('点组头展开：记忆组体出现，按会话配置回填勾选（mem_create 勾、其余不勾）', () => {
+    assert.equal(bodies().length, 1);
+    const checked = boxes().filter((box) => box.checked).map((box) => box.dataset.tool);
+    assert.deepEqual(checked, ['mem_create']);
+  });
+  check('计数行显示全局 n/total', () => {
     assert.ok(shell('toolcfg-count').textContent.includes('2/13'), shell('toolcfg-count').textContent);
   });
 
   app.state.toolcfg.filter = 'web';
   app.renderToolConfigPopup();
-  check('搜索框按名字过滤（web → 两个联网工具）', () => {
-    assert.equal(rows().length, 2);
+  check('搜索时强制展开：只剩联网组、组体里两个工具', () => {
+    assert.equal(heads().length, 1);
+    assert.equal(bodies().length, 1);
+    assert.equal(boxes().length, 2);
   });
   app.state.toolcfg.filter = '记忆';
   app.renderToolConfigPopup();
   check('搜索也命中中文显示名（记忆 → 记忆三件套）', () => {
-    assert.equal(rows().length, 3);
+    assert.equal(heads().length, 1);
+    assert.equal(boxes().length, 3);
   });
   app.state.toolcfg.filter = 'zzzz';
   app.renderToolConfigPopup();
@@ -7602,13 +7627,17 @@ await scenario('工具配置弹窗（ADR-114）：打开 GET 回填 / 搜索过�
 
   app.state.toolcfg.filter = '';
   app.renderToolConfigPopup();
+  // 记忆组上一步点开过、openGroups 还在（搜索的强制展开只是渲染态）——直接勾。
   boxOf('mem_edit').checked = true;
   boxOf('mem_edit').onchange();
+  heads()[3].onclick();   // 展开通用组
   boxOf('time').checked = false;
   boxOf('time').onchange();
-  check('勾选/取消只改工作副本，还没发请求', () => {
+  check('勾选/取消只改工作副本，还没发请求；组头计数跟着动', () => {
     assert.equal(sends.filter((entry) => entry.url === '/api/tools/config').length, 0);
     assert.equal(app.state.toolcfg.dirty, true);
+    assert.ok(heads().find((h) => h.textContent.includes('记忆')).textContent.includes('2/3'));
+    assert.ok(heads().find((h) => h.textContent.includes('通用')).textContent.includes('0/1'));
   });
   await app.closeToolConfig();
   check('关闭（有改动）POST 回 /api/tools/config：带 session_id、名单是改后形状', () => {

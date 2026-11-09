@@ -56,6 +56,7 @@ harness/
   venv_setup.py     start.cmd 引导门：完整性探针、事务安装、暂停/取消与恢复
   cli.py            命令行入口
   tool_config.py    工具配置文件：默认一份 + 每会话一份，出生复制、此后只听自己（ADR-114）
+  tool_groups.json/.py 工具分组树（shipped，ADR-115）：组 id 稳定、显示名走 i18n、恰好划分 CHAT_TOOLS
   i18n.py / prompts/  zh/en 两套文案与长提示词（**成对**，守卫会查键集一致）
   atomic_io.py      原子写（临时文件 + os.replace）
 web/                index.html / style.css / app.js（无构建、无框架）
@@ -89,6 +90,9 @@ scripts/ui_check/   前端自检（自写 DOM stub 跑真 app.js）、截图、�
 * **工具配置只在出生那一刻复制默认**（ADR-114）：`data/tool_config/<会话>.json`
   是会话的唯一真相来源，默认配置改动人已出生的会话；配置文件只存启用的工具名，
   读接口（GET）一律不建文件，保存/出生才写。
+* **工具分组树随 harness 发布**（ADR-115）：`harness/tool_groups.json` 的组 id 是
+  稳定契约（i18n 键、前端状态都引用它），`tools` 必须恰好划分 CHAT_TOOLS；
+  改组 = 改文件 + 内置默认 + 测试三处一起动。
 * **pywebview 外壳可退且不静默**（ADR-112）：没装 / 装了起不来都退浏览器标签页并
   明说；窗口关了 = 服务退出。外壳失败绝不能让服务起不来。
 

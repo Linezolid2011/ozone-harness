@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "comment": "对话工具的固定分组树：弹窗按这里渲染折叠分组。组 id 是稳定契约（i18n 键 ui.toolconfig.groups.<id>），显示名不写在文件里—— shipped 文件保持语言中立，社区工具插件加组时沿用同一形状。tools 必须恰好划分 CHAT_TOOLS（tests/test_tool_groups.py 钉住这个一致性）。",
+  "groups": [
+    { "id": "memory", "tools": ["mem_create", "mem_edit", "mem_del"] },
+    {
+      "id": "dream",
+      "tools": [
+        "dream_list",
+        "dream_read",
+        "dream_search",
+        "dream_create",
+        "dream_edit",
+        "dream_mkdir",
+        "dream_delete"
+      ]
+    },
+    { "id": "web", "tools": ["web_open_url", "web_search"] },
+    { "id": "general", "tools": ["time"] }
+  ]
+}
