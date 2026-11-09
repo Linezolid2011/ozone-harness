@@ -29,6 +29,7 @@ from .providers.store import (
     resolve_settings,
 )
 from .session_ids import session_log_path, validate_session_id
+from .tool_config import ToolConfigStore
 from .tools.memory_tools import MemCreateTool, MemDeleteTool, MemEditTool
 from .tools.registry import ToolRegistry
 from .tools.time_tool import TimeTool
@@ -223,7 +224,6 @@ class Runtime:
         provider: LLMProvider | None = None,
         generation: GenerationChoice | None = None,
         web: bool = True,
-        web_search: bool = False,
     ) -> None:
         # 在打开 SQLite / 工具设置之前拒绝坏 id：非法输入不应产生任何磁盘副作用。
         # open_session() 还会再校验一次，覆盖运行中切换会话的调用。
@@ -240,10 +240,13 @@ class Runtime:
         )
         self.generation = generation
         self._web_enabled = web
-        # 会话级的"联网搜索"开关（默认关）。
-        # **它只管 web_search**：web_open_url 是"读用户递过来的东西"，
-        # 不该因为用户没开搜索就用不了。
-        self.web_search_on = bool(web_search)
+        # 工具配置文件（ADR-114）：每个会话一份，出生时从默认配置复制，
+        # 此后这个会话只听自己的配置。ensure_session 在 open_session 里做
+        # （那才是"会话出生"的确切时刻：第一次装配、第一次 API 调用之前）。
+        self.tool_configs = ToolConfigStore(settings.data_dir)
+        # 「联网搜索」开关现在是配置里的一个工具名（web_search ∈ 会话配置），
+        # 不再是独立的布尔参数 —— 模型能看到哪些工具，唯一由配置文件决定。
+        self.web_search_on = False
         # 上限是**运行期可改**的（data/memory.json），所以只能从这里拿 ——
         # 自己拼 max_items=settings.memory_limit 会在用户改过上限之后失效（ADR-057）。
         self.memory = open_memory(settings)
@@ -262,53 +265,12 @@ class Runtime:
                 name_max_chars=settings.vault_name_max_chars,
                 readme_token_budget=settings.vault_readme_token_budget,
             )
-            # README 是否注入仍取决于有没有真档案；但工具始终注册，模型才能在
-            # 空 vault 里创建第一份档案。只有写操作会落盘，注册本身零副作用。
+            # README 是否注入仍取决于有没有真档案；但工具对象始终构造，
+            # 模型才能在空 vault 里创建第一份档案。只有写操作会落盘。
             self.vault_available = False
             self.vault_text = ""
             self._refresh_vault_text()
             self.registry = ToolRegistry(max_result_chars=settings.max_tool_result_chars)
-            for tool in (
-                MemCreateTool(self.memory),
-                MemEditTool(self.memory),
-                MemDeleteTool(self.memory),
-                # 时间工具无条件注册：只读、不花钱、无依赖，随时能告诉模型"现在几点"。
-                # 时区是运行期可改的设置（「设置 → 常规」），改完下一轮对话就生效。
-                TimeTool(offset_hours=timezone_for(settings.data_dir)),
-            ):
-                self.registry.register(tool)
-            for tool in (
-                VaultListTool(
-                    self.vault, max_result_chars=settings.max_tool_result_chars
-                ),
-                VaultReadTool(
-                    self.vault, max_result_chars=settings.max_tool_result_chars
-                ),
-                VaultSearchTool(
-                    self.vault, max_result_chars=settings.max_tool_result_chars
-                ),
-                *build_session_vault_edit_tools(self.vault),
-            ):
-                self.registry.register(tool)
-            # 联网工具只给**对话** agent。dream 是离线巩固，让它上网既没必要也更危险
-            # （它会拿着网页内容去改写记忆库）。
-            #
-            # 这里按"这个会话开没开搜索"决定注册哪些工具：
-            # 没开搜索时模型**连工具定义都看不到** —— 比只在提示里劝阻靠得住。
-            if web:
-                if self.web_search_on and self.web_config.search_available:
-                    self.registry.register(WebSearchTool(self.web_config))
-                if self.web_config.enabled:
-                    # 把"工具结果的通用上限"显式传进去：抓取正文的有效上限是
-                    # min(工具设置里的 max_fetch_chars, 这个值)。
-                    # 早先两者各说各话 —— 设置里写 8000，实际被 2000 静默砍掉，
-                    # 模型既看不到原因，界面上的数字也是假的。
-                    self.registry.register(
-                        WebOpenUrlTool(
-                            self.web_config,
-                            max_result_chars=settings.max_tool_result_chars,
-                        )
-                    )
             self.provider = provider or OpenAICompatProvider(
                 self.settings,
                 label=t("ui.runner.default_label"),
@@ -331,10 +293,59 @@ class Runtime:
         )
         return self.vault_text
 
+    def _build_registry(self, enabled: list[str]) -> None:
+        """按会话配置装配注册表：配置里**有的**才注册（ADR-114）。
+
+        配置是"允许名单"，实际注册还受环境约束（联网工具要依赖齐、全局开关开），
+        即"配置 ∩ 实际可用"：配置允许 web_search 但这台机器没装 httpx 时，
+        工具就是不出现 —— 那是环境事实，不是配置错误。
+        配置里的名字不可能落到模型手上：未注册的工具调进来会拿到
+        "未知工具 + available_tools" 的结果，模型自己就会纠正。
+        """
+        settings = self.settings
+        enabled_set = set(enabled)
+        registry = ToolRegistry(max_result_chars=settings.max_tool_result_chars)
+        candidates = [
+            MemCreateTool(self.memory),
+            MemEditTool(self.memory),
+            MemDeleteTool(self.memory),
+            # 时间工具只读、不花钱、无依赖，但是否给模型仍由配置决定 ——
+            # 一视同仁，不开"有些工具不可禁"的特例口子。
+            TimeTool(offset_hours=timezone_for(settings.data_dir)),
+            VaultListTool(self.vault, max_result_chars=settings.max_tool_result_chars),
+            VaultReadTool(self.vault, max_result_chars=settings.max_tool_result_chars),
+            VaultSearchTool(self.vault, max_result_chars=settings.max_tool_result_chars),
+            *build_session_vault_edit_tools(self.vault),
+        ]
+        # 联网工具只给**对话** agent（dream 是离线巩固）。构造条件不变
+        # （全局开关 / 搜索后端可用是环境事实），注册与否交给配置名单。
+        if self._web_enabled:
+            if self.web_config.search_available:
+                candidates.append(WebSearchTool(self.web_config))
+            if self.web_config.enabled:
+                # 把"工具结果的通用上限"显式传进去：抓取正文的有效上限是
+                # min(工具设置里的 max_fetch_chars, 这个值)。
+                candidates.append(
+                    WebOpenUrlTool(
+                        self.web_config,
+                        max_result_chars=settings.max_tool_result_chars,
+                    )
+                )
+        for tool in candidates:
+            if tool.name in enabled_set:
+                registry.register(tool)
+        self.registry = registry
+        # 「联网搜索」提示文本的开关 = 这个工具真的注册给了模型（配置 ∩ 可用）。
+        self.web_search_on = "web_search" in registry.names()
+
     def open_session(self, session_id: str | None = None) -> None:
         candidate_id = new_session_id() if session_id is None else session_id
         # 必须先于关闭旧日志和 EventLog 构造完成校验；坏 id 不能拼路径或碰磁盘。
         path = session_log_path(self.settings.sessions_dir, candidate_id)
+        # 会话出生：第一次装配时把默认配置逐字复制成会话配置（ADR-114）。
+        # 此后这个会话只听自己的配置文件，默认配置怎么改都与它无关。
+        enabled = self.tool_configs.ensure_session(candidate_id)
+        self._build_registry(enabled)
         if self.log is not None:
             self.log.close()
         self.session_id = candidate_id

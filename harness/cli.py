@@ -32,6 +32,7 @@ from .memory import open_memory
 from .memory_limit import MEMORY_FILE, MemoryLimitStore
 from .providers.base import ProviderError
 from .providers.store import fetch_models
+from .tool_config import ToolConfigStore
 from .runtime import (
     NO_PROVIDER_HELP,
     Runtime,
@@ -1354,6 +1355,15 @@ def main(argv: list[str] | None = None) -> int:
     # （它读 data/providers.json）。这里只处理与显示有关的开关。
     if args.no_thinking:
         settings = replace(settings, show_reasoning=False)
+
+    # 工具配置完整性自检（ADR-114）：CLI 入口与 Web serve 都过这道闸，
+    # 保证"启动时检查"对两种前端成立。修复说明打到终端（静默自愈也是一种
+    # "悄悄降级"，用户至少该知道哪份配置坏过）。
+    for kind, sid in ToolConfigStore(settings.data_dir).check_all(settings.sessions_dir):
+        if kind == "default":
+            emit_line("! 默认工具配置缺失或损坏，已按全部启用重建。", "yellow")
+        else:
+            emit_line(f"! 会话 {sid} 的工具配置缺失或损坏，已从默认配置重建。", "yellow")
 
     renderer = ConsoleRenderer(settings, show_prompt=args.show_prompt)
 

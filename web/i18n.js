@@ -96,6 +96,18 @@ const I18N = {
   "toggle.web.on_title": '这个会话允许模型自己搜索；点击关闭',   // app.js:586
   "toggle.web.off_title": '这个会话不允许模型自己搜索（打开用户给的链接仍然可以）；点击开启',   // app.js:587
   "toast.save_web_failed": `保存联网开关失败：{msg}`,   // app.js:598
+  "toolcfg.button": '工具',   // index.html（顶栏按钮）
+  "toolcfg.title_attr": '配置这个会话允许模型使用哪些工具（没有会话时，编辑的是新会话的默认配置）',   // index.html
+  "toolcfg.title_session": '这个会话可用的工具',   // app.js openToolConfig
+  "toolcfg.title_default": '新会话默认可用的工具',   // app.js openToolConfig
+  "toolcfg.target_session": '正在编辑：当前会话。改动只影响这一个会话。',   // app.js renderToolConfigPopup
+  "toolcfg.target_default": '正在编辑：默认配置。每个新会话出生时会复制这一份。',   // app.js renderToolConfigPopup
+  "toolcfg.search_placeholder": '搜索工具名…',   // index.html
+  "toolcfg.empty": '没有匹配的工具',   // app.js renderToolConfigPopup
+  "toolcfg.close": '完成',   // index.html
+  "toolcfg.enabled_count": '已启用 {n}/{total}',   // app.js renderToolConfigCount
+  "toast.save_toolcfg_failed": `保存工具配置失败：{msg}`,   // app.js closeToolConfig
+  "toast.load_toolcfg_failed": `读取工具配置失败：{msg}`,   // app.js openToolConfig
   "multimodal.badge": '将只发送识别出的文字',   // app.js:612
   "multimodal.ocr_label": '多模态已关 · 只发送了下面的识别文本',   // app.js:615
   "toggle.multimodal.on": '多模态：开',   // app.js:630
@@ -981,6 +993,18 @@ const I18N = {
   "toggle.web.on_title": "This chat lets the model search on its own; click to turn it off",   // app.js:586
   "toggle.web.off_title": "This chat does not let the model search on its own (opening a link you hand it still works); click to turn it on",   // app.js:587
   "toast.save_web_failed": "Failed to save the web switch: {msg}",   // app.js:598
+  "toolcfg.button": "Tools",   // index.html (toolbar button)
+  "toolcfg.title_attr": "Choose which tools the model can use in this chat (with no chat open, edits the default for new chats)",   // index.html
+  "toolcfg.title_session": "Tools available in this chat",   // app.js openToolConfig
+  "toolcfg.title_default": "Tools available in new chats",   // app.js openToolConfig
+  "toolcfg.target_session": "Editing: this chat. Changes apply only here.",   // app.js renderToolConfigPopup
+  "toolcfg.target_default": "Editing: the default config. Every new chat is born as a copy of it.",   // app.js renderToolConfigPopup
+  "toolcfg.search_placeholder": "Search tools…",   // index.html
+  "toolcfg.empty": "No matching tools",   // app.js renderToolConfigPopup
+  "toolcfg.close": "Done",   // index.html
+  "toolcfg.enabled_count": "{n}/{total} enabled",   // app.js renderToolConfigCount
+  "toast.save_toolcfg_failed": "Failed to save tool config: {msg}",   // app.js closeToolConfig
+  "toast.load_toolcfg_failed": "Failed to load tool config: {msg}",   // app.js openToolConfig
   "multimodal.badge": "Only the recognised text will be sent",   // app.js:612
   "multimodal.ocr_label": "Multimodal is off · only the recognised text below was sent",   // app.js:615
   "toggle.multimodal.on": "Multimodal: on",   // app.js:630

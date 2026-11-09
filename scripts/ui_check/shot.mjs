@@ -228,8 +228,10 @@ async function waitFor(expression, timeoutMs = 15000, label = expression) {
   throw new Error(`等不到：${label}（最后一次结果：${JSON.stringify(last)}）`);
 }
 
-async function shot(name, dir = OUT) {
-  const result = await send('Page.captureScreenshot', { format: 'png' });
+async function shot(name, dir = OUT, clip = null) {
+  const params = { format: 'png' };
+  if (clip) params.clip = { x: clip.x, y: clip.y, width: clip.width, height: clip.height, scale: 1 };
+  const result = await send('Page.captureScreenshot', params);
   const file = path.join(dir, `${name}.png`);
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, Buffer.from(result.data, 'base64'));
@@ -530,6 +532,37 @@ async function captureFixtureShots(dataDir) {
       await verifyStatsBar(language);
       await sleep(300);
       await shot(`chat-attachments${suffix}`, DOCS_OUT);
+
+      // ⑧ 工具条小图（docs/09-web-tools.md 引用的 chat-web-toggle.png）。
+      // 只拍中文那一遍：旧图就是中文小条。拍之前先断言形状 —— 「工具」按钮
+      //（ADR-114）必须在条上，联网/多模态两个开关的文字也必须在；
+      // 断言不过就不写文件，免得一张空条图混进文档（ADR-073 的规矩）。
+      if (!suffix) {
+        const bar = await evaluate(`(() => {
+          const right = document.querySelector('.topbar-right');
+          const text = (id) => {
+            const el = document.getElementById(id);
+            return el ? el.textContent.replace(/\\s+/g, ' ').trim() : null;
+          };
+          return {
+            rect: right ? right.getBoundingClientRect().toJSON() : null,
+            toolsBtn: text('btn-toolcfg'),
+            webToggle: text('toggle-web-search'),
+            multimodalToggle: text('toggle-multimodal'),
+          };
+        })()`);
+        if (!bar.rect || !bar.toolsBtn || !/联网搜索/.test(bar.webToggle || '')
+            || !/多模态/.test(bar.multimodalToggle || '')) {
+          throw new Error(`工具条形状不对（ADR-114 的「工具」按钮必须在条上）：${JSON.stringify(bar)}`);
+        }
+        await sleep(200);
+        await shot('chat-web-toggle', DOCS_OUT, {
+          x: Math.max(0, bar.rect.x - 8),
+          y: Math.max(0, bar.rect.y - 4),
+          width: bar.rect.width + 16,
+          height: bar.rect.height + 8,
+        });
+      }
 
       // ② OCR 那条：**默认折叠**的样子（契约 §13.7 第 3 句）
       await openFixtureSession(OCR_QUESTION);

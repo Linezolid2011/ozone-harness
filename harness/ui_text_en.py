@@ -813,4 +813,41 @@ MESSAGES: dict[str, str] = {
     "ui.prompts.warn.missing_placeholder": (
         "these placeholders are gone, so their content will no longer be filled in: {names}"
     ),
+    # ── Tool config files (ADR-114) ──────────────────────────
+    # Validation errors: these reach the UI from the save endpoint, so they must be bilingual.
+    "ui.toolconfig.error.not_list": (
+        "tool config must be a JSON array of strings (enabled tool names only)"
+    ),
+    "ui.toolconfig.error.not_string": "every item in tool config must be a string (a tool name)",
+    "ui.toolconfig.error.unknown": "unknown tool name: {name}",
+    "ui.toolconfig.error.duplicate": "duplicate tool name: {name}",
+    "ui.toolconfig.error.write_failed": "re-reading the written config failed validation; please retry",
+    # Per-tool name + one-line hint for the picker popup
+    # (GET /api/tools/config returns these in the current language).
+    "ui.toolconfig.names.mem_create": "Create memory",
+    "ui.toolconfig.hints.mem_create": "write a fact the user explicitly asked to remember into long-term memory",
+    "ui.toolconfig.names.mem_edit": "Edit memory",
+    "ui.toolconfig.hints.mem_edit": "rewrite the content of an existing memory",
+    "ui.toolconfig.names.mem_del": "Delete memory",
+    "ui.toolconfig.hints.mem_del": "truly forget a memory",
+    "ui.toolconfig.names.time": "Current time",
+    "ui.toolconfig.hints.time": "ask for the current date and time",
+    "ui.toolconfig.names.dream_list": "List vault files",
+    "ui.toolconfig.hints.dream_list": "list which files exist in the background archive",
+    "ui.toolconfig.names.dream_read": "Read vault file",
+    "ui.toolconfig.hints.dream_read": "read one background archive file",
+    "ui.toolconfig.names.dream_search": "Search vault",
+    "ui.toolconfig.hints.dream_search": "find archive files by keyword",
+    "ui.toolconfig.names.dream_create": "Create vault file",
+    "ui.toolconfig.hints.dream_create": "create a new Markdown file in the background archive",
+    "ui.toolconfig.names.dream_edit": "Edit vault file",
+    "ui.toolconfig.hints.dream_edit": "rewrite a file in the background archive",
+    "ui.toolconfig.names.dream_mkdir": "Create vault directory",
+    "ui.toolconfig.hints.dream_mkdir": "create a directory in the background archive",
+    "ui.toolconfig.names.dream_delete": "Delete vault file",
+    "ui.toolconfig.hints.dream_delete": "delete a file or directory in the background archive",
+    "ui.toolconfig.names.web_search": "Web search",
+    "ui.toolconfig.hints.web_search": "search the web on its own (gated by the toolbar toggle)",
+    "ui.toolconfig.names.web_open_url": "Open web page",
+    "ui.toolconfig.hints.web_open_url": "read the text of a link the user provided",
 }

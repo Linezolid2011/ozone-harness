@@ -2009,10 +2009,14 @@ class HttpServerTests(unittest.TestCase):
         self.assertEqual(status, 404)
 
     def test_chat_emits_the_tools_frame(self) -> None:
-        """前端靠这一帧确认开关状态（新会话还没落盘，只能这样传）。"""
+        """tools 帧里的 web_search 来自会话配置（ADR-114），不是请求字段。
+
+        默认配置 = 全部启用 → 新会话帧里 web_search 为真；请求里那个旧
+        `web_search` 字段已被忽略（配置是唯一真相来源）。
+        """
         request = urllib.request.Request(
             self.base + "/api/chat",
-            data=json.dumps({"text": "你好", "web_search": True}).encode("utf-8"),
+            data=json.dumps({"text": "你好", "web_search": False}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -2024,6 +2028,26 @@ class HttpServerTests(unittest.TestCase):
             if line.startswith("data: ") and '"web_search"' in line
         ][0]
         self.assertTrue(frame["web_search"])
+
+    def test_chat_tools_frame_follows_session_config(self) -> None:
+        """会话配置里没有 web_search → 帧里就是关（出生前写好的配置被原样采用）。"""
+        from harness.tool_config import CHAT_TOOLS, ToolConfigStore
+
+        enabled = [n for n in CHAT_TOOLS if n not in ("web_search", "web_open_url")]
+        ToolConfigStore(self.settings.data_dir).save_session("s-cfgframe", enabled)
+        request = urllib.request.Request(
+            self.base + "/api/chat",
+            data=json.dumps({"session_id": "s-cfgframe", "text": "你好"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=60) as resp:
+            body = resp.read().decode("utf-8")
+        frame = [
+            json.loads(line[6:]) for line in body.split("\n")
+            if line.startswith("data: ") and '"web_search"' in line
+        ][0]
+        self.assertFalse(frame["web_search"])
 
     def test_errors_after_the_stream_started_become_a_notice_frame(self) -> None:
         """SSE 已经开始之后再抛异常，**不能再写一个 HTTP 500**。

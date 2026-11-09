@@ -120,6 +120,7 @@ from .providers.store import (
 from .reset import UnsafeDataDirError, perform_reset, preview_reset
 from .runtime import Runtime, provider_store, resolve_dream_provider, resolve_provider
 from .session_ids import SESSION_ID_PATTERN, session_log_path
+from .tool_config import CHAT_TOOLS, ToolConfigError, ToolConfigStore
 from .venv_setup import SetupError, VenvSetupManager
 from .vault import (
     GENERATED_RELS,
@@ -515,6 +516,13 @@ def build_session_view(settings: Settings, session_id: str) -> dict[str, Any]:
                 }
             )
     session_switches = session_tools(path)
+    # 启用名单：配置文件优先（它是真相来源）；文件还没有时（老会话从未在新版下
+    # 开过轮）退回事件里的老键。只读 —— 打开会话这一眼**不建文件**。
+    enabled = ToolConfigStore(settings.data_dir).read_session(session_id)
+    if enabled is not None:
+        web_search_enabled = "web_search" in enabled
+    else:
+        web_search_enabled = bool(session_switches.get("web_search", False))
     return {
         "session_id": session_id,
         "messages": messages,
@@ -529,9 +537,12 @@ def build_session_view(settings: Settings, session_id: str) -> dict[str, Any]:
         },
         "generation": _session_generation(path),
         "tools": {
-            "web_search": bool(session_switches.get("web_search", False)),
+            "web_search": web_search_enabled,
             # 缺键 = **开**（契约 §13.1）：老会话沿用上一轮的行为。
             "multimodal": bool(session_switches.get("multimodal", True)),
+            # 会话配置的启用名单（ADR-114）。None = 还没有配置文件
+            # （只读：打开会话这一眼**不建文件**，前端拿到 null 就回退默认配置显示）。
+            "enabled": enabled,
         },
         "title": session_display_title(path),
     }
@@ -548,6 +559,31 @@ def _session_generation(path: Path) -> dict[str, str]:
         "model": str(start.get("model") or ""),
         "effort": str(start.get("reasoning_effort") or ""),
         "label": "",
+    }
+
+
+def build_tool_config_view(settings: Settings, session_id: str = "") -> dict[str, Any]:
+    """`GET /api/tools/config` 的响应体：默认配置 + 可选的会话配置 + 全部工具的展示名。
+
+    **只读，绝不落盘**：default/session 缺失或损坏时返回 None（不是顺手重建），
+    前端拿到 null 就按"全部启用"回退显示 —— 文件只在保存/会话出生那一刻诞生。
+    """
+    store = ToolConfigStore(settings.data_dir)
+    web = tool_store(settings).web()
+    return {
+        # None = 文件缺失/损坏；前端回退为"全部启用"（与 ensure_default 的行为一致）
+        "default": store.read_default(),
+        "session": store.read_session(session_id) if session_id else None,
+        "all": [
+            {
+                "name": name,
+                "label": _t(f"ui.toolconfig.names.{name}"),
+                "hint": _t(f"ui.toolconfig.hints.{name}"),
+            }
+            for name in CHAT_TOOLS
+        ],
+        "web_enabled": web.enabled,
+        "web_search_available": web.search_available,
     }
 
 
@@ -1820,7 +1856,123 @@ class HarnessHandler(BaseHTTPRequestHandler):
             self._send_json(tool_store(settings).public_state())
             return
 
+        if path == "/api/tools/config":
+            # 工具配置（ADR-114）。**只读**：这一步绝不创建/修复任何配置文件
+            # （"看一眼不落盘"是不变量）——缺失时返回 null，由保存那一刻补生。
+            session_id = (query.get("session") or [""])[0]
+            if session_id:
+                if _session_path(settings, session_id) is None:
+                    self._send_json(
+                        {
+                            "error": _t(
+                                "web.error.bad_session_id",
+                                session_id=_short_session_id(session_id),
+                            )
+                        },
+                        400,
+                    )
+                    return
+            self._send_json(build_tool_config_view(settings, session_id))
+            return
+
         self._send_json({"error": _t("web.error.unknown_api", path=path)}, 404)
+
+    def _handle_tool_config(self, payload: dict[str, Any]) -> None:
+        """保存工具配置（ADR-114）：带 session_id 存会话配置，否则存默认配置。
+
+        保存时校验（非法 400，绝不宽容写盘）；写会话配置同时追加一条
+        `session_tools` 审计事件（tools 名单 + 两个老键，老读端不受影响）。
+        """
+        settings = self.settings
+        session_id = str(payload.get("session_id") or "").strip()
+        session_path: Path | None = None
+        if session_id:
+            session_path = _session_path(settings, session_id)
+            if session_path is None:
+                self._send_json(
+                    {
+                        "error": _t(
+                            "web.error.bad_session_id",
+                            session_id=_short_session_id(session_id),
+                        )
+                    },
+                    400,
+                )
+                return
+        store = ToolConfigStore(settings.data_dir)
+        try:
+            if session_id and session_path is not None:
+                saved = store.save_session(session_id, payload.get("tools"))
+            else:
+                saved = store.save_default(payload.get("tools"))
+        except (ToolConfigError, ValueError) as exc:
+            # 校验失败 = 用户显式意图不合法：说清哪里不对，请求里没带下一步
+            self._send_json({"error": str(exc)}, 400)
+            return
+        if session_id and session_path is not None:
+            # 两个老键照常同写（缺一个的话读端会把它当成"没记录过"）；
+            # `tools` 键是新增的完整名单（ADR-114），各键各判各的。
+            latest = session_tools(session_path)
+            web_search = "web_search" in saved
+            multimodal = bool(latest.get("multimodal", True))
+            log = EventLog(session_path, session_id)
+            try:
+                log.append(
+                    "session_tools",
+                    web_search=web_search,
+                    multimodal=multimodal,
+                    tools=saved,
+                )
+            finally:
+                log.close()
+            self._send_json(
+                {"ok": True, "tools": saved, "web_search": web_search, "multimodal": multimodal}
+            )
+            return
+        self._send_json({"ok": True, "tools": saved})
+
+    def _handle_session_tools(
+        self, session_id: str, session_path: Path, payload: dict[str, Any]
+    ) -> None:
+        """旧的会话开关端点：多模态维持事件语义；「联网搜索」改为写工具配置。
+
+        ADR-114 后 web_search 不再是独立布尔 —— 它现在是配置里的两个工具名
+        （web_search + web_open_url 一起开关，用户指定的取向）。这个端点
+        为旧前端/脚本保留：收到 web_search 字段就改配置，其余照旧。
+        """
+        settings = self.settings
+        latest = session_tools(session_path)
+        # 两个键**一条事件一起写**（缺一个的话读端会把它当成"没记录过"，
+        # 默认值就可能与用户刚设的那个不一致）。请求里没送的字段保持原值。
+        if payload.get("multimodal") is None:
+            multimodal = bool(latest.get("multimodal", True))
+        else:
+            multimodal = bool(payload.get("multimodal"))
+        store = ToolConfigStore(settings.data_dir)
+        if payload.get("web_search") is None:
+            # 没要求改搜索：配置保持原样（ensure 只补生缺失的文件，不改内容）
+            enabled = store.ensure_session(session_id)
+        else:
+            wanted = set(store.ensure_session(session_id))
+            if bool(payload.get("web_search")):
+                wanted.update(("web_search", "web_open_url"))
+            else:
+                wanted.difference_update(("web_search", "web_open_url"))
+            enabled = store.save_session(session_id, sorted(wanted))
+        web_search = "web_search" in enabled
+        log = EventLog(session_path, session_id)
+        try:
+            log.append(
+                "session_tools",
+                web_search=web_search,
+                multimodal=multimodal,
+                tools=enabled,
+            )
+        finally:
+            log.close()
+        self._send_json(
+            {"ok": True, "web_search": web_search, "multimodal": multimodal}
+        )
 
     def _handle_vault_write(self, path: str, payload: dict[str, Any]) -> None:
         """界面上的档案新建/编辑/删除（ADR-070）。
@@ -2030,33 +2182,16 @@ class HarnessHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             return
 
+        if path == "/api/tools/config":
+            self._handle_tool_config(payload)
+            return
+
         if path.startswith("/api/sessions/") and path.endswith("/tools"):
             resolved_session = self._session_file(path, "/tools")
             if resolved_session is None:
                 return
             session_id, session_path = resolved_session
-            # 同样是追加一条事件：会话级的工具开关也是历史的一部分
-            latest = session_tools(session_path)
-            # 两个键**一条事件一起写**（缺一个的话读端会把它当成"没记录过"，
-            # 默认值就可能与用户刚设的那个不一致）。请求里没送的字段保持原值。
-            if payload.get("web_search") is None:
-                web_search = bool(latest.get("web_search", False))
-            else:
-                web_search = bool(payload.get("web_search"))
-            if payload.get("multimodal") is None:
-                multimodal = bool(latest.get("multimodal", True))
-            else:
-                multimodal = bool(payload.get("multimodal"))
-            log = EventLog(session_path, session_id)
-            try:
-                log.append(
-                    "session_tools", web_search=web_search, multimodal=multimodal
-                )
-            finally:
-                log.close()
-            self._send_json(
-                {"ok": True, "web_search": web_search, "multimodal": multimodal}
-            )
+            self._handle_session_tools(session_id, session_path, payload)
             return
 
         if path.startswith("/api/sessions/") and path.endswith("/title"):
@@ -2098,6 +2233,9 @@ class HarnessHandler(BaseHTTPRequestHandler):
                     # 会话已经删了，附件却没删掉：如实说出来，绝不假装干净。
                     # （静默降级会让"删了会话但图还在磁盘上"这件事永远没人发现。）
                     warning = str(exc)
+                # 工具配置（ADR-114）属于这个会话：一起删。文件本来就不在时
+                # delete_session 返回 False，那不算需要报告的 warning。
+                ToolConfigStore(settings.data_dir).delete_session(session_id)
                 response: dict[str, Any] = {
                     "ok": deleted,
                     "session_id": session_id,
@@ -2141,6 +2279,11 @@ class HarnessHandler(BaseHTTPRequestHandler):
                         status = 400
                         response = {"error": str(exc)}
                     else:
+                        # 工具配置跟着会话走（ADR-114）：分叉出的新会话继承
+                        # 源会话当下这份配置，而不是回默认配置重生。
+                        ToolConfigStore(settings.data_dir).copy_session(
+                            session_id, new_sid
+                        )
                         response = {
                             "ok": True,
                             "session_id": new_sid,
@@ -2439,13 +2582,14 @@ class HarnessHandler(BaseHTTPRequestHandler):
             # 会话内直接可调：前端把选中的接口/模型/档位随消息一起送上来。
             # 没送就用这个会话上次存的，再没有就用全局默认。
             stored = _session_generation(session_path)
-            # 「联网搜索」开关：前端送来就用它（新会话还没落盘，只能这样传），
-            # 否则用这个会话上次存的，再没有就默认**关**。
+            # 工具集由**会话配置**决定（ADR-114）：这一步同时是"会话出生"——
+            # 第一次调用之前把默认配置逐字复制成会话配置。请求里的旧
+            # `web_search` 字段从此被忽略（配置是唯一真相来源），保留兼容不报错。
+            tool_configs = ToolConfigStore(settings.data_dir)
+            enabled_tools = tool_configs.ensure_session(session_id)
+            # 「联网搜索」的开关态 = 配置里启用了 web_search（前端 toggle 用它显示）。
+            web_search = "web_search" in enabled_tools
             stored_tools = session_tools(session_path)
-            if payload.get("web_search") is None:
-                web_search = bool(stored_tools.get("web_search", False))
-            else:
-                web_search = bool(payload.get("web_search"))
             # 「多模态」开关（契约 §13.1）：前端送来就用它，否则用这个会话上次存的，
             # 再没有就 **默认开** —— 它等于上一轮的行为，不该因为加了个开关
             # 就悄悄改变既有会话的行为。
@@ -2560,16 +2704,17 @@ class HarnessHandler(BaseHTTPRequestHandler):
                 session_id,
                 provider=resolved.provider,
                 generation=resolved.choice,
-                web_search=web_search,
             ) as runtime:
-                # 开关变了（或新会话第一次）就记一条，刷新后前端才能恢复。
+                # 多模态开关变了就记一条，刷新后前端才能恢复（web_search 的变更
+                # 由配置保存端点记事件，这里不再重复 —— 配置才是它的真相来源）。
                 # **两个键一起写**：只写一个的话，读端会把另一个当成"没记录过"，
                 # 于是下一次请求对着默认值走，用户刚设的那个开关就悄悄失效了。
-                if stored_tools.get("web_search") != web_search or stored_tools.get(
-                    "multimodal", True
-                ) != multimodal:
+                if stored_tools.get("multimodal", True) != multimodal:
                     runtime.log.append(
-                        "session_tools", web_search=web_search, multimodal=multimodal
+                        "session_tools",
+                        web_search=web_search,
+                        multimodal=multimodal,
+                        tools=enabled_tools,
                     )
                 # 把这次的选择记进事件日志：刷新页面后下拉框才能恢复到同一个模型
                 if stored.get("model") != resolved.choice.model or stored.get(
@@ -3179,6 +3324,14 @@ def serve(
     settings = replace(settings, language=i18n.current())
     server.settings = settings
     server.verbose = verbose
+    # 工具配置完整性自检（ADR-114）：启动时校验默认配置与每个已存在会话的配置，
+    # 坏/缺的修复掉（幂等）。修复说明要落在终端上 —— 静默自愈也是一种"悄悄降级"，
+    # 用户至少该知道"他的哪份配置曾经坏过"。（控制台输出保持中文，约定见契约 §1。）
+    for kind, sid in ToolConfigStore(settings.data_dir).check_all(settings.sessions_dir):
+        if kind == "default":
+            print("  ! 默认工具配置缺失或损坏，已按全部启用重建。", flush=True)
+        else:
+            print(f"  ! 会话 {sid} 的工具配置缺失或损坏，已从默认配置重建。", flush=True)
     # port=0 由操作系统在 bind 时选空闲端口；之后必须读真实边界，不能再拿 0 拼 URL。
     bound_port = int(server.server_address[1])  # type: ignore[attr-defined]
     url = f"http://{host}:{bound_port}/"

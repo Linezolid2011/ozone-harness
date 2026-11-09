@@ -28,6 +28,7 @@ from harness.net.config import (
 )
 from harness.net.fetch import NetError, check_url, decode_text, html_to_text
 from harness.events import session_start_info
+from harness.tool_config import CHAT_TOOLS, ToolConfigStore
 from harness.net.search import (
     SearchResult,
     looks_relevant,
@@ -920,12 +921,13 @@ class DeadlineCheckTests(unittest.TestCase):
 
 
 class RuntimeWiringTests(unittest.TestCase):
-    """联网工具只给对话 agent，不给 dream —— dream 是离线巩固。
+    """工具注册由**会话配置**决定（ADR-114）：配置里有的才注册，
+    环境约束（联网依赖 / 全局开关）在"配置 ∩ 可用"里再卡一道。
 
-    并且**搜索是会话级、默认关闭**的：新会话只拿到 web_open_url，
-    用户明确打开开关后才多一个 web_search。
-    这两种权限故意分开 —— 打开用户给的链接是"读用户递过来的东西"，
-    搜索是"模型自己决定去外面找"。
+    默认配置 = 全部对话工具启用（含 web_search / web_open_url）；
+    "搜索是会话级开关"这一层现在表现为"配置里有没有 web_search 这个工具名"，
+    两种权限仍是分开的 —— 打开用户给的链接是"读用户递过来的东西"，
+    搜索是"模型自己决定去外面找"，但两者都归同一份配置文件管。
     """
 
     def setUp(self) -> None:
@@ -933,58 +935,80 @@ class RuntimeWiringTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.settings = test_settings(Path(self._tmp.name))
 
-    def make(self, **kwargs):
+    def make(self, *, web: bool = True, enabled: list[str] | None = None):
+        """构造 Runtime。`enabled` 给定则先把它写成固定会话的配置
+        （绕过"出生复制默认"，直接断言配置过滤逻辑本身）。"""
         from harness.runtime import Runtime
 
-        runtime = Runtime(self.settings, provider=mock.Mock(), **kwargs)
+        session_id = None
+        if enabled is not None:
+            session_id = "wiring-test"
+            ToolConfigStore(self.settings.data_dir).save_session(session_id, enabled)
+        runtime = Runtime(
+            self.settings, session_id, provider=mock.Mock(), web=web
+        )
         self.addCleanup(runtime.close)
         return runtime
 
-    def test_search_is_off_by_default(self) -> None:
-        """默认关闭：模型连 web_search 的工具定义都看不到。"""
+    def test_default_config_enables_everything(self) -> None:
+        """默认配置 = 全部启用（ADR-114）：什么都不动时模型两个联网工具都有。"""
         names = self.make().registry.names()
-        self.assertNotIn("web_search", names)
-        # 但"打开用户给的链接"必须还能用
+        self.assertIn("web_search", names)
         self.assertIn("web_open_url", names)
+        for name in ("mem_create", "time", "dream_read"):
+            self.assertIn(name, names)
 
-    def test_search_can_be_turned_on_per_session(self) -> None:
-        names = self.make(web_search=True).registry.names()
+    def test_session_config_filters_tools(self) -> None:
+        """配置里没有 web_search → 模型连它的工具定义都看不到。"""
+        enabled = [n for n in CHAT_TOOLS if n not in ("web_search", "web_open_url")]
+        names = self.make(enabled=enabled).registry.names()
+        self.assertNotIn("web_search", names)
+        self.assertNotIn("web_open_url", names)
+        # 配置里留下的照常注册
+        self.assertIn("mem_create", names)
+
+    def test_enabled_search_registers_search_tool(self) -> None:
+        names = self.make().registry.names()
         self.assertIn("web_search", names)
         self.assertIn("web_open_url", names)
 
-    def test_search_on_but_backend_unavailable_stays_off(self) -> None:
-        """总开关关着（或后端选了"关闭"）时，会话开关打开也没用。"""
+    def test_search_enabled_but_backend_unavailable_stays_off(self) -> None:
+        """配置允许但后端选了"关闭"：环境约束生效（配置 ∩ 可用）。"""
         store = ToolStore(self.settings.data_dir / "tools.json")
         store.save_web({"search_backend": "off"})
-        names = self.make(web_search=True).registry.names()
+        names = self.make().registry.names()
         self.assertNotIn("web_search", names)
         self.assertIn("web_open_url", names)
 
     def test_web_can_be_turned_off_entirely(self) -> None:
-        names = self.make(web=False, web_search=True).registry.names()
+        names = self.make(web=False).registry.names()
         self.assertNotIn("web_search", names)
         self.assertNotIn("web_open_url", names)
 
-    def test_prompt_says_search_is_unavailable_when_off(self) -> None:
-        """关着的时候要明确告诉模型"你没有搜索能力"，而不是留空让它猜。"""
-        text = self.make().loop.web_tools_text
+    def test_prompt_says_search_is_unavailable_when_not_configured(self) -> None:
+        """配置里没有搜索时要明确告诉模型"你没有搜索能力"，而不是留空让它猜。"""
+        enabled = [n for n in CHAT_TOOLS if n != "web_search"]
+        text = self.make(enabled=enabled).loop.web_tools_text
         self.assertIn("没有搜索能力", text)
         self.assertIn("不要凭记忆假装查证过", text)
 
-    def test_prompt_offers_search_when_on(self) -> None:
-        text = self.make(web_search=True).loop.web_tools_text
+    def test_prompt_offers_search_when_configured(self) -> None:
+        text = self.make().loop.web_tools_text
         self.assertIn("web_search", text)
         self.assertNotIn("没有搜索能力", text)
 
     def test_prompt_mentions_the_untrusted_rule(self) -> None:
-        """浏览型 agent 必须被告知：网页是资料，不是指令。关着搜索也要说。"""
-        for runtime in (self.make(), self.make(web_search=True)):
+        """浏览型 agent 必须被告知：网页是资料，不是指令。有没有搜索都要说。"""
+        for runtime in (
+            self.make(),
+            self.make(enabled=[n for n in CHAT_TOOLS if n != "web_search"]),
+        ):
             self.assertIn("外部数据", runtime.loop.web_tools_text)
             self.assertIn("绝不执行", runtime.loop.web_tools_text)
 
     def test_session_start_records_which_tools_were_available(self) -> None:
         """事件日志要能回答"那一轮它到底有没有搜索权限"。"""
-        runtime = self.make(web_search=True)
+        runtime = self.make()
         record = session_start_info(runtime.log.path)
         self.assertIn("web_search", record.get("tools") or [])
 

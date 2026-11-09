@@ -504,6 +504,35 @@ class SessionToolsTests(ModalityCase):
             session_tools(log.path), {"multimodal": False, "web_search": True}
         )
 
+    # -- ADR-114：`tools` 键（启用名单）各判各的 -----------------------------
+
+    def test_tools_key_is_read_when_present(self) -> None:
+        log = self.log()
+        log.append(
+            "session_tools", web_search=True, multimodal=True, tools=["mem_create", "time"]
+        )
+        self.assertEqual(session_tools(log.path)["tools"], ["mem_create", "time"])
+
+    def test_old_events_without_tools_key_leave_it_absent(self) -> None:
+        """老事件没有这个键 —— 读端不许瞎补（缺键 = 没记录过）。"""
+        log = self.log()
+        log.append("session_tools", web_search=True, multimodal=True)
+        self.assertNotIn("tools", session_tools(log.path))
+
+    def test_a_later_event_without_tools_key_keeps_the_earlier_list(self) -> None:
+        log = self.log()
+        log.append("session_tools", tools=["mem_create"])
+        log.append("session_tools", web_search=False, multimodal=False)
+        self.assertEqual(session_tools(log.path)["tools"], ["mem_create"])
+
+    def test_malformed_tools_list_does_not_break_the_view(self) -> None:
+        """名单只是审计线索：坏项丢弃、坏形状整条作废，不能拖垮整个会话视图。"""
+        log = self.log()
+        log.append("session_tools", tools=["mem_create", 7, None])
+        self.assertEqual(session_tools(log.path)["tools"], ["mem_create"])
+        log.append("session_tools", tools="not-a-list")
+        self.assertEqual(session_tools(log.path)["tools"], ["mem_create"])
+
 
 # --------------------------------------------------------------------------
 # OCR 的审计痕迹（与联网那条同形，只留痕不拦截）

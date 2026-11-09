@@ -574,6 +574,43 @@ html, body {
   display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px;
 }
 
+/* ── 工具配置弹窗（ADR-114）─────────────────────────────
+   比通用对话框窄高：清单可能 13 项，固定上限 + 内部滚动，
+   避免小屏上弹窗顶着输入区、关不掉的观感。 */
+.toolcfg-card { max-width: 420px; }
+.toolcfg-target {
+  font-size: 12px; color: var(--muted); margin: -6px 0 10px;
+}
+.toolcfg-search {
+  width: 100%; box-sizing: border-box; padding: 7px 10px;
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--bg-soft); color: var(--text); font-size: 13px; font-family: inherit;
+}
+.toolcfg-search:focus { outline: none; border-color: var(--accent, #4f6ef7); }
+.toolcfg-list {
+  margin-top: 10px; max-height: 300px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.toolcfg-item {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 10px; cursor: pointer; font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+.toolcfg-item:last-child { border-bottom: none; }
+.toolcfg-item:hover { background: var(--bg-soft); }
+.toolcfg-item input[type="checkbox"] { margin-top: 2px; accent-color: var(--accent, #4f6ef7); }
+.toolcfg-item .toolcfg-name { font-weight: 500; }
+.toolcfg-item .toolcfg-id {
+  font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--muted);
+}
+.toolcfg-item .toolcfg-hint {
+  display: block; font-size: 12px; color: var(--muted); margin-top: 2px;
+}
+.toolcfg-empty {
+  padding: 18px 10px; text-align: center; color: var(--muted); font-size: 12.5px;
+}
+.toolcfg-count { margin-top: 8px; font-size: 12px; color: var(--muted); }
+
 /* ── 大图预览（灯箱）─────────────────────────────────────
    点背景或按 ESC 关闭；不开新窗口（window.open 会丢焦点，受限环境里也开不出来）。 */
 

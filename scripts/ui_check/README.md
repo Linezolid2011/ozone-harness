@@ -111,6 +111,11 @@ node scripts\ui_check\shot.mjs http://127.0.0.1:8791 .tmp-ui-check\shots
 `docs/screenshots/`**（README 的「图片附件」与「多模态开关与 OCR」两节引的就是它们），
 因为它们就是给文档用的那两张。
 
+**第 8 张是工具条小图 `chat-web-toggle.png`**（ADR-114，直接写进
+`docs/screenshots/`，`docs/09-web-tools.md` 引用的就是它）：只拍中文那一遍，
+裁 `.topbar-right` 那一条。拍之前断言「工具」按钮与两个开关的文字都在条上 —
+— 形状不对就抛错、不写文件。
+
 **第 6 张是「设置 → 提示词」页**（契约 `docs/13-prompts-page.md` ＋ 可编辑那份
 `docs/14-editable-prompts.md` §8）：**五张** ——
 **浅色 `prompts-page.png` ＋深色 `prompts-page-dark.png`**（这两张拍的都是**默认态**：
@@ -151,6 +156,10 @@ node scripts\ui_check\shot.mjs http://127.0.0.1:8791 .tmp-ui-check\shots
 收尾那一轮（ADR-095：前端 9 个 bug）再 **+31 → 527**，ADR-096（侧栏显示版本号）**+4 → 531**：会话切换竞态、工厂重置后清屏、
 上传不覆盖 `sessionId`、SSE 逐帧隔离与缺省值、用量页容错、i18n 漏翻三处、
 `#settings-meta` 串页、顶栏标题、两处 `innerHTML` 加固。**12 组变异验证**都实跑过。
+ADR-114（工具配置弹窗，1.2.2-rc1）再 **+16 → 594**（旧基线 578）：弹窗打开 GET 回填 /
+搜索过滤（名字 + 中文显示名 + 无匹配提示）/ 有改动关闭才 POST、新对话空态编辑默认配置
+（不带 `session_id`）、联网开关改走 `/api/tools/config`（web_search 与 web_open_url 同进同出）。
+顺带改掉两条旧断言：`/api/chat` 请求体不再带 `web_search`（配置是唯一真相来源）。
 **变异验证三条都实跑过**：① 删掉"重复 id 就拒绝"那段 → 「重复的模型 id」那条红
 （并且它后面的 4 条同场景断言一起没跑，那一轮总数 486）；② 把"新行挂进表格"那一句
 去掉 → 「加一行」那条红（失败信息就是 `应该多出一行`）；③ 从 `en` 里删掉一条文案

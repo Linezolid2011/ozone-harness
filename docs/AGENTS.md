@@ -55,6 +55,7 @@ harness/
   native_window.py  可选 pywebview 原生窗口外壳（ADR-112；探测/运行期失败都退浏览器）
   venv_setup.py     start.cmd 引导门：完整性探针、事务安装、暂停/取消与恢复
   cli.py            命令行入口
+  tool_config.py    工具配置文件：默认一份 + 每会话一份，出生复制、此后只听自己（ADR-114）
   i18n.py / prompts/  zh/en 两套文案与长提示词（**成对**，守卫会查键集一致）
   atomic_io.py      原子写（临时文件 + os.replace）
 web/                index.html / style.css / app.js（无构建、无框架）
@@ -85,6 +86,9 @@ scripts/ui_check/   前端自检（自写 DOM stub 跑真 app.js）、截图、�
 * **原生 zip 导入只写空 vault**（ADR-104）：逐条校验路径/符号链接/大小/图片内容，
   全过才从暂存搬入；非空要 `--yes`。
 * **SSRF 判据要自己归一化、fail-closed**（ADR-052）：不认的输入一律拒。
+* **工具配置只在出生那一刻复制默认**（ADR-114）：`data/tool_config/<会话>.json`
+  是会话的唯一真相来源，默认配置改动人已出生的会话；配置文件只存启用的工具名，
+  读接口（GET）一律不建文件，保存/出生才写。
 * **pywebview 外壳可退且不静默**（ADR-112）：没装 / 装了起不来都退浏览器标签页并
   明说；窗口关了 = 服务退出。外壳失败绝不能让服务起不来。
 

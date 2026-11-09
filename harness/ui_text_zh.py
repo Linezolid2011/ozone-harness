@@ -710,4 +710,38 @@ MESSAGES: dict[str, str] = {
     "ui.prompts.warn.missing_placeholder": (
         "这些占位符不在了，对应的内容不会再被填进来：{names}"
     ),
+    # ── 工具配置文件（ADR-114）───────────────────────────────
+    # 校验报错：保存接口回给界面的话，必须双语。
+    "ui.toolconfig.error.not_list": "工具配置必须是 JSON 字符串数组（只存启用的工具名）",
+    "ui.toolconfig.error.not_string": "工具配置里的每一项都必须是字符串（工具名）",
+    "ui.toolconfig.error.unknown": "不认识的工具名：{name}",
+    "ui.toolconfig.error.duplicate": "工具名重复：{name}",
+    "ui.toolconfig.error.write_failed": "写入后复读校验失败，请重试",
+    # 弹窗里每个工具的名字与一句话说明（GET /api/tools/config 按当前语言返回）。
+    "ui.toolconfig.names.mem_create": "新建记忆",
+    "ui.toolconfig.hints.mem_create": "把用户明确要求记住的事实写入长期记忆",
+    "ui.toolconfig.names.mem_edit": "修改记忆",
+    "ui.toolconfig.hints.mem_edit": "改写一条已有记忆的内容",
+    "ui.toolconfig.names.mem_del": "删除记忆",
+    "ui.toolconfig.hints.mem_del": "真正忘掉一条记忆",
+    "ui.toolconfig.names.time": "当前时间",
+    "ui.toolconfig.hints.time": "查询当前的日期与时间",
+    "ui.toolconfig.names.dream_list": "档案列表",
+    "ui.toolconfig.hints.dream_list": "列出背景档案里有哪些文件",
+    "ui.toolconfig.names.dream_read": "读档案",
+    "ui.toolconfig.hints.dream_read": "读取一份背景档案的内容",
+    "ui.toolconfig.names.dream_search": "检索档案",
+    "ui.toolconfig.hints.dream_search": "按关键词在背景档案里查找",
+    "ui.toolconfig.names.dream_create": "新建档案",
+    "ui.toolconfig.hints.dream_create": "在背景档案里新建一份 Markdown",
+    "ui.toolconfig.names.dream_edit": "修改档案",
+    "ui.toolconfig.hints.dream_edit": "改写背景档案里的一份文件",
+    "ui.toolconfig.names.dream_mkdir": "建档案目录",
+    "ui.toolconfig.hints.dream_mkdir": "在背景档案里创建目录",
+    "ui.toolconfig.names.dream_delete": "删除档案",
+    "ui.toolconfig.hints.dream_delete": "删除背景档案里的文件或目录",
+    "ui.toolconfig.names.web_search": "联网搜索",
+    "ui.toolconfig.hints.web_search": "用搜索引擎自己找资料（受顶栏「联网搜索」开关控制）",
+    "ui.toolconfig.names.web_open_url": "打开网页",
+    "ui.toolconfig.hints.web_open_url": "读取用户给出的链接的正文",
 }

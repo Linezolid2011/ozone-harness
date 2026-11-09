@@ -36,7 +36,16 @@ const state = {
   tools: null,           // 联网工具配置（设置 → 工具）
   memories: null,
   selection: { provider: '', model: '', effort: '' },
-  webSearch: false,      // 会话级「联网搜索」开关，默认关
+  webSearch: false,      // 「联网搜索」开关的界面镜子（= 配置里启用了 web_search，ADR-114）
+  // 工具配置（ADR-114）的界面镜子，真正的值都在服务端文件里：
+  //   toolEnabled  当前会话配置的启用名单（null = 未知/会话还没出生，用 toolDefault 回退显示）
+  //   toolDefault  默认配置的启用名单（null = 未知，按"全部启用"回退 —— 与后端 ensure_default 同语义）
+  //   toolAll      全部对话工具的展示名清单（GET /api/tools/config 的 all 字段），弹窗的清单源
+  toolEnabled: null,
+  toolDefault: null,
+  toolAll: null,
+  // 弹窗工作副本（null = 关着）：打开时 GET 同步进来，关闭时有改动才 POST 回去。
+  toolcfg: null,
   // 会话级「多模态」开关（契约 §13）：**默认开**。开 = 图片本身随请求发给模型；
   // 关 = 本机 OCR，只把识别出的文字发出去，"图片本身绝不发出去"。
   // 缺键一律当**开**（老会话沿用旧行为）—— 见 boolDefaultOn()。
@@ -547,7 +556,9 @@ async function openSession(id) {
   if (data.error) { toast(data.error); return; }
   $('chat-title').textContent = (state.sessions.find((s) => s.id === id) || {}).title || id;
   if (data.generation && data.generation.model) applySelection(data.generation);
-  state.webSearch = !!((data.tools || {}).web_search);   // 每个会话各自记着
+  state.webSearch = !!((data.tools || {}).web_search);   // 服务端已按配置优先解析
+  // 会话配置的启用名单（ADR-114；null = 还没有配置文件，弹窗/开关回退默认显示）
+  state.toolEnabled = (data.tools || {}).enabled || null;
   renderWebToggle();
   // 多模态：**缺键 = 开**（老会话沿用旧行为，契约 §13.1）
   state.multimodal = boolDefaultOn((data.tools || {}).multimodal);
@@ -607,7 +618,10 @@ function newChat() {
   $('chat-meta').textContent = '';
   const defaults = (state.providers && state.providers.default) || {};
   if (defaults.provider && defaults.model) applySelection(defaults);
-  state.webSearch = false;   // 新会话默认关（与后端默认一致）
+  // 新会话还没出生：开关显示的是**默认配置**里搜不搜（出生时会复制它）。
+  state.toolEnabled = null;
+  const base = currentToolBase() || [];
+  state.webSearch = base.includes('web_search');
   renderWebToggle();
   state.multimodal = true;   // 新会话默认**开**（契约 §13.1：它等于既有行为）
   renderMultimodalToggle();
@@ -716,9 +730,41 @@ async function persistSelection() {
   }
 }
 
+/* ── 工具配置（ADR-114）──────────────────────────────────
+   模型能用哪些工具，唯一真相是服务端的配置文件（默认一份 + 每会话一份）。
+   前端这一层只有三面镜子：联网开关（= 配置里有没有 web_search）、
+   弹窗工作副本（state.toolcfg）、以及下面这组回退函数。 */
+
+/* 当前编辑目标下的启用名单：会话态 = 会话配置（未知 → 默认 → 全启用），
+   新对话空态 = 默认配置（未知 → 全启用）。一条链回退，弹窗与开关共用，
+   不许各写一份"默认值怎么算"。 */
+function currentToolBase() {
+  const fallback = (state.toolAll || []).map((item) => item.name);
+  if (state.sessionId) {
+    return state.toolEnabled || state.toolDefault || fallback;
+  }
+  return state.toolDefault || fallback;
+}
+
+async function loadToolConfig() {
+  /* GET 同步。只读接口，后端拿不到配置时回 null —— 这里的 || 回退
+     就是"全部启用"，与后端 ensure_default 的语义严格一致。 */
+  const sessionPart = state.sessionId
+    ? `?session=${encodeURIComponent(state.sessionId)}` : '';
+  const data = await getJSON(`/api/tools/config${sessionPart}`);
+  state.toolAll = data.all || state.toolAll;
+  if (data.default) state.toolDefault = data.default;
+  if (state.sessionId) {
+    state.toolEnabled = data.session || data.default || state.toolEnabled;
+  }
+  return data;
+}
+
 /* ── 会话级「联网搜索」开关 ──────────────────────────────
-   默认关。它**只管 web_search**：web_open_url（打开用户给的链接）
-   不受影响 —— "读用户递过来的东西"和"模型自己决定去外面找"是两种权限。 */
+   它现在是"写工具配置"的快捷方式（ADR-114）：开 = 配置里加入
+   web_search + web_open_url，关 = 移除这两个（搜索与抓取一起走）。
+   还没有会话时写**默认配置** —— 与弹窗在新对话空态下编辑默认配置
+   是同一个取向；进入会话后写会话配置。 */
 
 function renderWebToggle() {
   const button = $('toggle-web-search');
@@ -739,15 +785,142 @@ function renderWebToggle() {
         : t("toggle.web.off_title")));
 }
 
+async function saveToolConfig(tools) {
+  /* 弹窗关闭与联网开关共用的保存路径：目标由"有没有会话"决定。 */
+  const payload = { tools: [...tools].sort() };
+  if (state.sessionId) payload.session_id = state.sessionId;
+  const saved = await postJSON('/api/tools/config', payload);
+  if (state.sessionId) state.toolEnabled = saved.tools;
+  else state.toolDefault = saved.tools;
+  return saved.tools;
+}
+
 async function setWebSearch(on) {
   state.webSearch = !!on;
   renderWebToggle();
-  if (!state.sessionId) return;   // 新会话还没落盘，等第一条消息一起写进日志
+  const wanted = new Set(currentToolBase() || []);
+  if (on) {
+    wanted.add('web_search');
+    wanted.add('web_open_url');
+  } else {
+    wanted.delete('web_search');
+    wanted.delete('web_open_url');
+  }
   try {
-    await postJSON(`/api/sessions/${encodeURIComponent(state.sessionId)}/tools`,
-      { web_search: !!on });
+    await saveToolConfig(wanted);
   } catch (err) {
-    toast(t("toast.save_web_failed", { msg: err.message || err }));
+    toast(t("toast.save_toolcfg_failed", { msg: err.message || err }));
+  }
+}
+
+/* ── 工具配置弹窗：搜索框 + 全部对话工具的复选清单 ─────────
+   每次**打开时 GET 同步、关闭时（有改动）POST 同步** —— 前后端只靠
+   /api/tools/config 这一个接口对账，弹窗里这份只是它的工作副本。 */
+
+function renderToolConfigCount() {
+  const cfg = state.toolcfg;
+  if (!cfg) return;
+  $('toolcfg-count').textContent = t('toolcfg.enabled_count',
+    { n: cfg.enabled.size, total: cfg.all.length });
+}
+
+function renderToolConfigPopup() {
+  const cfg = state.toolcfg;
+  if (!cfg) return;
+  $('toolcfg-title').textContent = cfg.target === 'session'
+    ? t('toolcfg.title_session') : t('toolcfg.title_default');
+  $('toolcfg-target').textContent = cfg.target === 'session'
+    ? t('toolcfg.target_session') : t('toolcfg.target_default');
+  const filter = (cfg.filter || '').trim().toLowerCase();
+  const list = $('toolcfg-list');
+  clearNode(list);
+  let shown = 0;
+  for (const item of cfg.all) {
+    if (filter && !item.name.toLowerCase().includes(filter)
+        && !(item.label || '').toLowerCase().includes(filter)) continue;
+    shown += 1;
+    const row = document.createElement('label');
+    row.className = 'toolcfg-item';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = cfg.enabled.has(item.name);
+    box.dataset.tool = item.name;
+    box.onchange = () => {
+      if (box.checked) cfg.enabled.add(item.name);
+      else cfg.enabled.delete(item.name);
+      cfg.dirty = [...cfg.enabled].sort().join() !== cfg.baseline.join();
+      renderToolConfigCount();
+    };
+    const text = document.createElement('span');
+    const nameEl = document.createElement('span');
+    nameEl.className = 'toolcfg-name';
+    nameEl.textContent = item.label || item.name;
+    const idEl = document.createElement('span');
+    idEl.className = 'toolcfg-id';
+    idEl.textContent = ` ${item.name}`;
+    const hintEl = document.createElement('span');
+    hintEl.className = 'toolcfg-hint';
+    hintEl.textContent = item.hint || '';
+    text.appendChild(nameEl);
+    text.appendChild(idEl);
+    text.appendChild(hintEl);
+    row.appendChild(box);
+    row.appendChild(text);
+    list.appendChild(row);
+  }
+  if (!shown) {
+    const empty = document.createElement('div');
+    empty.className = 'toolcfg-empty';
+    empty.textContent = t('toolcfg.empty');
+    list.appendChild(empty);
+  }
+  renderToolConfigCount();
+}
+
+let toolcfgOnKey = null;
+
+async function openToolConfig() {
+  if (state.toolcfg) return;   // 已经开着（按钮连点不该起两个副本）
+  try {
+    await loadToolConfig();
+  } catch (err) {
+    toast(t('toast.load_toolcfg_failed', { msg: err.message || err }));
+    return;
+  }
+  const base = currentToolBase() || [];
+  state.toolcfg = {
+    all: state.toolAll || [],
+    enabled: new Set(base),
+    baseline: [...base].sort(),
+    target: state.sessionId ? 'session' : 'default',
+    dirty: false,
+    filter: '',
+  };
+  $('toolcfg-search').value = '';
+  renderToolConfigPopup();
+  $('toolcfg').classList.remove('hidden');
+  toolcfgOnKey = (event) => { if (event.key === 'Escape') closeToolConfig(); };
+  document.addEventListener('keydown', toolcfgOnKey);
+}
+
+async function closeToolConfig() {
+  const cfg = state.toolcfg;
+  if (!cfg) return;
+  state.toolcfg = null;
+  $('toolcfg').classList.add('hidden');
+  if (toolcfgOnKey) {
+    document.removeEventListener('keydown', toolcfgOnKey);
+    toolcfgOnKey = null;
+  }
+  if (!cfg.dirty) return;   // 没动过 = 没有需要对账的；同步发生在打开那一次
+  try {
+    const saved = await saveToolConfig(cfg.enabled);
+    /* 联网开关的显示 = 保存后的配置里有没有 web_search（它是配置里
+       两个工具名的快捷方式，两边永远一起动）。 */
+    state.webSearch = saved.includes('web_search');
+    renderWebToggle();
+  } catch (err) {
+    toast(t('toast.save_toolcfg_failed', { msg: err.message || err }));
   }
 }
 
@@ -1657,8 +1830,9 @@ async function send() {
     provider: state.selection.provider,
     model: state.selection.model,
     effort: state.selection.effort,
-    web_search: !!state.webSearch,   // 新会话还没落盘，开关只能随消息传上去
-    // 与 web_search 平级、同样随每一条消息传（契约 §13.1）。
+    // ADR-114：web_search 不再是随消息的字段 —— 模型能用哪些工具由配置文件
+    // 决定（新会话出生那一刻复制默认配置；出生前的开关动作直接写默认配置）。
+    // 与 multimodal 平级、同样随每一条消息传（契约 §13.1）。
     // 它决定**图片怎么进请求**：true = 图片本身发出去；false = 只发服务端 OCR 的文字。
     multimodal: !multimodalTextOnly(),
   };
@@ -6083,6 +6257,9 @@ async function init() {
   state.timezone = (state.config || {}).timezone ?? 8;
   // 单轮最大输出从 /api/config 读初值（默认 5000；-1 = 不限），设置 → 常规 里改
   state.maxOutputTokens = (state.config || {}).max_output_tokens ?? 5000;
+  // 工具配置（ADR-114）初值：只读 GET，拿不到时开关/弹窗用"全部启用"回退，
+  // 打开弹窗时还会再同步一次 —— 这里的失败不该挡住整个初始化。
+  loadToolConfig().catch(() => {});
   // 静态字（含 <title> 与 <html lang>）：先把页面壳换成该显示的语言，再往下画
   applyStaticTexts();
   // 「有没有可用模型」这个判据由 renderBrandAndHint 一起算好返回（见它的注释）
@@ -6142,6 +6319,17 @@ async function init() {
   $('toggle-web-search').onclick = () => setWebSearch(!state.webSearch);
   // busy 时也让它可切：切了影响的是**下一条**消息（与联网开关同一个语义，契约 §13.7-6）
   $('toggle-multimodal').onclick = toggleMultimodal;
+  // 工具配置弹窗（ADR-114）：打开即 GET 同步；关闭（含 ESC / 点遮罩）有改动才 POST。
+  $('btn-toolcfg').onclick = openToolConfig;
+  $('toolcfg-close').onclick = closeToolConfig;
+  $('toolcfg-search').addEventListener('input', () => {
+    if (!state.toolcfg) return;
+    state.toolcfg.filter = $('toolcfg-search').value;
+    renderToolConfigPopup();
+  });
+  $('toolcfg').onclick = (event) => {
+    if (event.target.id === 'toolcfg') closeToolConfig();
+  };
   $('memory-search').addEventListener('input', renderMemories);
   $('memory-reload').onclick = loadMemories;
   $('memory-limit-save').onclick = saveMemoryLimit;

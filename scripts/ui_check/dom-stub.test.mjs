@@ -402,6 +402,9 @@ function primeShell() {
     'attach', 'attach-file', 'composer-drop', 'composer-attachments',
     'lightbox', 'lightbox-img', 'lightbox-caption',
     'toggle-web-search', 'toggle-multimodal', 'chat-title', 'chat-meta',
+    // 工具配置弹窗（ADR-114；index.html 里与 #dialog 同级的那个模态）
+    'btn-toolcfg', 'toolcfg', 'toolcfg-title', 'toolcfg-target',
+    'toolcfg-search', 'toolcfg-list', 'toolcfg-count', 'toolcfg-close',
     // 输入区下方的当前会话统计条
     'session-stats', 'stats-turns', 'stats-speed', 'stats-tokens', 'stats-cache',
     'stats-context-wrap', 'stats-context', 'context-meter-fill',
@@ -433,6 +436,7 @@ function primeShell() {
   // index.html 上本来就带 `hidden` 的两个：stub 不解析 HTML，初始状态得照抄
   doc.getElementById('lightbox').classList.add('hidden');
   doc.getElementById('composer-attachments').classList.add('hidden');
+  doc.getElementById('toolcfg').classList.add('hidden');
   // 真页面上这几个是**嵌套**的（#input / 📎 / 文件选择框都在 #composer-drop 里）。
   // 拖放的 dragleave 用 `contains(relatedTarget)` 判断"还在不在输入区里"，
   // 少了这层父子关系，自检里那条"内部移动不高亮闪烁"就成了空话。
@@ -613,6 +617,9 @@ const EXPORTS = `
   // 「多模态」开关与 OCR 降级（docs/11-attachments.md §13）
   renderMultimodalToggle, setMultimodal, toggleMultimodal, applyToolsFrame,
   loadToolsPane, saveToolsPane,
+  // 工具配置弹窗（ADR-114）：打开/关闭同步、搜索过滤、联网开关写配置
+  openToolConfig, closeToolConfig, renderToolConfigPopup, saveToolConfig,
+  currentToolBase, setWebSearch, renderWebToggle, loadToolConfig,
   multimodalTextOnly, boolDefaultOn,
   ocrBlock, userBubbleNode, refreshLastUserMessage, attachmentSignature,
   multimodalBadgeText,
@@ -3853,13 +3860,13 @@ await scenario('没图时的请求体形状不变（老路径只多一个 multim
     assert.ok(sent);
     assert.equal('attachments' in sent.payload, false);
   });
-  check('七个键，一个不多一个不少（multimodal 与 web_search 平级、都在）', () => {
+  check('六个键，一个不多一个不少（ADR-114：web_search 不再随消息传，由配置文件决定）', () => {
     assert.deepEqual(Object.keys(sent.payload).sort(),
-      ['effort', 'model', 'multimodal', 'provider', 'session_id', 'text', 'web_search']);
+      ['effort', 'model', 'multimodal', 'provider', 'session_id', 'text']);
   });
   check('无图也照样带 multimodal（默认开 = true），不是"有图才发"', () => {
     assert.equal(sent.payload.multimodal, true);
-    assert.equal(sent.payload.web_search, false);
+    assert.equal('web_search' in sent.payload, false);
   });
   sse.send('session', { session_id: 'sid-plain' });
   sse.send('turn_end', { steps: 1, stop_reason: 'done', elapsed: 1, usage: { total_tokens: 1 } });
@@ -4137,12 +4144,12 @@ await scenario('发送（关着）：请求体里两个开关都在，值就是�
   await tick();
   await tick();
   const sent = sends.find((entry) => entry.url === '/api/chat');
-  check('multimodal=false 与 web_search=true 一起随消息传上去（与 web_search 平级）', () => {
+  check('multimodal=false 随消息传上去；web_search 不再随消息（ADR-114，配置是唯一真相）', () => {
     assert.ok(sent, '应该发出过 /api/chat');
     assert.equal(sent.payload.multimodal, false);
-    assert.equal(sent.payload.web_search, true);
+    assert.equal('web_search' in sent.payload, false);
     assert.deepEqual(Object.keys(sent.payload).sort(),
-      ['attachments', 'effort', 'model', 'multimodal', 'provider', 'session_id', 'text', 'web_search']);
+      ['attachments', 'effort', 'model', 'multimodal', 'provider', 'session_id', 'text']);
     assert.deepEqual(sent.payload.attachments, [{ id: item.id, ext: item.ext, name: item.name }]);
   });
 
@@ -5441,7 +5448,9 @@ await scenario('静态检查：附件入口与会话统计条存在，旧输入�
     const multi = html.indexOf('id="toggle-multimodal"');
     assert.ok(multi > web, '它应当排在「联网搜索」之后（同一个 .topbar-right 里）');
     assert.match(html.slice(multi - 200, multi), /class="web-toggle on"/);
-    assert.match(html.slice(multi, multi + 200), /<span class="dot"><\/span><span class="label">多模态<\/span>/);
+    // 窗口取 320：autocrlf=true 的 worktree 上这个距离会随 \r 浮动，
+    // 断言的是"圆点+标签就在这个按钮里"，不是"300 字符以内"这种实现细节。
+    assert.match(html.slice(multi, multi + 320), /<span class="dot"><\/span><span class="label">多模态<\/span>/);
   });
   check('统计条位于 composer 内、输入框之后', () => {
     const composer = html.indexOf('class="composer" id="composer-drop"');
@@ -7511,6 +7520,193 @@ await scenario('原生：raw 图片嵌入 / path|alias 双链 / 生成物只读'
     assert.ok(!actions.includes('删除'), '生成物不该有删除按钮');
     const note = findEl(viewer, (n) => n.classList.contains('vault-view-note'));
     assert.ok(note && note.textContent.includes('生成'));
+  });
+});
+
+/* ── 工具配置弹窗（ADR-114）────────────────────────────── */
+
+const TOOLCFG_ALL = [
+  { name: 'dream_create', label: '新建档案', hint: '在背景档案里新建一份 Markdown' },
+  { name: 'dream_delete', label: '删除档案', hint: '删除背景档案里的文件或目录' },
+  { name: 'dream_edit', label: '修改档案', hint: '改写背景档案里的一份文件' },
+  { name: 'dream_list', label: '档案列表', hint: '列出背景档案里有哪些文件' },
+  { name: 'dream_mkdir', label: '建档案目录', hint: '在背景档案里创建目录' },
+  { name: 'dream_read', label: '读档案', hint: '读取一份背景档案的内容' },
+  { name: 'dream_search', label: '检索档案', hint: '按关键词在背景档案里查找' },
+  { name: 'mem_create', label: '新建记忆', hint: '把用户明确要求记住的事实写入长期记忆' },
+  { name: 'mem_del', label: '删除记忆', hint: '真正忘掉一条记忆' },
+  { name: 'mem_edit', label: '修改记忆', hint: '改写一条已有记忆的内容' },
+  { name: 'time', label: '当前时间', hint: '查询当前的日期与时间' },
+  { name: 'web_open_url', label: '打开网页', hint: '读取用户给出的链接的正文' },
+  { name: 'web_search', label: '联网搜索', hint: '用搜索引擎自己找资料' },
+];
+
+await scenario('工具配置弹窗（ADR-114）：打开 GET 回填 / 搜索过滤 / 关闭 POST 同步', async () => {
+  app.setLanguageNow('zh');
+  app.state.sessionId = 's-toolcfg';
+  app.state.toolEnabled = null;
+  app.state.toolDefault = null;
+  app.state.toolAll = null;
+  posts = {
+    '/api/tools/config': (payload) => ({ status: 200, body: { ok: true, tools: payload.tools } }),
+  };
+  fixture = (url) => {
+    if (url === '/api/tools/config?session=s-toolcfg') {
+      return {
+        status: 200,
+        body: {
+          default: ['mem_create', 'mem_del', 'time'],
+          session: ['mem_create', 'time'],
+          all: TOOLCFG_ALL,
+          web_enabled: true,
+          web_search_available: true,
+        },
+      };
+    }
+    return { status: 404, body: { error: `没有这个夹具：${url}` } };
+  };
+  await app.openToolConfig();
+  const rows = () => shell('toolcfg-list').children;
+  const boxOf = (name) => rows().map((row) => row.children[0]).find((box) => box.dataset.tool === name);
+  check('打开即 GET 同步：弹窗可见、标题说的是**当前会话**', () => {
+    assert.equal(shell('toolcfg').classList.contains('hidden'), false);
+    assert.ok(shell('toolcfg-title').textContent.includes('这个会话'));
+    assert.ok(shell('toolcfg-target').textContent.includes('当前会话'));
+  });
+  check('按会话配置回填勾选（mem_create + time），其余不勾', () => {
+    assert.equal(rows().length, TOOLCFG_ALL.length);
+    const checked = rows().map((row) => row.children[0]).filter((box) => box.checked)
+      .map((box) => box.dataset.tool);
+    assert.deepEqual(checked.sort(), ['mem_create', 'time']);
+  });
+  check('计数行显示 n/total', () => {
+    assert.ok(shell('toolcfg-count').textContent.includes('2/13'), shell('toolcfg-count').textContent);
+  });
+
+  app.state.toolcfg.filter = 'web';
+  app.renderToolConfigPopup();
+  check('搜索框按名字过滤（web → 两个联网工具）', () => {
+    assert.equal(rows().length, 2);
+  });
+  app.state.toolcfg.filter = '记忆';
+  app.renderToolConfigPopup();
+  check('搜索也命中中文显示名（记忆 → 记忆三件套）', () => {
+    assert.equal(rows().length, 3);
+  });
+  app.state.toolcfg.filter = 'zzzz';
+  app.renderToolConfigPopup();
+  check('无匹配时给"没有匹配的工具"，不是空框', () => {
+    assert.equal(rows().length, 1);
+    assert.ok(rows()[0].textContent.includes('没有匹配的工具'));
+  });
+
+  app.state.toolcfg.filter = '';
+  app.renderToolConfigPopup();
+  boxOf('mem_edit').checked = true;
+  boxOf('mem_edit').onchange();
+  boxOf('time').checked = false;
+  boxOf('time').onchange();
+  check('勾选/取消只改工作副本，还没发请求', () => {
+    assert.equal(sends.filter((entry) => entry.url === '/api/tools/config').length, 0);
+    assert.equal(app.state.toolcfg.dirty, true);
+  });
+  await app.closeToolConfig();
+  check('关闭（有改动）POST 回 /api/tools/config：带 session_id、名单是改后形状', () => {
+    const sent = sends.find((entry) => entry.url === '/api/tools/config');
+    assert.ok(sent, '应该发出过保存请求');
+    assert.equal(sent.payload.session_id, 's-toolcfg');
+    assert.deepEqual(sent.payload.tools, ['mem_create', 'mem_edit']);
+    assert.equal(shell('toolcfg').classList.contains('hidden'), true);
+  });
+  check('保存后 state.toolEnabled 更新（下次打开的基线）', () => {
+    assert.deepEqual(app.state.toolEnabled, ['mem_create', 'mem_edit']);
+  });
+
+  // 没改动就关闭：不发 POST
+  const before = sends.length;
+  await app.openToolConfig();
+  await app.closeToolConfig();
+  check('没改动就关闭：GET 同步过就够，不再 POST', () => {
+    assert.equal(sends.length, before);
+  });
+});
+
+await scenario('工具配置弹窗：新对话空态编辑的是**默认配置**（不带 session_id）', async () => {
+  app.setLanguageNow('zh');
+  app.state.sessionId = null;
+  app.state.toolDefault = null;
+  fixture = (url) => {
+    if (url === '/api/tools/config') {
+      return {
+        status: 200,
+        body: {
+          default: ['mem_create', 'time'],
+          session: null,
+          all: TOOLCFG_ALL,
+          web_enabled: true,
+          web_search_available: true,
+        },
+      };
+    }
+    return { status: 404, body: { error: `没有这个夹具：${url}` } };
+  };
+  await app.openToolConfig();
+  check('标题/副标题说的是默认配置（新会话）', () => {
+    assert.ok(shell('toolcfg-title').textContent.includes('新会话'));
+    assert.ok(shell('toolcfg-target').textContent.includes('默认配置'));
+  });
+  boxChecked('mem_del', true);
+  await app.closeToolConfig();
+  check('保存**默认配置**：请求体不带 session_id', () => {
+    const sent = sends.filter((entry) => entry.url === '/api/tools/config').pop();
+    assert.ok(sent);
+    assert.equal('session_id' in sent.payload, false);
+    assert.deepEqual(sent.payload.tools, ['mem_create', 'mem_del', 'time']);
+  });
+  check('保存后 state.toolDefault 更新', () => {
+    assert.deepEqual(app.state.toolDefault, ['mem_create', 'mem_del', 'time']);
+  });
+});
+
+function boxChecked(name, value) {
+  const box = shell('toolcfg-list').children.map((row) => row.children[0])
+    .find((item) => item.dataset.tool === name);
+  assert.ok(box, `找不到工具 ${name} 的复选框`);
+  box.checked = value;
+  box.onchange();
+}
+
+await scenario('联网搜索开关（ADR-114）：写工具配置，不再打旧的 /tools 端点', async () => {
+  app.setLanguageNow('zh');
+  app.state.config = { web_enabled: true, web_search_available: true };
+  posts = {
+    '/api/tools/config': (payload) => ({ status: 200, body: { ok: true, tools: payload.tools } }),
+  };
+  fixture = (url) => ({ status: 404, body: { error: `没有这个夹具：${url}` } });
+
+  app.state.sessionId = 's-toggle';
+  app.state.toolEnabled = ['mem_create'];
+  await app.setWebSearch(true);
+  check('会话里开：web_search 与 web_open_url 一起进配置（带 session_id）', () => {
+    const sent = sends.filter((entry) => entry.url === '/api/tools/config').pop();
+    assert.ok(sent);
+    assert.equal(sent.payload.session_id, 's-toggle');
+    assert.deepEqual(sent.payload.tools, ['mem_create', 'web_open_url', 'web_search']);
+  });
+
+  await app.setWebSearch(false);
+  check('会话里关：两个联网工具一起移除', () => {
+    const sent = sends.filter((entry) => entry.url === '/api/tools/config').pop();
+    assert.deepEqual(sent.payload.tools, ['mem_create']);
+  });
+
+  app.state.sessionId = null;
+  app.state.toolDefault = ['time'];
+  await app.setWebSearch(false);
+  check('新对话态：写默认配置（不带 session_id）', () => {
+    const sent = sends.filter((entry) => entry.url === '/api/tools/config').pop();
+    assert.equal('session_id' in sent.payload, false);
+    assert.deepEqual(sent.payload.tools, ['time']);
   });
 });
 

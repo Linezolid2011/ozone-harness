@@ -45,6 +45,14 @@
       <header class="topbar">
         <div class="topbar-title" id="chat-title">新对话</div>
         <div class="topbar-right">
+          <!-- 工具配置（ADR-114）：打开弹窗勾选这个会话（或新会话默认）允许模型
+               使用哪些工具。复用 web-toggle 的胶囊样式，但没有状态圆点 ——
+               它的"状态"是弹窗里那张勾选清单，不是开/关两态。 -->
+          <button class="web-toggle toolcfg-entry" id="btn-toolcfg" type="button"
+                  data-i18n-title="toolcfg.title_attr"
+                  title="配置这个会话允许模型使用哪些工具">
+            <span class="label" data-i18n="toolcfg.button">工具</span>
+          </button>
           <select class="picker" id="pick-model"
                   data-i18n-title="picker.model_title" title="选择接口与模型"></select>
           <select class="picker" id="pick-effort"
@@ -306,6 +314,24 @@
     <div class="modal-actions">
       <button class="btn-ghost" id="dialog-cancel" data-i18n="dialog.cancel">取消</button>
       <button class="btn-danger" id="dialog-confirm" data-i18n="dialog.confirm">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 工具配置弹窗（ADR-114）：搜索框 + 全部对话工具的复选清单。
+     每次**打开时 GET 同步、关闭时（有改动）POST 同步** —— 前后端只靠
+     /api/tools/config 这一个接口对账，弹窗里这份只是它的工作副本。 -->
+<div class="modal hidden" id="toolcfg">
+  <div class="modal-card toolcfg-card">
+    <div class="modal-title" id="toolcfg-title"></div>
+    <div class="toolcfg-target" id="toolcfg-target"></div>
+    <input type="text" class="toolcfg-search" id="toolcfg-search"
+           data-i18n-placeholder="toolcfg.search_placeholder"
+           placeholder="搜索工具名…">
+    <div class="toolcfg-list" id="toolcfg-list"></div>
+    <div class="toolcfg-count" id="toolcfg-count"></div>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="toolcfg-close" data-i18n="toolcfg.close">完成</button>
     </div>
   </div>
 </div>

@@ -527,7 +527,7 @@ def _last_summary(events: list[dict[str, Any]]) -> tuple[str, CoveredMark]:
     return summary, mark
 
 
-def session_tools(path: Path) -> dict[str, bool]:
+def session_tools(path: Path) -> dict[str, Any]:
     """读会话里**最后一次**生效的工具开关。
 
     这是"这个会话能不能联网搜索、发不发图片"的唯一真相来源（追加式，最后一条为准）。
@@ -538,14 +538,22 @@ def session_tools(path: Path) -> dict[str, bool]:
     `multimodal` 是 M9 加的，老会话的 `session_tools` 事件里根本没有这个键，
     所以两个键要各判各的：一条老事件不该把 `web_search` 的历史读丢，
     一条只写了 `multimodal` 的新事件也不该顺手把 `web_search` 变成默认值。
+
+    `tools`（ADR-114，启用的工具名名单）同理：只有事件里真的写了它才更新，
+    老事件缺这个键不影响；读出的名单逐项校验类型，坏项丢弃 —
+    — 名单只是审计线索，配置文件才是真相来源，坏一条不该拖垮整个会话视图。
     """
-    latest: dict[str, bool] = {}
+    latest: dict[str, Any] = {}
     for record in read_events(path):
         if record.get("kind") == "session_tools":
             if "web_search" in record:
                 latest["web_search"] = bool(record.get("web_search"))
             if "multimodal" in record:
                 latest["multimodal"] = bool(record.get("multimodal"))
+            if "tools" in record:
+                raw = record.get("tools")
+                if isinstance(raw, list):
+                    latest["tools"] = [str(v) for v in raw if isinstance(v, str)]
     return latest
 
 
